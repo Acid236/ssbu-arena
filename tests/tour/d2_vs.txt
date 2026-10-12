@@ -1,0 +1,6 @@
+# D2 probe: VS -> rules -> stage select -> character select, then idle (baseline for d2_classic)
+%include _to_rules.txt
+40:Z
+@draws:270-295/40 30:Z
+@draws:175-205/60
+6000

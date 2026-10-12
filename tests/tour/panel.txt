@@ -1,0 +1,1 @@
+%include ../paths/side_panel_tour.txt

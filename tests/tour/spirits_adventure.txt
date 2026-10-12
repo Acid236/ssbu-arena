@@ -1,0 +1,3 @@
+# Spiriti -> Avventura: start the adventure (first A), then A through the intro
+%include ../paths/_main_menu.txt
+40:d 40:Z 300 40:Z 600 60:Z 300 60:Z 300 60:Z 300 60:Z 300

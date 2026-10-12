@@ -1,0 +1,132 @@
+"""Generates eh_tests.h: what the personality must answer for every call-site record of main's exception tables,
+decoded here from the ELF file (independently of the C implementation in nncxxrt.c), for two thrown types:
+A = std::out_of_range, B = std::ios_base::failure (the only type main names in a catch clause)."""
+import struct
+import recomp
+IMG, OFF, BASE = recomp.IMG, recomp.FILE_OFF, recomp.BASE
+def u32(o): return struct.unpack_from('<I', IMG, OFF + o)[0]
+def s32(o): return struct.unpack_from('<i', IMG, OFF + o)[0]
+def u64(o): return struct.unpack_from('<Q', IMG, OFF + o)[0]
+def uleb(o):
+    r = s = 0
+    while True:
+        b = IMG[OFF + o]; o += 1
+        r |= (b & 0x7f) << s; s += 7
+        if not b & 0x80: return r, o
+def sleb(o):
+    r = s = 0
+    while True:
+        b = IMG[OFF + o]; o += 1
+        r |= (b & 0x7f) << s; s += 7
+        if not b & 0x80:
+            if b & 0x40: r -= 1 << s
+            return r, o
+RELOC = {}
+for tbl, size in ((0x39c8070, 0x7ad0d8), (0x4175148, 0xc600)):
+    for i in range(size // 24):
+        off, info, addend = struct.unpack_from('<QQq', IMG, OFF + tbl + i * 24)
+        t = info & 0xffffffff
+        if t == 0x403: RELOC[off] = addend
+        else:
+            no, _, _, shndx, value, _ = struct.unpack_from('<IBBHQQ', IMG, OFF + recomp.SYMTAB + (info >> 32) * 24)
+            s = OFF + recomp.STRTAB + no
+            RELOC[off] = (value + (addend if t == 0x101 else 0)) if shndx else IMG[s:IMG.index(bytes(1), s)].decode('latin-1')
+def enc(o, e):
+    f = e & 0x0f
+    if f in (0, 4): v = u64(o); n = 8
+    elif f == 0xc: v = struct.unpack_from('<q', IMG, OFF + o)[0]; n = 8
+    elif f == 3: v = u32(o); n = 4
+    elif f == 0xb: v = s32(o); n = 4
+    elif f == 1: v, o2 = uleb(o); n = o2 - o
+    else: raise ValueError(hex(e))
+    if v == 0: return 0, o + n
+    if (e & 0x70) == 0x10: v += o
+    if e & 0x80: v = RELOC.get(v, 0)
+    return v, o + n
+
+mod0 = u32(4)
+hdr = mod0 + s32(mod0 + 0x10)
+count = u32(hdr + 8)
+IOS = '_ZTINSt3__18ios_base7failureE'
+rows, types_seen, funcs = [], set(), []
+cie_cache = {}
+for i in range(count):
+    fde = hdr + s32(hdr + 16 + i * 8)
+    cie = fde + 4 - u32(fde + 4)
+    if cie not in cie_cache:
+        p = cie + 9
+        aug = b''
+        while IMG[OFF + p]: aug += bytes([IMG[OFF + p]]); p += 1
+        p += 1
+        _, p = uleb(p); _, p = sleb(p); p += 1
+        le, fe = 0xff, 0
+        if aug[:1] == b'z':
+            _, p = uleb(p)
+            for ch in aug[1:]:
+                if ch == 76: le = IMG[OFF + p]; p += 1
+                elif ch == 82: fe = IMG[OFF + p]; p += 1
+                elif ch == 80: e = IMG[OFF + p]; p += 1; _, p = enc(p, e & 0x7f)
+        cie_cache[cie] = (le, fe)
+    le, fe = cie_cache[cie]
+    p = fde + 8
+    start, p = enc(p, fe); rng, p = enc(p, fe & 0x0f)
+    _, p = uleb(p)
+    lsda = enc(p, le)[0] if le != 0xff else 0
+    if i % 9001 == 0 or (lsda and len(funcs) < 40): funcs.append((start, start + rng, lsda))
+    if not lsda: continue
+    p = lsda
+    lpe = IMG[OFF + p]; p += 1
+    assert lpe == 0xff
+    tte = IMG[OFF + p]; p += 1
+    ttb = None
+    if tte != 0xff: v, p = uleb(p); ttb = p + v
+    cse = IMG[OFF + p]; p += 1
+    csl, p = uleb(p); cs_end = p + csl
+    tsz = 4 if (tte & 0x0f) in (3, 0xb) else 8
+    def catches(t, thrown):             # t: 0, an import name, or a game typeinfo offset
+        if t == 0: return True
+        return thrown == 'B' and t == IOS
+    while p < cs_end:
+        s, p = enc(p, cse & 0x0f); l, p = enc(p, cse & 0x0f); lp, p = enc(p, cse & 0x0f); act, p = uleb(p)
+        res = []
+        for thrown in 'AB':
+            if not lp: res.append((0, 0)); continue
+            if not act: res.append((1, 0)); continue
+            a = cs_end + act - 1
+            cleanup = False
+            ans = None
+            while True:
+                filt, a2 = sleb(a); nxt, _ = sleb(a2)
+                if filt > 0:
+                    t = enc(ttb - filt * tsz, tte)[0]
+                    types_seen.add(t)
+                    if catches(t, thrown): ans = (2, filt); break
+                elif filt < 0:
+                    q = ttb - filt - 1
+                    ok = False
+                    while True:
+                        idx, q = uleb(q)
+                        if not idx: break
+                        t = enc(ttb - idx * tsz, tte)[0]
+                        types_seen.add(t)
+                        if catches(t, thrown): ok = True; break
+                    if not ok: ans = (2, filt); break
+                else: cleanup = True
+                if not nxt: break
+                a = a2 + nxt
+            res.append(ans or ((1, 0) if cleanup else (0, 0)))
+        if l:
+            for pc in sorted({s, s + l - 4}):
+                rows.append((BASE + start + pc, BASE + start + lp if lp else 0, res))
+print('types named in catch clauses / exception specifications:', sorted(str(t) for t in types_seen))
+with open('eh_tests.h', 'w') as f:
+    f.write('/* generated by gen_eh_tests.py: do not edit */\n')
+    f.write('typedef struct { uint64_t pc, pad; signed char kind_a, sel_a, kind_b, sel_b; } EhVec;   /* thrown A = std::out_of_range, B = std::ios_base::failure */\n')
+    f.write('static const EhVec eh_vecs[] = {\n')
+    for pc, pad, res in rows:
+        ka, sa = res[0]; kb, sb = res[1]
+        f.write('{0x%xull,0x%xull,%d,%d,%d,%d},\n' % (pc, pad if ka or kb else 0, ka, sa, kb, sb))
+    f.write('};\ntypedef struct { uint64_t start, end, lsda; } EhFnVec;\nstatic const EhFnVec eh_fn_vecs[] = {\n')
+    for s, e, l in funcs: f.write('{0x%xull,0x%xull,0x%xull},\n' % (BASE + s, BASE + e, BASE + l if l else 0))
+    f.write('};\n')
+print('wrote eh_tests.h: %d call-site vectors, %d functions' % (len(rows), len(funcs)))

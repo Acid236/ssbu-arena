@@ -1,0 +1,5 @@
+# VS, rule preset 2 (time only, "Tempo: 2:30"): match with a clock
+%include _to_rules.txt
+40:d 40:Z
+%include _vs_after_rules.txt
+600

@@ -1,0 +1,5 @@
+# D2 probe 2: Giochi -> Gara di Home-Run -> In singolo, hand up-right onto Mario, A = pick, Plus = start, then A a few times
+%include ../paths/_main_menu.txt
+40:r 40:u 40:Z 300 40:d 40:r 40:Z 400 40:Z
+@draws:150-230/60
+120 30:u/36 20:r/17 30:Z 150 40:! 600 40:Z 300 40:Z 300 40:Z 2000

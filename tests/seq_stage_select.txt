@@ -1,0 +1,11 @@
+# Boot -> stage select, then wait there (bounded round 2026-10-09: the header pill "Vite: 3/Tempo: 2:30"). Same steps as
+# tests/seq_battle_play.txt up to the stage select screen (274-289 draws per frame); the run ends by its time limit.
+@movie
+@draws:22-26/30
+@until:36-44/30:Z/200
+30:Z
+@draws:700-800/40 30:Z
+150:Z
+@draws:370-400/40 30:Z
+@draws:270-295/40
+100000

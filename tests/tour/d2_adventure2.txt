@@ -1,0 +1,4 @@
+# D2 probe 2: Spiriti -> Avventura as in spirits_adventure.txt; the 172 s opening movie then plays (A and Plus do not skip it): wait for its end, then A every 5 s
+%include ../paths/_main_menu.txt
+40:d 40:Z 300 40:Z 600 60:Z 300 60:Z 300 60:Z 300 60:Z 300
+10600 300:Z 300:Z 300:Z 300:Z 300:Z 300:Z 300:Z 300:Z 300:Z 300:Z 300:Z 300:Z 300:Z 300:Z 300:Z 300:Z

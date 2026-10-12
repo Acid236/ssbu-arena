@@ -1,0 +1,3 @@
+# Giochi e altro -> Mischia multipla (below Classica): menu of mob modes
+%include ../paths/_main_menu.txt
+40:r 40:u 40:Z 300 40:d 40:Z 500 40:d 100 40:r 100 40:Z 400 40:X 300

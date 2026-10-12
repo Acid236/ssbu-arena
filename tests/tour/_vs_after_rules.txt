@@ -1,0 +1,9 @@
+# rules screen already answered with A: stage select (first stage), then character select, pick Mario, start, fight.
+@draws:270-295/40 30:Z
+@draws:175-205/60
+30:u/30 20:l/18 30:Z
+60:r/50 20:d/8 30:Z
+@draws:30-60/20
+@draws:206-450/60
+280
+60:r/50 10:Z 25:Z 25:Z 40:l/50 10:C 40:X 30:l/30 10:Z 40:r/20 5:Z 60:C/4 20:Z 40:d/20 10:X

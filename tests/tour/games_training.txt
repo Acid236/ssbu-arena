@@ -1,0 +1,10 @@
+# Giochi e altro -> Allenamento (down-left of Classica) -> stage -> character -> training stage; look, then pause menu out
+%include ../paths/_main_menu.txt
+40:r 40:u 40:Z 300 40:d 40:l 40:Z 400
+@draws:270-295/40 30:Z
+@draws:175-205/60
+30:u/30 20:l/18 30:Z 90
+60:r/50 20:d/8 30:Z
+@draws:30-60/20
+@draws:100-1000/60
+400 60:r/50 20:Z 60:l/40 20:X 60 40:! 200 40:d 100 40:d 100 40:X 200

@@ -1,0 +1,2 @@
+# Start-up check only: skip the opening movie and press A through the first menus.
+@movie 120:Z 180:Z 180:Z 180:Z 180:Z 180:Z 180:Z 180:Z 180:Z 180:Z

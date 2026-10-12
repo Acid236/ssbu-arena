@@ -1,0 +1,10 @@
+# D2 probe 2: Training as in games_training.txt, but hand straight up onto Kirby and Plus (not A on the banner) starts the session
+%include ../paths/_main_menu.txt
+40:r 40:u 40:Z 300 40:d 40:l 40:Z 400
+@draws:270-295/40 30:Z
+@draws:175-205/60
+60 30:u/26 20:r/5 30:Z 120
+40:! 
+@draws:30-60/20
+@draws:100-1000/60
+400 60:r/50 20:Z 60:l/40 20:X 600

@@ -1,0 +1,4 @@
+# main menu -> Smash -> Incontro normale -> rules screen (370-400 draws)
+%include ../paths/_main_menu.txt
+40:Z 150:Z
+@draws:370-400/40 60

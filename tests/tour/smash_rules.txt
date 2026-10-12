@@ -1,0 +1,4 @@
+# Smash > Incontro normale > rules screen, move around, back out
+%include ../paths/_main_menu.txt
+40:Z 150:Z
+@draws:370-400/40 60 40:d 60 40:d 60 40:u 60 40:r 60 40:r 60 40:l 60 40:l 60 40:u 60 40:u 60 40:X 200

@@ -1,0 +1,1 @@
+%include ../paths/games_tour_b.txt

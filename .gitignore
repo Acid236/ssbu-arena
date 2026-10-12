@@ -1,0 +1,70 @@
+# The firewall: nothing derived from the game or from the console's software is ever committed.
+# Everything below is produced on your PC from your own dump.
+
+# dumps, keys, firmware, save data
+*.nsp
+*.xci
+*.nca
+*.nso
+*.nro
+*.elf
+*.arc
+*.keys
+*.bfttf
+binaries/
+romfs/
+sysdata/
+userdata*/
+htmldoc/
+
+# lifted (recompiled) code and everything built from it
+gen*/
+obj*/
+nro_bin*/
+*.dll
+*.exe
+*.obj
+*.o
+*.lib
+*.pdb
+*.exp
+runtime/sdklift_gen.c
+runtime/sdkdata.c
+runtime/sdklift_install.h
+runtime/zstd_gen.c
+runtime/nro_registry.c
+runtime/fake_whitelist.h
+runtime/fake_openlist.h
+tools/lifter/difftest_gen.c
+tools/lifter/eh_tests.h
+tools/lifter/quad_tests.h
+
+# fighter sources generated from the game's script modules
+fighters/
+fighters_bin*/
+fighter_sdk/include/lua_const.h
+fighter_sdk/include/lua_bind.h
+fighter_sdk/src/fs_syms.inc
+fighter_sdk/tools/out/
+fighter_sdk/tools/census_all.json
+
+# shaders, caches, captures, logs
+shader_*/
+cache/
+tests/**/out/
+tests/logs/
+tests/**/golden/
+*.bmp
+*.png
+*.spv
+*.log
+trace_*.txt
+!media/*.png
+
+# everything scripts/setup.py produces from your dump, and tools you put in deps/
+build/
+deps/
+
+# local configuration
+config/
+__pycache__/

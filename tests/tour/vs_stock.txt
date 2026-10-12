@@ -1,0 +1,5 @@
+# VS, rule preset 1 (3 stock + 2:30), A on the preset the cursor starts on
+%include _to_rules.txt
+40:Z
+%include _vs_after_rules.txt
+600

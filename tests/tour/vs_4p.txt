@@ -1,0 +1,8 @@
+# character select: try to add CPUs in slots 3 and 4 with the single scripted pad (hand to the right, A on each panel)
+%include _to_rules.txt
+40:Z
+@draws:270-295/40 30:Z
+@draws:175-205/60
+60 30:r/25 60 20:Z 60 30:r/25 60 20:Z 60 30:r/25 60 20:Z 60 30:r/25 60 20:Z 90
+30:u/30 20:l/18 30:Z 90
+60:r/50 20:d/8 30:Z 120 60:d/40 20:Z 150
