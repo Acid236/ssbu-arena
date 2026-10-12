@@ -1,0 +1,3 @@
+# S9: rules screen -> C (X button = Modifica popup) -> Z on "Modifica" -> walk the editor downward to find the item switch
+%include _to_rules.txt
+40:C 60 40:Z 200 40:d 60 40:d 60 40:d 60 40:d 60 40:d 60 40:d 60 40:d 60 40:d 60 40:d 60 40:d 60 40:d 60 40:d 60 40:d 60 40:d 60 120

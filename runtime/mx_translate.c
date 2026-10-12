@@ -38,6 +38,7 @@ typedef struct {
     uint32_t gubos;                           /* compute: uniform buffers reached through global memory */
     unsigned smem_words;
     int uses_smem;
+    int uses_fcs, uses_tf;                    /* MxIn.screen_scale: gl_FragCoord.xy was scaled / a texelFetch was mapped */
     uint32_t images, images_read, images_written;
     uint16_t image_fmt[8]; uint8_t image_type[8];
     uint32_t *jt;                             /* static jump target of SYNC / BRK / CONT */
@@ -198,6 +199,7 @@ static const char *attr_in(Mx *e, unsigned a, int vertex_reg_ok) {
         return S(e, "U(in_attr%u[%u])", n, c);
     }
     if (st == MX_FRAGMENT) {
+        if (a >= 0x70 && a < 0x80 && c < 2 && e->in->screen_scale && e->in->target == 1) { e->uses_fcs = 1; return S(e, "U(gl_FragCoord[%u] * mx_fcs)", c); }      /* track O: the game's pixel position */
         if (a >= 0x70 && a < 0x80) return S(e, "U(gl_FragCoord[%u])", c);
         if (a == 0x3fc) return "(gl_FrontFacing ? 0xffffffffu : 0u)";
         if ((a == 0x2e0 || a == 0x2e4) && e->in->target == 1 && c == 1) return "U(1.0 - gl_PointCoord[1])";      /* Vulkan: t runs the other way (flipped viewport) */
@@ -385,6 +387,18 @@ static void op_texs(Mx *e, uint64_t i) {
     tex_store_pair(e, mask, rd0, rd1, !MXB(i, 59, 1), is_int);
 }
 
+/* Track O (MxIn.screen_scale, fragment stage): the integer coordinates of a texelFetch from a 2D sampler are in the game's
+ * texel grid; the image may be smaller (internal resolution scale). mx_tf maps them with the ratio real size / the size
+ * the game was told (c2 words 96 + 4u, the table TXQ reads); it returns them unchanged when the two are equal. An offset
+ * is added first (then *off is cleared). */
+static const char *tf_scaled(Mx *e, int unit, const char *smp, const char *coords, const char **off) {
+    if (!e->in->screen_scale || e->in->target != 1 || e->in->stage != MX_FRAGMENT) return coords;
+    unsigned w = 96 + 4 * (unsigned)unit;
+    e->uses_tf = 1; e->cbufs |= 4;
+    if (off && *off) { coords = S(e, "(%s + %s)", coords, *off); *off = NULL; }
+    return S(e, "mx_tf(%s, textureSize(%s, 0), c2[%uu], c2[%uu])", coords, smp, w, w + 1);
+}
+
 /* TLD (bound): integer coords, [lod] [offset] [sample] from Rb */
 static void op_tld(Mx *e, uint64_t i) {
     unsigned t = MXB(i, 28, 3), mask = MXB(i, 31, 4), c = MXB(i, 8, 8), meta = MXB(i, 20, 8), ms = MXB(i, 50, 1);
@@ -403,6 +417,7 @@ static void op_tld(Mx *e, uint64_t i) {
     const char *lod = MXB(i, 55, 1) ? IR(e, meta++) : "0", *off = MXB(i, 35, 1) ? tex_offset(e, t, X(e, meta++), 4) : NULL, *smpl = ms ? IR(e, meta++) : NULL;
     int is_int = tex_is_int(e, unit, 0);
     const char *smp = SMP(e, unit, base, 0), *call;
+    if (t == 2 && !ms) coords = tf_scaled(e, unit, smp, coords, &off);
     if (ms) call = S(e, "texelFetch(%s, %s, %s)", smp, coords, smpl);
     else call = off ? S(e, "texelFetchOffset(%s, %s, %s, %s)", smp, coords, lod, off) : S(e, "texelFetch(%s, %s, %s)", smp, coords, lod);
     emit(e, "%s%s;", tv_decl(is_int, e->in->sint_tex >> unit & 1), call);
@@ -422,13 +437,20 @@ static void op_tlds(Mx *e, uint64_t i) {
     switch (enc) {
     case 0: call = S(e, "texelFetch(%s, %s, 0)", SMP(e, unit, "1D", 0), IR(e, a)); break;
     case 1: call = S(e, "texelFetch(%s, %s, %s)", SMP(e, unit, "1D", 0), IR(e, a), IR(e, b)); break;
-    case 2: call = S(e, "texelFetch(%s, ivec2(%s, %s), 0)", SMP(e, unit, "2D", 0), IR(e, a), IR(e, b)); break;
-    case 4: off = tex_offset(e, 2, X(e, b), 4); call = S(e, "texelFetchOffset(%s, ivec2(%s, %s), 0, %s)", SMP(e, unit, "2D", 0), IR(e, a), IR(e, a + 1), off); break;
-    case 5: call = S(e, "texelFetch(%s, ivec2(%s, %s), %s)", SMP(e, unit, "2D", 0), IR(e, a), IR(e, a + 1), IR(e, b)); break;
+#define TLDS_RS (e->in->screen_scale && e->in->target == 1 && e->in->stage == MX_FRAGMENT)       /* track O: see tf_scaled */
+    case 2: if (TLDS_RS) { const char *sm = SMP(e, unit, "2D", 0); call = S(e, "texelFetch(%s, %s, 0)", sm, tf_scaled(e, unit, sm, S(e, "ivec2(%s, %s)", IR(e, a), IR(e, b)), NULL)); break; }
+        call = S(e, "texelFetch(%s, ivec2(%s, %s), 0)", SMP(e, unit, "2D", 0), IR(e, a), IR(e, b)); break;
+    case 4: off = tex_offset(e, 2, X(e, b), 4);
+        if (TLDS_RS) { const char *sm = SMP(e, unit, "2D", 0); call = S(e, "texelFetch(%s, %s, 0)", sm, tf_scaled(e, unit, sm, S(e, "ivec2(%s, %s)", IR(e, a), IR(e, a + 1)), &off)); break; }
+        call = S(e, "texelFetchOffset(%s, ivec2(%s, %s), 0, %s)", SMP(e, unit, "2D", 0), IR(e, a), IR(e, a + 1), off); break;
+    case 5: if (TLDS_RS) { const char *sm = SMP(e, unit, "2D", 0); call = S(e, "texelFetch(%s, %s, %s)", sm, tf_scaled(e, unit, sm, S(e, "ivec2(%s, %s)", IR(e, a), IR(e, a + 1)), NULL), IR(e, b)); break; }
+        call = S(e, "texelFetch(%s, ivec2(%s, %s), %s)", SMP(e, unit, "2D", 0), IR(e, a), IR(e, a + 1), IR(e, b)); break;
     case 6: call = S(e, "texelFetch(%s, ivec2(%s, %s), %s)", SMP(e, unit, "2DMS", 0), IR(e, a), IR(e, a + 1), IR(e, b)); break;
     case 7: call = S(e, "texelFetch(%s, ivec3(%s, %s, %s), 0)", SMP(e, unit, "3D", 0), IR(e, a), IR(e, a + 1), IR(e, b)); break;
     case 8: call = S(e, "texelFetch(%s, ivec3(%s, %s, int(%s & 0xffffu)), 0)", SMP(e, unit, "2DArray", 0), IR(e, b), IR(e, b + 1), X(e, a)); break;
-    case 12: off = tex_offset(e, 2, X(e, b + 1), 4); call = S(e, "texelFetchOffset(%s, ivec2(%s, %s), %s, %s)", SMP(e, unit, "2D", 0), IR(e, a), IR(e, a + 1), IR(e, b), off); break;
+    case 12: off = tex_offset(e, 2, X(e, b + 1), 4);
+        if (TLDS_RS) { const char *sm = SMP(e, unit, "2D", 0); call = S(e, "texelFetch(%s, %s, %s)", sm, tf_scaled(e, unit, sm, S(e, "ivec2(%s, %s)", IR(e, a), IR(e, a + 1)), &off), IR(e, b)); break; }
+        call = S(e, "texelFetchOffset(%s, ivec2(%s, %s), %s, %s)", SMP(e, unit, "2D", 0), IR(e, a), IR(e, a + 1), IR(e, b), off); break;
     default: fail(e, "TLDS", "TLDS encoding %u", enc); return;
     }
     emit(e, "%s%s;", tv_decl(is_int, e->in->sint_tex >> unit & 1), call);
@@ -1517,7 +1539,10 @@ int mx_translate(const MxIn *in, MxOut *out) {
                  "#extension GL_ARB_shader_ballot : enable\n#extension GL_ARB_shader_group_vote : enable\n#extension GL_EXT_texture_shadow_lod : enable\n");
         if (e->uses_layer_out || e->uses_vp_out) emit(&h, "#extension GL_ARB_shader_viewport_layer_array : require\n");
         emit(&h, "%s", k_prelude);
+        if (vk && in->stage == MX_FRAGMENT && in->screen_scale && e->uses_fcs) emit(&h, "layout(push_constant) uniform MXPC { uvec2 mx_alpha; float mx_point_size; float mx_fcs; };\n");      /* track O */
+        else
         if (vk && (in->stage == MX_VERTEX || (in->stage == MX_FRAGMENT && e->uses_alpha))) emit(&h, "layout(push_constant) uniform MXPC { uvec2 mx_alpha; float mx_point_size; };\n");
+        if (vk && e->uses_tf) emit(&h, "ivec2 mx_tf(ivec2 p, ivec2 real, uint gw, uint gh) { ivec2 g = ivec2(int(gw), int(gh)); return (g.x <= 0 || g.y <= 0 || g == real) ? p : ivec2(floor((vec2(p) + 0.5) * vec2(real) / vec2(g))); }\n");
         if (vk && in->stage == MX_VERTEX) emit(&h, "float mx_psize;\n");
         for (int k = 0; vk && k < e->nsmp; k++) emit(&h, "layout(set = 1, binding = %u) uniform %s mx_t%u_%s;\n", (unsigned)e->smp[k].binding, e->smp[k].type, (unsigned)e->smp[k].unit, e->smp[k].type);
         for (unsigned n = 0; n < 18; n++) if (e->cbufs >> n & 1) emit(&h, "layout(std430, %sbinding = %u) readonly buffer CB%u { uint c%u[]; };\n", set0, in->binding_base + n, n, n);

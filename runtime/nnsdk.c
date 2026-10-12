@@ -420,9 +420,32 @@ static void mii_Calc_GetSize(Ctx *c) { RET(rd64(A0)); }
 /* ---- nn::util string and bit helpers */
 static void util_SNPrintf(Ctx *c) {                       /* (char *buf, size_t size, const char *fmt, ...) */
     const char *fmt = (const char *)(uintptr_t)A2;
+    /* Session 8 (track V), SSBU_SNPRINTF_LOG=1: how often the game formats and what one call costs. A line per 2,000 calls:
+     * the frame, the time those calls took, the slowest one with its format and caller. */
+    static int lg = -1; static LONG64 n_calls, tk_sum, tk_max; static char max_fmt[64]; static uint64_t max_ra;
+    if (lg < 0) lg = getenv("SSBU_SNPRINTF_LOG") && atoi(getenv("SSBU_SNPRINTF_LOG"));
+    LARGE_INTEGER q0, q1;
+    if (lg) QueryPerformanceCounter(&q0);
     if (format_has_float(fmt)) guest_trap("nn::util::SNPrintf with a floating-point conversion is not supported", c->x[30] - 4);
     int n = snprintf((char *)(uintptr_t)A0, (size_t)A1, fmt, (unsigned long long)A3, (unsigned long long)A4,
                      (unsigned long long)c->x[5], (unsigned long long)c->x[6], (unsigned long long)c->x[7]);
+    if (lg) {
+        extern long long nvn_front_frame_next(void);
+        QueryPerformanceCounter(&q1);
+        LONG64 d = q1.QuadPart - q0.QuadPart;
+        tk_sum += d;
+        if (d > tk_max) { tk_max = d; max_ra = c->x[30]; snprintf(max_fmt, sizeof max_fmt, "%.60s", fmt); }
+        {   static LONG nslow; LARGE_INTEGER fq; QueryPerformanceFrequency(&fq);
+            if (d * 5000 > fq.QuadPart && InterlockedIncrement(&nslow) <= 300)      /* one call over 0.2 ms */
+                printf("snprintf_log: SLOW call, frame %lld: %.3f ms, format \"%.60s\" (%llu characters), buffer size %llu, result %d, called from %llx\n", nvn_front_frame_next(), (double)d * 1000.0 / (double)fq.QuadPart, fmt, (unsigned long long)strlen(fmt), (unsigned long long)A1, n, (unsigned long long)c->x[30]);
+        }
+        if (++n_calls % 2000 == 0) {
+            LARGE_INTEGER fq; QueryPerformanceFrequency(&fq);
+            printf("snprintf_log: frame %lld: %lld calls so far, the last 2000 took %.2f ms, slowest %.3f ms (format \"%s\", buffer size %llu, called from %llx); this one: \"%.40s\" size %llu from %llx\n", nvn_front_frame_next(), (long long)n_calls,
+                   (double)tk_sum * 1000.0 / (double)fq.QuadPart, (double)tk_max * 1000.0 / (double)fq.QuadPart, max_fmt, (unsigned long long)A1, (unsigned long long)max_ra, fmt, (unsigned long long)A1, (unsigned long long)c->x[30]);
+            tk_sum = tk_max = 0;
+        }
+    }
     RET((int64_t)n);
 }
 static void util_BitArray_reset(Ctx *c) {                 /* object: { uint64_t *words; uint32_t bitCount; } */

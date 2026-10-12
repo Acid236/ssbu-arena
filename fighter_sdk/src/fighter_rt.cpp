@@ -34,6 +34,14 @@ extern "C" __declspec(dllexport) void fighter_bind(const FsHost *host, FsTable *
     t->ovr_count = (int)(sizeof fs_overrides / sizeof fs_overrides[0]) - 1;
 }
 
+#ifdef FS_SCRIBBLE
+// S6: see fighter_sdk.h. 4 KB below the caller's frame: where the frames of the argument helpers were.
+__attribute__((noinline)) void fs_scribble() {
+    volatile uint8_t pad[4096];
+    for (int i = 0; i < 4096; i++) pad[i] = 0xA5;
+}
+#endif
+
 // ---------------------------------------------------------------- Lua constants
 LuaConst::operator int32_t() const { return ((const int32_t *)(uintptr_t)fs_addr[S_const_value_table])[index]; }
 

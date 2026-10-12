@@ -15,6 +15,7 @@ Anything outside that (loops, unknown instructions, calls to unlisted local func
 import collections
 import json
 import os
+import re
 import struct
 import sys
 import zlib
@@ -78,6 +79,18 @@ def imm(tok):
     return int(tok.lstrip('#'), 0)
 
 
+def singleton_name(sym):
+    """S8: 'FighterManager' for lib::Singleton<app::FighterManager>::instance_ (a data symbol of main), else None"""
+    pre, post = '_ZN3lib9SingletonIN3app', 'EE9instance_E'
+    if not (sym.startswith(pre) and sym.endswith(post)):
+        return None
+    body = sym[len(pre):-len(post)]
+    k = 0
+    while k < len(body) and body[k].isdigit():
+        k += 1
+    return body[k:] if k and body[k:].isidentifier() and int(body[:k]) == len(body) - k else None
+
+
 class Exec:
     """symbolic execution of one function"""
 
@@ -117,10 +130,61 @@ class Exec:
                 return ('int', v[1] & 0xffffffff)
             return v
         if tok in VREG:
-            return self.reg[VREG[tok]]
+            v = self.reg[VREG[tok]]
+            if tok[0] in 'sd' and v[0] == 'vec':         # S10: the scalar in lane 0 of a vector built here
+                return v[1]
+            if tok[0] in 'sd' and v[0] == 'vecret':      # S10: lane 0 of a vector a game function returned
+                return ('lane', v[1], 0)
+            return v
         if tok.startswith('#'):
             return ('int', imm(tok))
         self.fail('operand ' + tok)
+
+    # S10: phx::Vector2f / 3f built on the stack. The game's code: `movi vN.2d, #0`, `mov vN.s[i], vM.s[0]` per lane,
+    # `str qN, [sp, #off]`, the address as the argument. A register that holds such a vector is
+    # ('vec', lane0, lane1, lane2, lane3); a vector a game function returned in v0 is ('vecret', ('ref', node)) and a
+    # lane read from it ('lane', ('ref', node), i).
+    def lane_move(self, dst, src):
+        def split(tok):
+            if '.s[' in tok:
+                r, _, rest = tok.partition('.s[')
+                if r not in ('v%d' % i for i in range(32)):
+                    self.fail('operand ' + tok)
+                return r, int(rest.rstrip(']'))
+            if tok in VREG and tok[0] == 's':
+                return VREG[tok], None
+            self.fail('operand ' + tok)
+        dr, di = split(dst)
+        sr, si = split(src)
+        v = self.reg[sr]
+        if si is None or (si == 0 and v[0] not in ('vec', 'vecret')):
+            lane = self.get('s' + sr[1:])                # the scalar the register holds (marks a float result as such)
+        elif v[0] == 'vec':
+            lane = v[1 + si]
+        elif v[0] == 'vecret':
+            lane = ('lane', v[1], si)
+        elif v[0] == 'ref':
+            # the game's code reads a higher lane of what a function returned: that function returns a vector
+            # (whatever the public bindings say); its plain uses are lane 0 (printed as .v[0])
+            nodes = getattr(self, 'allnodes', None)
+            nd = nodes[v[1]] if nodes is not None else self.nodes[v[1]]
+            if nd['kind'] != 'call':
+                self.fail('lane %d of the result of a script call' % si)
+            nd['vret'] = True
+            lane = ('lane', v, si)
+        else:
+            self.fail('lane %d of %s' % (si, v[0]))
+        if lane[0] == 'undef':
+            self.fail('lane that was never set')
+        if di is None:
+            self.put(dst, lane)
+            return
+        cur = self.reg[dr]
+        if cur[0] == 'vecret':
+            cur = ('vec',) + tuple(('lane', cur[1], i) for i in range(4))
+        elif cur[0] != 'vec':
+            cur = ('vec', UNDEF if cur[0] == 'undef' else self.get('s' + dr[1:]), UNDEF, UNDEF, UNDEF)
+        self.reg[dr] = cur[:1 + di] + (lane,) + cur[2 + di:]
 
     def put(self, tok, v):
         if tok in XREG:
@@ -189,6 +253,8 @@ class Exec:
             return ('agentfield', off)
         if base[0] == 'sym' and 'const_value_table' in base[1] and size == 4:
             return ('luaconst', off // 4)
+        if base[0] == 'sym' and off == 0 and size == 8 and singleton_name(base[1]):
+            return ('singleton', base[1])                # S8: the instance pointer of one of the game's manager objects
         self.fail('load through %s' % (base[0],))
 
     def store(self, a, v):
@@ -322,9 +388,13 @@ class Exec:
                 self.fail('%s on another lua_State' % name)
             if self.lua is None:
                 self.fail('%s without clear_lua_stack' % name)
-            self.node(kind='lua', sym=sym, args=self.lua, popped=False, proto=())
+            i = self.node(kind='lua', sym=sym, args=self.lua, popped=False, proto=())
             self.lua = None
             self.reg['x0'] = UNDEF
+            # S8: such a function can return a float directly too (sv_kinetic_energy::get_speed_x). v0 used to keep
+            # the value of an EARLIER call here, and a later read of s0 was printed as that earlier result (found by
+            # the offline test on the fighters' status scripts; a wrong value, not a refusal).
+            self.reg['v0'] = ('ref', i)
             return
         if path[0] == 'app' and len(params) > 1 and mangle.strip(params[0]) == ('ptr', ('class', 'lua_State')) and self.lua:
             if x0 != LSTATE:
@@ -374,6 +444,13 @@ class Exec:
             else:
                 v = self.get('x%d' % xi)
             xi += 1
+            vn = isinstance(st, tuple) and st[0] in ('ref', 'ptr') and {('class', 'phx::Vector2f'): 2, ('class', 'phx::Vector3f'): 3, ('class', 'phx::Vector4f'): 4}.get(mangle.strip(st[1]))
+            if vn and v[0] == 'stk':                     # S10: a vector built on this function's stack: its lanes are the argument
+                built = self.mem.get(v[1], UNDEF)
+                if built[0] != 'vec':
+                    self.fail('%s: vector argument that is not built from lanes here' % name)
+                args.append(('vecarg', vn) + tuple(self.scalar(l, name) for l in built[1:1 + vn]))
+                continue
             if c == 'lv' or (isinstance(st, tuple) and st[0] in ('ref', 'ptr') and mangle.strip(st[1]) == ('class', 'lib::L2CValue')):
                 args.append(self.lvalue(v, name))
             elif st == ('class', 'phx::Hash40'):
@@ -399,12 +476,12 @@ class Exec:
             self.reg['v0'] = UNDEF
 
     def thisval(self, v, name):
-        if v == AGENT:
-            return v
+        if v == AGENT or name == 'lua2cpp::L2CFighterBase::lerp':     # S9: lerp never reads `this`, x0 is whatever the caller left
+            return AGENT
         self.fail('%s: member call on something else than the agent' % name)
 
     def scalar(self, v, name):
-        if v[0] in ('int', 'f', 'luaconst', 'ref', 'conv', 'lvop', 'agent', 'L', 'boma', 'agentfield', 'not', 'arg'):
+        if v[0] in ('int', 'f', 'luaconst', 'ref', 'conv', 'lvop', 'agent', 'L', 'boma', 'agentfield', 'not', 'arg', 'lane'):
             return v
         self.fail('%s: argument is %s' % (name, v[0]))
 
@@ -469,6 +546,19 @@ class Exec:
                 self.store(a, self.get(ops[0]))
             else:
                 self.put(ops[0], self.load(a, size, isf))
+            return
+        if mn in ('mov', 'ins') and ('.s[' in ops[0] or '.s[' in ops[1]):     # S10
+            self.lane_move(ops[0], ops[1])
+            return
+        if mn == 'movi':                                 # S10: only "all lanes zero"
+            r = VREG.get(ops[0]) or ops[0].split('.')[0]
+            try:
+                zero = int(ops[1].lstrip('#'), 16) == 0
+            except ValueError:
+                zero = False
+            if not zero or r not in ('v%d' % i for i in range(32)):
+                self.fail('instruction movi')
+            self.reg[r] = ('vec', ('f', 0.0), ('f', 0.0), ('f', 0.0), ('f', 0.0))
             return
         if mn == 'mov':
             if ops[1].startswith('#'):
@@ -709,7 +799,8 @@ class Printer:
         if k == 'boma':
             return 'boma'
         if k == 'ref':
-            return self.named.get(v[1]) or self.call_text(self.nodes[v[1]])
+            t = self.named.get(v[1]) or self.call_text(self.nodes[v[1]])
+            return t + '.v[0]' if self.nodes[v[1]].get('vret') and want != 'vec' else t      # S10
         if k == 'lv':
             t, x = v[1], v[2]
             if t == 'h':
@@ -733,9 +824,20 @@ class Printer:
             return '!' + self.expr(v[1])
         if k == 'cmp':
             return '%s %s %s' % (self.expr(v[2]), v[1], self.expr(v[3]))
+        if k == 'vecarg':                                # S10: Vector3f{x, y, z}
+            return 'Vector%df{%s}' % (v[1], ', '.join('(float)%s' % self.expr(l, 'f') for l in v[2:]))
+        if k == 'lane':                                  # S10: one lane of a vector a game function returned
+            return '%s.v[%d]' % (self.expr(v[1], 'vec'), v[2])
         raise NotMechanical('cannot print %s' % k)
 
+    def vret_text(self, nd):
+        """S10: a call whose result is a vector in v0 (all lanes): not through the wrapper"""
+        self.used_syms.add(nd['sym'])
+        return 'gcall<Vector4f>(%s)' % ', '.join(['S_' + re.sub(r'\W', '_', wrapper_name(nd['sym']))] + [self.expr(a) for a in nd['args']])
+
     def call_text(self, nd):
+        if nd.get('vret'):
+            return self.vret_text(nd)
         self.used_syms.add(nd['sym'])
         name = wrapper_name(nd['sym'])
         if nd['kind'] == 'lua':

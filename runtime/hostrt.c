@@ -300,7 +300,50 @@ static int g_import_count_all = 1;
  * waits here (the console's kernel stops the threads wherever they are; a thread inside a kernel call finishes it there too). */
 volatile LONG g_guest_frozen;
 void guest_freeze_wait(void) { while (g_guest_frozen) Sleep(5); }
+/* Session 8 (track V), SSBU_IMPORT_WATCH=<part of an import's name>: the calls of that one import are timed, and for every
+ * frame in which they took more than 2 ms a line says how many there were, what they cost, the slowest one (with the text
+ * its third argument points at when it is a printable string: the format of a formatting function) and how many different
+ * return addresses called it. Off: one compare per import call. */
+static void host_import_real(Ctx *c, int sym);
+static int g_watch_sym = -2;
 void host_import(Ctx *c, int sym) {
+    if (g_watch_sym == -2) {
+        const char *e = getenv("SSBU_IMPORT_WATCH");
+        int w = -1;
+        if (e && e[0]) for (int i = 0; i < (int)dyn_sym_count; i++) if (strstr(dyn_syms[i].name, e)) { w = i; break; }
+        if (w >= 0) printf("import_watch: watching \"%s\"\n", dyn_syms[w].name);
+        g_watch_sym = w;
+    }
+    if (sym != g_watch_sym) { host_import_real(c, sym); return; }
+    extern long long nvn_front_frame_next(void);
+    static long long cur_frame, n, tks, max_tk, n_all; static char max_txt[72]; static uint64_t max_ra, ras[64]; static int nras; static uint64_t max_x1;
+    static volatile LONG lock;
+    LARGE_INTEGER q0, q1, fq;
+    uint64_t ra = c->x[30], x1 = c->x[1], x2 = c->x[2];
+    char txt[72]; txt[0] = 0;
+    {   MEMORY_BASIC_INFORMATION mi;               /* the third argument as text, when it is one (read BEFORE the call: the registers change) */
+        if (x2 > 0x10000 && VirtualQuery((const void *)(uintptr_t)x2, &mi, sizeof mi) && mi.State == MEM_COMMIT && !(mi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) && (uint64_t)(uintptr_t)mi.BaseAddress + mi.RegionSize > x2 + 80) {
+            const unsigned char *s = (const unsigned char *)(uintptr_t)x2; int k = 0;
+            for (; k < 70 && s[k] >= 32 && s[k] < 127; k++) txt[k] = (char)s[k];
+            txt[k] = 0;
+        }
+    }
+    QueryPerformanceCounter(&q0);
+    host_import_real(c, sym);
+    QueryPerformanceCounter(&q1); QueryPerformanceFrequency(&fq);
+    long long d = q1.QuadPart - q0.QuadPart, fr = nvn_front_frame_next();
+    while (InterlockedExchange(&lock, 1)) YieldProcessor();
+    if (fr != cur_frame) {
+        if (tks * 500 > fq.QuadPart) printf("import_watch: frame %lld: %lld calls, %.2f ms; slowest %.3f ms (argument 1 = %llu, argument 2 as text \"%s\", called from %llx); %d%s different return addresses, the first: %llx %llx %llx %llx; %lld calls since the start\n", cur_frame, n, (double)tks * 1000.0 / (double)fq.QuadPart,
+                                             (double)max_tk * 1000.0 / (double)fq.QuadPart, (unsigned long long)max_x1, max_txt, (unsigned long long)max_ra, nras, nras == 64 ? "+" : "", (unsigned long long)ras[0], (unsigned long long)ras[1], (unsigned long long)ras[2], (unsigned long long)ras[3], n_all);
+        cur_frame = fr; n = tks = max_tk = 0; nras = 0; memset(ras, 0, sizeof ras);
+    }
+    n++; n_all++; tks += d;
+    if (d > max_tk) { max_tk = d; max_ra = ra; max_x1 = x1; memcpy(max_txt, txt, sizeof max_txt); }
+    { int k = 0; for (; k < nras; k++) if (ras[k] == ra) break; if (k == nras && nras < 64) ras[nras++] = ra; }
+    InterlockedExchange(&lock, 0);
+}
+static void host_import_real(Ctx *c, int sym) {
     static volatile LONG order_count;
     if (g_guest_frozen) guest_freeze_wait();
     if (!g_import_count_all && g_import_calls[sym] >= 3 && g_handlers[sym]) {

@@ -1,0 +1,4 @@
+# S9: editor -> smash meter Si, CPU 9, Strumenti: up to frequency, far left, 3 right; back (B), Salva (Plus)
+%include _to_rules.txt
+40:C 60 40:Z 200 40:d 40 40:d 40 40:d 40 8:r 40 40:d 40 40:d 40 8:r 30 8:r 30 8:r 30 8:r 30 8:r 30 8:r 30 40:d 40 40:d 40 40:d 60 40:Z 200
+40:u 100 8:l 40 8:l 40 8:l 40 8:l 40 8:r 40 8:r 40 8:r 100 40:X 150 40:! 200 40 120

@@ -514,6 +514,13 @@ static int ext_select(Ext *e, int i, int on) {
  * Returns 0 with a pending sample, or ST_END. Caller holds the lock. */
 static int ext_fill(Ext *e) {
     if (e->have_pending) return ST_OK;
+    {   /* TEST ONLY, SSBU_SKIP_MOVIES=1 (tests\DEBUG_MODE.md): every movie ends at once, as a stream with no samples left */
+        static int skip = -1;
+        if (skip < 0) { const char *v = getenv("SSBU_SKIP_MOVIES"); skip = v && atoi(v) != 0; }
+        static unsigned long long keep = 0;                /* SSBU_SKIP_MOVIES=<n>: n > 1 lets the first n samples through (default 1 = 12) */
+        if (skip > 0 && !keep) { const char *v = getenv("SSBU_SKIP_MOVIES"); keep = atoi(v) > 1 ? (unsigned long long)atoi(v) : 12; }
+        if (skip && e->samples_read >= keep) { if (!e->eos) printf("movie: SSBU_SKIP_MOVIES: end of stream after %llu samples%c", e->samples_read, 10); e->eos = 1; return ST_END; }
+    }
     if (e->eos || !e->rd) return ST_END;
     int best = -1;
     for (int i = 0; i < e->ntracks; i++) {

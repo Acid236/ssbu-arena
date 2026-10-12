@@ -36,6 +36,14 @@ class MExec(D.FExec):
     def __init__(self, mod, off):
         D.FExec.__init__(self, mod, off, 'macro')
         self.entry_reg['x8'] = A.RET
+        if off in getattr(mod, 'static_fns', ()):
+            # S8: a helper that is not a member: x0 = result buffer, x1 = the agent, x2.. = L2CValue arguments
+            # (how the fighters' modules call their local helper functions; found at the call sites, see call_local)
+            self.entry_reg['x0'] = A.RET
+            self.entry_reg['x1'] = A.AGENT
+            for k in range(2, 8):
+                self.entry_reg['x%d' % k] = ('arg', k - 2)
+            self.entry_reg['x8'] = A.UNDEF
 
     @staticmethod
     def unstable(v):
@@ -135,7 +143,51 @@ class MExec(D.FExec):
     def scalar(self, v, name):
         if v[0] == 'ibin':
             return v
+        if v[0] == 'img' and self.function_at(v[1]):     # S8: the address of a function of this module as an argument
+            return v
+        if v[0] == 'singleton':                          # S8: a manager object (lib::Singleton<app::X>::instance_) as an argument
+            return v
         return D.FExec.scalar(self, v, name)
+
+    def function_at(self, off):
+        """S8: is this image offset a function the source can name (exported, or a local one the driver has named)?"""
+        if off in getattr(self.m, 'locals', {}):
+            return True
+        sym = self.n.exports.get(off)
+        return bool(sym and mangle.parse(sym) and self.n.func_size(off))
+
+    def call_local(self, target):
+        """S8: a direct call to a function of this module that has no exported name (a fighter's own status
+        scripts and their helpers; fighter_status.py names them). Same convention as every lua2cpp function:
+        x0 = the agent, x1.. = pointers to L2CValue arguments, x8 = result buffer. How many of the candidate
+        arguments are real is decided by the driver from what the callee reads (truncated before printing)."""
+        x0 = self.get('x0')
+        static = False
+        if x0 != A.AGENT:
+            if self.reg['x1'] == A.AGENT and (x0 == A.RET or x0[0] == 'stk') and hasattr(self.m, 'static_fns'):
+                static = True                            # result buffer in x0, agent in x1, arguments from x2
+                self.m.static_fns.add(target)
+            else:
+                self.fail('local function called on something else than the agent')
+        elif target in getattr(self.m, 'static_fns', ()):
+            self.fail('local function called in two ways')
+        if self.lua:
+            self.fail('local function called with values on the Lua stack')
+        args = []
+        for k in range(2 if static else 1, 8):
+            a = self.reg['x%d' % k]
+            if (a[0] == 'stk' and a[1] in self.lv) or a[0] == 'arg' or (a[0] == 'sym' and a[1] == '_ZN3lib8L2CValue3NILE'):
+                args.append(self.lvalue(a, 'local call'))
+            else:
+                break
+        x8 = x0 if static else self.reg['x8']
+        i = self.node(kind='local', target=target, args=args, static=static)
+        if x8 == A.RET:
+            self.ret_value = ('ref', i)
+        elif x8[0] == 'stk':
+            self.lv[x8[1]] = ('ref', i)
+        else:
+            self.allnodes[i]['void'] = True
 
     def step(self, ins):
         if ins.mnemonic in ('orr', 'and'):               # S3: integer or / and of two values (flag constants), and with a mask
@@ -179,6 +231,14 @@ class MExec(D.FExec):
                 self.reg['v%d' % r] = A.UNDEF
             self.flags = None
             return
+        if target in getattr(self.m, 'locals', {}) and target not in self.n.plt and target not in self.m.macros:
+            self.call_local(target)                      # S8
+            for r in range(0, 18):
+                self.reg['x%d' % r] = A.UNDEF
+            for r in range(0, 8):
+                self.reg['v%d' % r] = A.UNDEF
+            self.flags = None
+            return
         D.FExec.call(self, pc, target)
 
 
@@ -213,6 +273,10 @@ def main():
     mod.float_syms, mod.void_syms, mod.value_syms = set(), set(), set()
     xp = os.path.join(STUDY, 'fighters', 'tools_out', mod.nro.short + '_status_exclude.json')
     exclude = json.load(open(xp)) if os.path.exists(xp) else {}      # function -> why it stays lifted (differential test, compiler)
+    if os.environ.get('SSBU_FIGHTERS_ROOT'):             # S10: plus the refusals of the work run itself
+        xw = os.path.join(STUDY, 'fighters', os.environ['SSBU_FIGHTERS_ROOT'], 'tools_out', mod.nro.short + '_status_exclude.json')
+        if os.path.exists(xw):
+            exclude.update(json.load(open(xw)))
     mod.glob = D.load_global()
     if mod.glob:
         mod.autopop = set(s for s, st in mod.glob.items() if st['autopop'])
@@ -242,8 +306,16 @@ def main():
         old = json.load(open(sp)) if os.path.exists(sp) else {}
         for s, e in extra.items():
             old[s] = {'protos': len(e['protos']), 'proto': list(sorted(e['protos'])[0]), 'autopop': bool(e['dropped'] and not e['other'])}
-        with open(sp, 'w') as f:
-            json.dump(old, f, indent=1, sort_keys=True)
+        # S10: a work run (SSBU_FIGHTERS_ROOT, see below) writes its copy into its own folder; a --show / --stats run
+        # writes nothing. (Defect found in S10: a --show run over a few functions rewrote this file with the statistics
+        # of those few, e.g. sv_module_access::capture became "result always dropped", and the next gen_sdk.py
+        # declared it void while the sources use its result.)
+        if '--show' not in sys.argv and '--stats' not in sys.argv:
+            if os.environ.get('SSBU_FIGHTERS_ROOT'):
+                os.makedirs(os.path.join(STUDY, 'fighters', os.environ['SSBU_FIGHTERS_ROOT'], 'tools_out'), exist_ok=True)
+                sp = os.path.join(STUDY, 'fighters', os.environ['SSBU_FIGHTERS_ROOT'], 'tools_out', 'status_lua_calls.json')
+            with open(sp, 'w') as f:
+                json.dump(old, f, indent=1, sort_keys=True)
         for s, e in old.items():
             if s not in mod.glob:
                 mod.glob[s] = e
@@ -307,7 +379,12 @@ def main():
     if '--stats' in sys.argv:
         return
     short = mod.nro.short
-    fdir = os.path.join(STUDY, 'fighters', short)
+    # S10: SSBU_FIGHTERS_ROOT=<folder under fighters\>: a WORK run: sources, bindings and the result json go to
+    # fighters\<root>\<name>\ and fighters\<root>\tools_out\ (build_fighter.py reads the same variable); the exclude
+    # files are still read from fighters\tools_out. Without it: fighters\<name>\ as before.
+    root = os.path.join(STUDY, 'fighters', os.environ.get('SSBU_FIGHTERS_ROOT') or '')
+    fdir = os.path.join(root, short)
+    os.makedirs(os.path.join(root, 'tools_out'), exist_ok=True)
     os.makedirs(os.path.join(fdir, 'status'), exist_ok=True)
     os.makedirs(os.path.join(fdir, 'generated'), exist_ok=True)
     head = ['// %s: functions of the shared fighter state machine (lua2cpp::L2CFighterCommon), decompiled by' % short,
@@ -355,9 +432,9 @@ def main():
             f.write('L2C_BIND(%s, %s, 0x%x)\n' % (short, ident, off))
     for e in res:
         e.pop('lines', None)
-    with open(os.path.join(STUDY, 'fighters', 'tools_out', short + '_status.json'), 'w') as f:
+    with open(os.path.join(root, 'tools_out', short + '_status.json'), 'w') as f:
         json.dump({'functions': res, 'imports_used': sorted(used), 'float_returns': sorted(mod.float_syms),
-                   'void_calls': sorted(mod.void_syms - mod.value_syms)}, f, indent=1)
+                   'void_calls': sorted(mod.void_syms - mod.value_syms), 'value_calls': sorted(mod.value_syms)}, f, indent=1)
     print('written: fighters/%s/status/*.cpp (%d files), %d bindings' % (short, len(files), len(binds)))
 
 

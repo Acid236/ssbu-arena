@@ -84,8 +84,28 @@ static void sleep_ns(int64_t ns) {
         if (!timer) no_timer = 1;
     }
     due.QuadPart = -((ns + 99) / 100);
-    if (!timer || !SetWaitableTimer(timer, &due, 0, NULL, NULL, FALSE)) { Sleep(ns_to_ms(ns)); return; }
-    WaitForSingleObject(timer, INFINITE);
+    /* Session 8 (track V), SSBU_SLEEP_LOG=1: a line for every sleep that lasted 2 ms longer than asked (first 200). */
+    static int lg = -1; static LONG nl;
+    if (lg < 0) lg = getenv("SSBU_SLEEP_LOG") && atoi(getenv("SSBU_SLEEP_LOG"));
+    LARGE_INTEGER q0, q1, fq;
+    if (lg) QueryPerformanceCounter(&q0);
+    if (!timer || !SetWaitableTimer(timer, &due, 0, NULL, NULL, FALSE)) Sleep(ns_to_ms(ns));
+    else WaitForSingleObject(timer, INFINITE);
+    if (lg) {
+        extern long long nvn_front_frame_next(void);
+        QueryPerformanceCounter(&q1); QueryPerformanceFrequency(&fq);
+        double ms = (double)(q1.QuadPart - q0.QuadPart) * 1000.0 / (double)fq.QuadPart, asked = (double)ns / 1e6;
+        {   /* per thread and frame: how many sleeps, asked and slept in all; a line when a frame after 1900 had over 8 ms of them */
+            static __declspec(thread) long long fr0, cnt, zero; static __declspec(thread) double a_sum, s_sum, a_max; static LONG nf;
+            long long fr = nvn_front_frame_next();
+            if (fr != fr0) {
+                if (fr0 > 1900 && s_sum > 8.0 && InterlockedIncrement(&nf) <= 300) printf("sleep_log: frame %lld, thread %lu: %lld sleeps in the frame, asked %.3f ms in all (longest asked %.3f), slept %.3f ms\n", fr0, GetCurrentThreadId(), cnt, a_sum, a_max, s_sum);
+                fr0 = fr; cnt = 0; a_sum = s_sum = a_max = 0;
+            }
+            cnt++; a_sum += asked; s_sum += ms; if (asked > a_max) a_max = asked;
+        }
+        if (ms > asked + 2.0 && InterlockedIncrement(&nl) <= 600) { printf("sleep_log: frame %lld, thread %lu: asked %.3f ms, slept %.3f ms (%s)\n", nvn_front_frame_next(), GetCurrentThreadId(), asked, ms, timer ? "high-resolution timer" : "Sleep"); fflush(stdout); }
+    }
 }
 
 /* nn::os thread priorities run from 0 (highest) to 31 (lowest), 16 is the default; the application's main thread

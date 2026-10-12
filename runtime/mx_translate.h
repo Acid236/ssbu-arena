@@ -61,6 +61,11 @@ typedef struct {
      * of the fragment stage it is paired with. Vulkan requires every fragment input to have a vertex output
      * (VUID-RuntimeSpirv-OpEntryPoint-08743); in OpenGL such an input is undefined. */
     uint32_t force_out;
+    /* Track O, internal resolution scale (plan\phases\O1_options.md, session 7). 0 = the text exactly as before. 1 (fragment
+     * stage, target 1 only): gl_FragCoord.xy is multiplied by the push constant mx_fcs (a fourth member of MXPC: game pixels
+     * per real pixel of the pass, 1.0 on a target that is not scaled), and the coordinates of a texelFetch from a 2D sampler
+     * are mapped from the game's texel grid (the size table in c2) to the image's real one (textureSize). */
+    int screen_scale;
 } MxIn;
 
 typedef struct {

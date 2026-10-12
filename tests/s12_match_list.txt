@@ -1,0 +1,3 @@
+p1=kirby,p2=yoshi,stage=mario_castle64,form=normal,cpu=9,stock=1
+p1=ness,p2=samus,stage=end,form=normal,cpu=9,stock=1
+p1=cloud,p2=jack,stage=battle_field,form=normal,cpu=9,stock=1

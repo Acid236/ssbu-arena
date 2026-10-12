@@ -136,7 +136,7 @@ def is_static_value(path):
     """S3: static functions of the script classes that return an L2CValue through x8 and take NO `this`: at every
     call site in lua2cpp_common x0 is the first L2CValue argument (lib::L2CAgent::math_abs(const L2CValue &) ...)."""
     path = list(path)
-    return (path[:2] == ['lib', 'L2CAgent'] and len(path) == 3 and path[2].startswith('math_')) or path == ['lua2cpp', 'L2CFighterBase', 'lerp']
+    return (path[:2] == ['lib', 'L2CAgent'] and len(path) == 3 and path[2].startswith('math_'))   # S9: lerp is NOT here: it is a member (x0 = this, unused; a, b, t in x1..x3)
 
 
 def strip(t):

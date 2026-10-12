@@ -33,6 +33,13 @@ inline Ctx *fs_ctx() { return fs_host.ctx(); }
 // ---------------------------------------------------------------- hash40
 struct Hash40 { uint64_t v; };
 
+// S10: the game's small vectors. In the script modules a phx::Vector2f / 3f is a 128-bit register stored whole on the
+// stack and handed over by address; a function that returns one returns it in the vector register (all four lanes).
+// Vector3f{x, y, z} / Vector2f{x, y}: the lanes not named are 0, as in the game's code (movi #0, then the lanes set).
+struct alignas(16) Vector2f { float v[4]; };
+struct alignas(16) Vector3f { float v[4]; };
+struct alignas(16) Vector4f { float v[4]; };
+
 constexpr uint32_t fs_crc32_byte(uint32_t c) {
     for (int k = 0; k < 8; k++) c = (c & 1) ? 0xEDB88320u ^ (c >> 1) : c >> 1;
     return c;
@@ -86,7 +93,7 @@ struct L2CValue {                          // lib::L2CValue, 16 bytes
     bool as_bool() const;
     Hash40 as_hash() const;
     struct AnyPointer { void *p; template <class T> operator T *() const { return (T *)p; } };
-    AnyPointer as_pointer() const { return AnyPointer{ptr}; }
+    AnyPointer as_pointer() const { return AnyPointer{type == L2C_POINTER ? ptr : nullptr}; }   // S9: the game's returns 0 unless the value is a pointer (14 offline differences, S8)
     explicit operator bool() const;
     bool operator==(const L2CValue &o) const;
     bool operator<(const L2CValue &o) const;
@@ -148,12 +155,19 @@ struct GCall {
     void put(float v) { c->v[fi].d[0] = 0; c->v[fi].d[1] = 0; *(float *)&c->v[fi] = v; fi++; }
     void put(const L2CValue *v) { word((uint64_t)(uintptr_t)v); }
     void put(const L2CValue &v) { word((uint64_t)(uintptr_t)&v); }
+    void put(const Vector2f &v) { word((uint64_t)(uintptr_t)&v); }      // S10: by address (the object lives in the caller's expression)
+    void put(const Vector3f &v) { word((uint64_t)(uintptr_t)&v); }
+    void put(const Vector4f &v) { word((uint64_t)(uintptr_t)&v); }
     template <class T> void put(T *v) { word((uint64_t)(uintptr_t)v); }
     void all() {}
     // S4: arguments travel BY REFERENCE down to put(). They used to be taken by value here and in gcall(): the
     // pointer put(const L2CValue &) hands to the game then pointed at a by-value copy that was already dead when
     // the game function ran (seen in a match: a landing function passed garbage as a status kind and as a motion).
+#ifdef FS_TEST_BYVALUE      // S6, never in a real build: the S4 bug put back on purpose, to prove that the FS_SCRIBBLE test sees it
+    template <class A, class... R> void all(A a, R... r) { put(a); all(r...); }
+#else
     template <class A, class... R> void all(const A &a, const R &... r) { put(a); all(r...); }
+#endif
     void call(int sym) {
         if (xi <= 8) { fs_host.call(c, sym); return; }
         uint64_t sp = c->x[31];
@@ -174,10 +188,22 @@ template <> struct GRet<uint32_t> { static uint32_t get(Ctx *c) { return (uint32
 template <> struct GRet<bool> { static bool get(Ctx *c) { return (c->x[0] & 1) != 0; } };
 template <> struct GRet<float> { static float get(Ctx *c) { return *(float *)&c->v[0]; } };
 template <> struct GRet<Hash40> { static Hash40 get(Ctx *c) { return Hash40{c->x[0]}; } };
+template <> struct GRet<Vector4f> { static Vector4f get(Ctx *c) { Vector4f r; const float *p = (const float *)&c->v[0]; for (int i = 0; i < 4; i++) r.v[i] = p[i]; return r; } };      // S10: a vector result, all lanes
 
+// S6, test builds only (-DFS_SCRIBBLE, build_fighter.py with SSBU_FIGHTER_SCRIBBLE=1): between handing the arguments
+// to GCall and calling the game, the stack below this frame is overwritten, so a pointer to an argument copy that is
+// already dead (the S4 bug: arguments taken by value) reaches the game as garbage in the offline test too, instead of
+// passing on a quiet stack.
+#ifdef FS_SCRIBBLE
+void fs_scribble();
+#define FS_SCRIBBLE_NOW() fs_scribble()
+#else
+#define FS_SCRIBBLE_NOW() ((void)0)
+#endif
 template <class R, class... A> inline R gcall(int sym, const A &... a) {
     GCall g;
     g.all(a...);
+    FS_SCRIBBLE_NOW();
     g.call(sym);
     return GRet<R>::get(g.c);
 }
@@ -186,6 +212,7 @@ template <class... A> inline L2CValue gcall_value(int sym, const A &... a) {
     L2CValue out;
     GCall g;
     g.all(a...);
+    FS_SCRIBBLE_NOW();
     g.c->x[8] = (uint64_t)(uintptr_t)&out;
     g.call(sym);
     return out;
@@ -269,6 +296,41 @@ void fs_return(Ctx *c, const L2CValue &r);
 #define L2C_VOID_FUNCTION5(fighter, name, a0, a1, a2, a3, a4) FS_L2C_VOID_N(name, FS_D3(a0, a1, a2) FS_COMMA FS_V a3 FS_COMMA FS_V a4, FS_P3 FS_COMMA FS_ARG(c, 4) FS_COMMA FS_ARG(c, 5))
 #define L2C_FUNCTION6(fighter, name, a0, a1, a2, a3, a4, a5) FS_L2C_N(name, FS_D3(a0, a1, a2) FS_D3(a3, a4, a5), FS_P3 FS_COMMA FS_ARG(c, 4) FS_COMMA FS_ARG(c, 5) FS_COMMA FS_ARG(c, 6))
 #define L2C_VOID_FUNCTION6(fighter, name, a0, a1, a2, a3, a4, a5) FS_L2C_VOID_N(name, FS_D3(a0, a1, a2) FS_D3(a3, a4, a5), FS_P3 FS_COMMA FS_ARG(c, 4) FS_COMMA FS_ARG(c, 5) FS_COMMA FS_ARG(c, 6))
+
+// S10 (part D): "changed on purpose". FS_MODIFIED(name); at file scope next to an edited function: the offline test
+// and the real-call differential do not compare it with the game's original and report it as MODIFIED instead of
+// differing; every other function is still compared. (A function that does not exist in the game at all needs no
+// mark: build_fighter.py gives it an address of its own and the tests report it as NEW.)
+#define FS_MODIFIED(name) extern "C" __declspec(dllexport) const char fs_modified_##name = 1
+
+// S11 (part 4): NEW WORK VARIABLES by name.
+//   FS_NEW_WORK_VAR(STATUS, FLOAT, MECH_CHARGE_FLOAT_CHARGE);       at file scope, in a source or header of the fighter
+//   WorkModule::set_float(boma, 0.0f, MECH_CHARGE_FLOAT_CHARGE);    used like any game constant
+// build_fighter.py gives every declared name a free id (build product fs_new_work.h, force-included) and refuses the
+// build with the exact limit when there is no room. What the game has (main 13.0.4, WorkModule accessors at
+// 71004e4420 / 4600 / 4620 / 4900; sizes read from Mario's module in a match, tests\logs\s11_w1.log):
+//   work module = accessor + 0x50; + 0x18 = array of AREAS indexed by id bits 24..27: 0 = INSTANCE (lives as long as
+//   the fighter), 1 = STATUS (cleared at a status change unless a KEEP flag is given to change_status).
+//   area: + 0x08 float count, + 0x10 floats (4 bytes each); + 0x18 int count, + 0x20 ints (8 bytes each);
+//         + 0x28 flag WORD count, + 0x30 flag bits (32 per word). index = id & 0xFFFFFF; id bits 28..: 0 float, 1 int, 2 flag.
+//   capacity:  instance  120 floats, 270 ints, 288 flags      status  40 floats, 32 ints, 96 flags
+//   The accessors do NOT check the index: an id beyond the capacity reads and writes foreign memory.
+// The storage is not enlarged by the SDK. fs_new_work_fits(boma) (call it once in the install function) compares the
+// highest new index with the counts of THIS agent's areas and returns false if one is out of range.
+#define FS_NEW_WORK_VAR(scope, type, name) static const int32_t fs_new_work_decl_##name = name
+#ifdef __cplusplus
+static inline bool fs_new_work_fits_n(BattleObjectModuleAccessor *boma, const int32_t need[6]) {
+    const uint8_t *wm = *(const uint8_t *const *)((const uint8_t *)boma + 0x50);
+    const uint8_t *const *areas = *(const uint8_t *const *const *)(wm + 0x18);
+    for (int a = 0; a < 2; a++) {
+        const uint8_t *ar = areas[a];
+        uint64_t nf = *(const uint64_t *)(ar + 0x08), ni = *(const uint64_t *)(ar + 0x18), nw = *(const uint64_t *)(ar + 0x28);
+        if ((uint64_t)need[a * 3] > nf || (uint64_t)need[a * 3 + 1] > ni || (uint64_t)need[a * 3 + 2] > nw * 32) return false;
+    }
+    return true;
+}
+#define fs_new_work_fits(boma) fs_new_work_fits_n((boma), FS_NEW_WORK_CHECK)
+#endif
 
 #include "lua_const.h"
 #include "lua_bind.h"

@@ -1,3 +1,5 @@
+> **Paths.** This guide was written for the tools' own single-folder layout (`recomp-study\`, `fighter_sdk\`, `tests\`, `mods_n*_src\`, `characters\`, `ssbu_*.exe`). `python scripts/setup.py` (step `stage`) builds that layout in `build/work/`: read `recomp-study\` as `build/work/`, run the commands from there. In the repository the runtime sources are in `runtime/`, the lifter in `tools/lifter/`, the test mods in `mods/`. Mentions of `plan\...` files refer to the author's private notes, which are not published.
+
 # Modding the native port: fighters as C++ source, and the hook table
 
 State: 2026-10-09, session S3 (details and every number: `plan\phases\S1_fighter_source.md`, sections 7 and 8).
@@ -148,6 +150,103 @@ L2C_FUNCTION(common, <function name>) {            // a function of lua2cpp::L2C
 - A script does not run to its end in one call: `frame()` / `wait()` suspend it (fibers), and the game may end it
   there. Do not hold resources (heap memory, locks) across such calls.
 
+## 6a. A fighter's own status source (session S8; WORK IN PROGRESS, offline only, not installed)
+
+State 2026-10-12: generated and tested offline for all 97 fighter modules, never run in a match; numbers and limits
+in `plan\phases\S1_fighter_source.md` section 13. Nothing of this is in `fighters_bin\`.
+
+What a fighter's status source consists of (all under `fighters\<name>\`, made by
+`python fighter_sdk\tools\fighter_status.py decompile <name>`):
+
+| File | Content |
+|---|---|
+| `status\install.cpp` | one `<agent>_install` function per agent of the module (the fighter itself and each of its weapons, e.g. `mario`, `mario_fireball`, `mario_pump`): THE REGISTRATION. It sets the number of statuses, takes the shared table (`sub_set_fighter_common_table`) and binds every (status kind, line) to a function |
+| `status\<agent>_<status>.cpp` | the functions registered for that status (`_pre`, `_main`, `_end`, `_init_status`, `_exec_status`, `_exit_status`, `_exec_stop`, `_check_attack`, `_calc_param` ...) and the main loops they hand to the shared state machine (`..._main_loop`) |
+| `status\<name>_helpers.cpp` | helpers several statuses share (`<name>_sub_<offset>`: the game gives them no name) |
+| `generated\status_local.h` | name -> place in the game's module for every function above (do not edit); `status_function(name)`, `local::name(agent, ...)` |
+| `generated\status_bindings.inc` | which functions run as source (delete a line: that function runs the original again) |
+
+The registration is the table a NEW fighter has to provide:
+
+```cpp
+L2C_VOID_FUNCTION(mario, mario_install) {
+    agent->global_table[12] = L2CValue(FIGHTER_MARIO_STATUS_KIND_NUM);            // how many statuses this fighter has
+    L2CAgentBase::reserve_status_data_array(agent, L2CValue(agent->global_table[12]).as_integer());
+    L2CFighterCommon::sub_set_fighter_common_table(agent);                        // every status of the shared state machine
+    L2CAgentBase::sv_set_status_func(agent, FIGHTER_STATUS_KIND_SPECIAL_N, LUA_SCRIPT_STATUS_FUNC_STATUS_PRE, status_function(mario_special_n_pre));
+    L2CAgentBase::sv_set_status_func(agent, FIGHTER_STATUS_KIND_SPECIAL_N, LUA_SCRIPT_STATUS_FUNC_STATUS_MAIN, status_function(mario_special_n_main));
+    L2CAgentBase::sv_set_status_func(agent, FIGHTER_STATUS_KIND_SPECIAL_N, LUA_SCRIPT_STATUS_FUNC_STATUS_END, status_function(mario_special_n_end));
+    ...                                                                           // a status the fighter does not bind keeps the shared function
+    L2CFighterCommon::sub_fighter_common_settings(agent);
+}
+L2C_FUNCTION(mario, mario_special_n_main) {                                       // "main" starts the status and names its per-frame loop
+    return L2CFighterCommon::sub_shift_status_main(agent, L2CValue((void *)status_function(mario_special_n_main_loop)));
+}
+```
+
+The lines (`LUA_SCRIPT_STATUS_FUNC_*`): STATUS_PRE 0, STATUS_MAIN 1, STATUS_END 2, INIT_STATUS 3, EXEC_STATUS 4, EXEC_STOP 5,
+EXEC_STATUS_POST 6, EXIT_STATUS 7, MAP_CORRECTION 8, FIX_CAMERA 9, FIX_POS_SLOW 10, CHECK_DAMAGE 11, CHECK_ATTACK 12,
+ON_CHANGE_LR 13, LEAVE_STOP 14, NOTIFY_EVENT_GIMMICK 15, CALC_PARAM 16. `python fighter_sdk\tools\fighter_status.py list <name>`
+prints the whole table of a fighter (agent, status kind, line, function, size).
+
+**Projectiles and articles ("weapon" agents).** A fighter's module holds one agent per object it owns: the fighter
+and each of its weapons (Mario: `mario`, `mario_fireball`, `mario_hugeflame`, `mario_pump`, `mario_pumpwater`; in
+the 97 fighter modules the census finds 590 agent classes, 498 of them not named like their module: weapons). What the game's own modules show, and so what a new
+fighter must provide for a projectile:
+
+1. **The agent.** The module's exported `create_agent_fighter_status_script_<fighter>(hash40 of the agent name,
+   object, module accessor, lua state)` compares the hash and creates the script object: the fighter itself is a
+   `lua2cpp::L2CFighterCommon` (0x228 bytes), every weapon a `lua2cpp::L2CWeaponCommon` (0x118 bytes), each with its
+   own class (vtable) whose slot 9 is the install function. The same hash dispatch exists once more per ACMD
+   category (`create_agent_fighter_animcmd_game_<fighter>`, `_effect_`, `_sound_`, `_expression_`).
+2. **Its status table**, the weapon's install function, same form as the fighter's:
+   ```cpp
+   L2C_VOID_FUNCTION(mario, mario_fireball_install) {
+       agent->global_table[12] = L2CValue(WEAPON_MARIO_FIREBALL_STATUS_KIND_NUM);
+       L2CAgentBase::reserve_status_data_array(agent, L2CValue(agent->global_table[12]).as_integer());
+       L2CAgentBase::sv_set_status_func(agent, WEAPON_MARIO_FIREBALL_STATUS_KIND_REGULAR, LUA_SCRIPT_STATUS_FUNC_STATUS_PRE, status_function(mario_fireball_regular_pre));
+       L2CAgentBase::sv_set_status_func(agent, WEAPON_MARIO_FIREBALL_STATUS_KIND_REGULAR, LUA_SCRIPT_STATUS_FUNC_STATUS_MAIN, status_function(mario_fireball_regular_main));
+       L2CAgentBase::sv_set_status_func(agent, WEAPON_MARIO_FIREBALL_STATUS_KIND_REGULAR, LUA_SCRIPT_STATUS_FUNC_EXEC_STATUS, status_function(mario_fireball_regular_exec_status));
+       L2CWeaponCommon::sub_weapon_common_settings(agent);      // a weapon has NO shared table: every status it has is its own
+   }
+   ```
+   A weapon's main starts its motion and names its loop with `L2CFighterBase::fastshift(agent, <loop>)` (the
+   fighter uses `L2CFighterCommon::sub_shift_status_main`); its life is its own work value
+   (`WorkModule::dec_int(boma, WEAPON_INSTANCE_WORK_ID_INT_LIFE)` in `mario_fireball_regular_exec_status`).
+3. **Its ACMD scripts**: registered under the weapon's agent, named after its motions (`game_regular`,
+   `effect_regular`, `sound_regular` for the fireball). In `fighters\<name>\acmd\*.cpp` a script name used by more
+   than one agent of the module gets a suffix (`game_regular`, `game_regular__1`, `game_regular__2`).
+4. **How the fighter spawns it**: by the article's number, from an ACMD script or a status function of the
+   fighter: `ArticleModule::generate_article(boma, FIGHTER_MARIO_GENERATE_ARTICLE_FIREBALL, false, -1);`
+   (`fighters\mario\acmd\game.cpp`, `game_specialn`). The game then asks the module for the agent of that article
+   (step 1) and starts it in its first status. The link article number -> agent name -> model / parameters is DATA
+   of the game (the fighter's parameter and model files), not script: for a new fighter it has to be added there
+   (not looked at in this session). Other owner-side calls seen in the scripts: `ArticleModule::change_motion`,
+   `set_visibility_whole`, `remove_exist`; the weapon reaches its owner with `Weapon::get_founder_id` /
+   `WeaponSpecializer_*`.
+
+The common ITEMS (`lua2cpp_item`, one module, 421 item classes) are bound differently: an item's install
+function binds a status kind to a NAME STRING and a table member of the class through a helper of the module, and
+the functions are values built by the class constructor. The census counts them; they are not source yet
+(plan section 13).
+
+Build and test (work folders; the default build of a fighter does NOT compile `status\`):
+
+```
+python fighter_sdk\tools\fighter_status.py cycle mario      decompile, SDK (fighters\sdk_generated_s8), build into fighters_bin_s8, offline test
+set SSBU_FIGHTER_STATUS=1 & set SSBU_FIGHTER_SDK=sdk_generated_s8 & set SSBU_FIGHTER_BIN=fighters_bin_s8
+python fighter_sdk\tools\build_fighter.py mario             after an edit
+python fighter_sdk\tools\fighter_status.py test mario       every bound function against its original, made-up answers, 3 passes
+python fighter_sdk\tools\signals.py mario                   static check: calls named in the binary vs in the source text
+```
+
+Limits: a function calls another function of the fighter directly as source (`local::name(agent, ...)`) only when
+that one is source too, so a function whose callee was refused stays original; helpers the game calls as plain
+functions (`L2CValue local::name(L2CAgent *agent, ...)`) are not bound and are tested only inside their callers;
+the names `<agent>_<status>_<line>` are this project's (the game has none), status kinds and lines are the public
+constant names. A new fighter also needs what section 7 lists (a module to load, a character slot, ACMD scripts,
+parameters, model and animations): the registration is only the script side.
+
 ## 7. What is not possible yet
 
 - `SSBU_FIGHTER_HOOK=1` (source reached through direct calls) is NOT the default: see section 8 of the plan file
@@ -157,7 +256,8 @@ L2C_FUNCTION(common, <function name>) {            // a function of lua2cpp::L2C
   be replaced from a mod.
 - New script names, new statuses, new fighters, more character slots: not built (what each needs is in section
   7.5 of the plan file).
-- Per-fighter status scripts (each fighter's own state functions) are not source yet; hook them by address.
+- Per-fighter status scripts (each fighter's own state functions): source exists in work folders and is equal
+  OFFLINE only (section 6a); it has never run in a match and is not installed. Until then hook them by address.
 - Reloading a fighter DLL in the middle of a match; unloading a mod.
 - Loose-file overrides (replacing game files from a folder) are a different piece of track M, not built.
 - The hook mechanism is x86-64 Windows only, like the port.

@@ -1,0 +1,3 @@
+p1=mario,p2=donkey,stage=end,form=normal,cpu=3,stock=1
+p1=kirby,p2=yoshi,stage=mario_castle64,form=omega,cpu=9,stock=1
+p1=captain,p2=ganon,stage=battle_field,form=normal,cpu=1,stock=1

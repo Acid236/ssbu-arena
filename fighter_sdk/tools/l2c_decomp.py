@@ -22,6 +22,7 @@ Anything outside the model raises NotMechanical with the reason: the function st
 import collections
 import json
 import os
+import re
 import sys
 
 import acmd_decomp as A
@@ -351,6 +352,36 @@ class FExec(A.Exec):
             self.allnodes[v[1]]['fret'] = True          # the result is taken from the float register
         return v
 
+    # S10: "x0 read after a float function". The game's own code sometimes reads the INTEGER register after a function
+    # that returns a float (L2CValue(unsigned) of MotionModule::end_frame): what it gets is whatever the function left
+    # in x0, not the float converted. After a call of a function the SDK declares float, x0 is ('x0of', ('ref', node));
+    # when that value is copied into another register or stored (so: really used), the node is marked `xret` with the
+    # width read, and the call is printed as gcall<uintNN_t>(slot, ...) = the content of x0, not through the wrapper.
+    def call_import(self, sym):
+        A.Exec.call_import(self, sym)
+        v = self.reg['x0']
+        if v[0] == 'ref' and self.reg['v0'] == v and v[1] in self.allnodes:
+            nd = self.allnodes[v[1]]
+            rt = ret_type(sym)                           # (also loads the table of the public bindings' return types)
+            if nd['kind'] == 'call' and nd['sym'] == sym and rt == 'float':
+                self.reg['x0'] = ('x0of', v)
+            # S10: a function the public bindings declare as returning a phx::Vector2f/3f/4f BY VALUE: the result is
+            # the whole vector register (the game's code stores q0 and reads its lanes)
+            if nd['kind'] == 'call' and nd['sym'] == sym and re.fullmatch(r'(root::)?phx::Vector[234]f', _rets[0].get(sym) or ''):
+                nd['vret'] = True
+                self.reg['v0'] = ('vecret', v)
+                self.reg['x0'] = UNDEF
+
+    def put(self, tok, v):
+        if v[0] == 'x0of' and tok not in ('x0', 'w0') and v[1][1] in self.allnodes:
+            self.allnodes[v[1][1]]['xret'] = 'uint32_t' if tok[0] == 'w' else 'uint64_t'
+        A.Exec.put(self, tok, v)
+
+    def store(self, a, v):
+        if v[0] == 'x0of' and v[1][1] in self.allnodes:
+            self.allnodes[v[1][1]]['xret'] = 'uint64_t'
+        A.Exec.store(self, a, v)
+
     def truth(self, v):
         if v[0] in ('conv', 'ref', 'lvop', 'not', 'cmp', 'cond', 'var'):
             return v
@@ -648,6 +679,16 @@ class Printer2(A.Printer):
             return self.value_text(nd['args'][0])
         if k == 'callptr':
             return 'call_function(%s)' % ', '.join(['agent'] + [self.expr(a) for a in nd['args']])
+        if k == 'local':                                 # S8: a function of this module without an exported name
+            return 'local::%s(%s)' % (self.ex.m.locals[nd['target']], ', '.join(['agent'] + [self.value_text(a) for a in nd['args']]))
+        if nd.get('vret'):                               # S10: a vector result (its plain uses are printed as lane 0)
+            return self.vret_text(nd)
+        if nd.get('xret'):                               # S10: the content of x0 after a function that returns a float
+            if nd.get('fret'):
+                raise NotMechanical('result of a float function read from both the float and the integer register')
+            self.used_syms.add(nd['sym'])
+            slot = 'S_' + re.sub(r'\W', '_', A.wrapper_name(nd['sym']))
+            return 'gcall<%s>(%s)' % (nd['xret'], ', '.join([slot] + [self.expr(a) for a in nd['args']]))
         if nd.get('fret'):
             self.ex.m.float_syms.add(nd['sym'])         # gen_sdk.py: this function's result is in the float register
         if nd.get('void'):
@@ -661,12 +702,16 @@ class Printer2(A.Printer):
         return t if t.startswith('L2CValue(') or v[0] in ('var', 'ref', 'lvop', 'arg') else 'L2CValue(%s)' % t
 
     def node_type(self, nd):
+        if nd.get('vret'):
+            return 'Vector4f'
+        if nd.get('xret'):
+            return nd['xret']
         if nd.get('fret'):
             return 'float'
-        if nd['kind'] in ('lua', 'snap', 'callptr'):
+        if nd['kind'] in ('lua', 'snap', 'callptr', 'local'):
             return 'L2CValue'
         path = mangle.parse(nd['sym'])[0]
-        if path[0] == 'lua2cpp' and mangle.is_member(path):
+        if (path[0] == 'lua2cpp' and mangle.is_member(path)) or mangle.is_static_value(path):      # S13: lib::L2CAgent::math_* returns an L2CValue too
             return 'L2CValue'
         return ret_type(nd['sym'])
 
@@ -689,6 +734,15 @@ class Printer2(A.Printer):
             return '%s[%s]' % (self.expr(v[1]), key)
         if k == 'arg':
             return 'a%d' % v[1]
+        if k == 'x0of':                                  # S10: see FExec.call_import
+            if not self.nodes[v[1][1]].get('xret'):
+                raise NotMechanical('x0 after a float function, not marked')
+            return self.expr(v[1], want)
+        if k == 'singleton':                           # S8: lib::Singleton<app::X>::instance_ (gen_sdk.py makes the slot and singleton())
+            self.used_syms.add(v[1])
+            return 'singleton(S_singleton_%s)' % A.singleton_name(v[1])
+        if k == 'img' and v[1] in getattr(self.ex.m, 'locals', {}):      # S8: the address of a local function the driver named
+            return 'status_function(%s)' % self.ex.m.locals[v[1]]
         if k in ('sym', 'img'):                          # the address of a named function (stored in a table, called later)
             sym = v[1] if k == 'sym' else self.ex.n.exports.get(v[1])
             if not sym or not mangle.parse(sym):
@@ -703,11 +757,12 @@ class Printer2(A.Printer):
             return '(%s %s %s)' % (self.expr(v[2]), v[1], self.expr(v[3]))
         if k == 'ref':
             i = v[1]
+            lane0 = '.v[0]' if self.nodes[i].get('vret') and want != 'vec' else ''      # S10: a plain use of a vector result
             if i in self.named:
                 if self.all_hoisted or self.def_scope.get(i) not in self.scopes:
                     self.hoist.add(i)
-                return self.named[i]
-            return self.call_text(self.nodes[i])
+                return self.named[i] + lane0
+            return self.call_text(self.nodes[i]) + lane0
         if k == 'cond':
             return self.cond(v[1])
         if k == 'lv' and v[1] == 'b' and v[2][0] not in ('int',):

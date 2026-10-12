@@ -218,7 +218,7 @@ def step_stage(cx):
     """The sources are laid out the way the tools expect them (one folder, ro_study\\, tools_audit\\, fighter_sdk\\, tests\\),
     next to binaries\\ and romfs: the tools address the dump by relative paths."""
     plan = [('runtime', '', None), ('tools/lifter', '', None), ('tools/nro', 'ro_study', '.py'), ('tools/audit', 'tools_audit', '.py'),
-            ('fighter_sdk', 'fighter_sdk', None), ('tests', 'tests', None)]
+            ('fighter_sdk', 'fighter_sdk', None), ('tests', 'tests', None), ('mods', '', None)]
     n = changed = 0
     for src, dst, ext in plan:
         for root, dirs, files in os.walk(os.path.join(REPO, src)):

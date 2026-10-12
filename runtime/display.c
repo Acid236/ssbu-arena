@@ -50,6 +50,23 @@ static int old_pacing(void) {
 }
 static void vsync_test_key(void);
 
+/* TEST ONLY, SSBU_SPEED=<n> (debug_mode.c, tests\DEBUG_MODE.md): 2, 4 (any number > 0) = the refresh clock runs n times
+ * faster; 0 = uncapped. Not set or 1 = nothing changes. In this mode there is no free-running vsync thread: the refresh is
+ * given when the frame the game queued is due, ONE refresh per queued frame (interval 1), the event is signalled and the
+ * wait goes on until the game's VSync Count Thread has counted it (window object + 0x138), so the game steps one frame per
+ * presented frame whatever the host speed; the wall-clock gap between refreshes is 1/60/n s (none when uncapped). */
+static double g_speed = 1.0;
+static int g_lockstep;
+static volatile uint64_t g_wnd_count_addr;           /* guest address of the window object's refresh count, once known */
+static void speed_init(void) {
+    const char *e = getenv("SSBU_SPEED");
+    if (!e || !e[0]) return;
+    g_speed = atof(e);
+    if (g_speed < 0) g_speed = 0;
+    g_lockstep = g_speed != 1.0;
+    if (g_lockstep) printf("display: SSBU_SPEED=%s: %s, one refresh per presented frame\n", e, g_speed > 0 ? "paced at n x 60 Hz" : "uncapped");
+}
+
 int oe_exit_request(void);                            /* nnmisc.c */
 static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
     if (m == WM_CLOSE) {                             /* the exit request: nn::oe decides (nnmisc.c oe_exit_request) whether the game ends now or after its exit-request handling section */
@@ -181,7 +198,8 @@ void display_init(void) {
     CreateThread(NULL, 0, window_thread, NULL, 0, NULL);
     while (!g_ready) Sleep(1);
     nvn_gl_start(g_hwnd);
-    CreateThread(NULL, 0, vsync_thread, NULL, 0, NULL);
+    speed_init();
+    if (!g_lockstep) CreateThread(NULL, 0, vsync_thread, NULL, 0, NULL);
     { void nvn_vk_selftest_hook(void); nvn_vk_selftest_hook(); }      /* nvn_vk.c: SSBU_RENDERER=vk SSBU_VK_SELFTEST=<frames>, then exit (plan\phases\V1_vulkan.md, M1) */
 }
 
@@ -196,6 +214,7 @@ static LONG64 g_cs_steps, g_cs_hist[4];      /* game steps (1 + refreshes skippe
  * VSync Count Thread has counted, + 0x140 = the count at its previous present. Right after this call the game computes
  * steps = max(count - last, 1) (0x710386fc30) and then stores last = count. */
 void display_clock_sample(uint64_t index_ptr) {
+    if (g_lockstep && index_ptr) g_wnd_count_addr = index_ptr - 0x30 + 0x138;
     if (!g_clockstat || !index_ptr) return;
     uint64_t count = rd64(index_ptr - 0x30 + 0x138), last = rd64(index_ptr - 0x30 + 0x140);
     LONG64 d = (LONG64)(count - last);
@@ -226,8 +245,16 @@ static void frame_queued(void) {
     g_latch = at;
     InterlockedExchange(&g_latch_pending, iv != 0);
     clock_stat(n, now);
+    {   /* TEST ONLY, SSBU_FRAMELOG=<k>: a line "frame-mark: <n>" every k presented frames, to place log events in game frames */
+        static int every = -1;
+        if (every < 0) { const char *e = getenv("SSBU_FRAMELOG"); every = e ? atoi(e) : 0; }
+        if (every > 0 && n % every == 0) printf("frame-mark: %lld%c", (long long)n, 10);
+        { void debug_mode_frame(long long frame); debug_mode_frame((long long)n); }      /* debug_mode.c: returns at once unless SSBU_DEBUG_END / SSBU_DEBUG_MATCH is set */
+    }
     if ((now.QuadPart - second_start.QuadPart) >= g_freq.QuadPart) {
         char title[160];
+        if (g_lockstep) printf("speed: frame %lld, %lld frames presented in the last %.2f s (%.1f per second)%c", (long long)n, (long long)second_frames,
+                               (double)(now.QuadPart - second_start.QuadPart) / (double)g_freq.QuadPart, (double)second_frames * (double)g_freq.QuadPart / (double)(now.QuadPart - second_start.QuadPart), 10);
         if (gfx_options()->overlay && second_frames) {       /* track O: frame_time_overlay = on */
             double ms = (double)(now.QuadPart - second_start.QuadPart) * 1000.0 / (double)g_freq.QuadPart / (double)second_frames;
             printf("frame-time: %.2f ms per frame over the last second (%lld frames)\n", ms, (long long)second_frames);
@@ -243,6 +270,40 @@ static void frame_queued(void) {
 int display_wait_refresh(void) {
     if (old_pacing() || !InterlockedExchange(&g_latch_pending, 0)) return 0;
     if (g_vsync_n >= g_latch) return 0;
+    if (g_lockstep) {                                              /* SSBU_SPEED: see the comment at g_speed */
+        static LONG64 due;                                         /* wall-clock time of the next refresh (QPC ticks) */
+        LARGE_INTEGER a, now;
+        QueryPerformanceCounter(&a);
+        while (g_vsync_n < g_latch) {
+            if (g_speed > 0) {
+                LONGLONG step = (LONGLONG)((double)g_freq.QuadPart / (60.0 * g_speed));
+                if (!due) due = a.QuadPart;
+                due += step;
+                QueryPerformanceCounter(&now);
+                if (now.QuadPart - due > 4 * step) due = now.QuadPart;      /* far behind (a load): do not run to catch up */
+                while (now.QuadPart < due) {
+                    LONGLONG left = due - now.QuadPart;
+                    if (left * 1000 > 2 * g_freq.QuadPart) Sleep(1); else YieldProcessor();
+                    QueryPerformanceCounter(&now);
+                }
+            }
+            uint64_t ca = g_wnd_count_addr, c0 = ca ? rd64(ca) : 0;
+            AcquireSRWLockExclusive(&g_vsync_lock);
+            g_vsync_n++;
+            ReleaseSRWLockExclusive(&g_vsync_lock);
+            if (g_vsync_event) { os_signal_event(g_vsync_event); InterlockedIncrement64(&g_vsync_signals); }
+            if (ca) {                                              /* wait until the game's VSync Count Thread has counted it */
+                LARGE_INTEGER t0, t1;
+                QueryPerformanceCounter(&t0);
+                while (rd64(ca) == c0) {
+                    QueryPerformanceCounter(&t1);
+                    if ((t1.QuadPart - t0.QuadPart) * 1000 > 100 * g_freq.QuadPart) { printf("display: speed mode: the game did not count a refresh within 100 ms%c", 10); break; }
+                    Sleep(0);
+                }
+            }
+        }
+        return 1;
+    }
     LARGE_INTEGER a, b;
     QueryPerformanceCounter(&a);
     hitch_pacing(1);

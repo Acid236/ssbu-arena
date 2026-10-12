@@ -237,6 +237,9 @@ int nro_call_indirect(Ctx *c, uint64_t addr) {
     if (fn && modcov_on()) modcov_mark(m, addr);
     if (fn && (g_fs_recording || g_fs_replaying) && fighter_rec_pointer(c, addr, fn)) return 1;  /* S2: differential test: a call through a function pointer is one event */
     if (fn && m->fighter && !g_fs_hookmode && fighter_dispatch(c, m, addr, fn)) return 1;      /* S1: this script function exists as C++ source (S3: with the hook table the function's own entry does this) */
+    /* S10 (track S, part D): a function that exists only in a fighter's C++ source has a synthetic address inside its
+     * module (an odd offset: never a function entry); fighter_host.c enters the source function */
+    if (!fn && m && m->fighter && fighter_dispatch(c, m, addr, NULL)) return 1;
     if (!fn) {
         if (m) {
             printf("\nindirect call to %s+0x%llx, which is not a lifted function entry (called from near 0x%llx, f_%llx)\n",
@@ -758,3 +761,5 @@ void register_ro_imports(void) {
     ro_reserve_range();
     register_imports(ro_imports, (int)(sizeof ro_imports / sizeof ro_imports[0]));
 }
+
+#include "fighter_sdk/newmodule_host.c"        /* N5: the fighter registry (SSBU_CHARACTERS) and script modules that exist only as our DLL; nothing runs without that variable */

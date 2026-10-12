@@ -1,0 +1,28 @@
+# Boot -> battle (Mario vs CPU), for SSBU_SEQ (see nnhid.c). Lines starting with # are dropped by tests/run_battle.sh.
+# Screens are recognised by their draw count per frame, so loading times do not matter.
+# opening movie created and playing (24 draws); it ignores A for the first seconds: press A every 200 polls until the title logo (39-41 draws) is up
+@movie
+@draws:22-26/30
+# FAST MODE variant (SSBU_SKIP_MOVIES=1, tests\DEBUG_MODE.md): the movie ends by itself, so no A presses here (a press that lands as the title appears skips it
+# and the sequence loses the screens); just wait for the title logo (36-44 draws) for 30 polls.
+@draws:36-44/30
+# title -> main menu (746-759 draws); "Mischia" (Smash) is the item under the cursor
+30:Z
+@draws:700-800/40 30:Z
+# Smash menu (same draw count): "Incontro normale" is the default item -> rules screen (384 draws)
+150:Z
+# rules -> stage select (274-289 draws): A picks the stage under the hand, the first one (Battlefield)
+@draws:370-400/40 30:Z
+@draws:270-295/40 30:Z
+# loading (45 draws), then character select (185-199 draws): P1 hand starts on its panel at about (340,415) of 960x540
+@draws:175-205/60
+# hand up to the first portrait row, left onto Mario, A = pick. Player 2 is already a level 3 CPU with a random fighter.
+30:u/30 20:l/18 30:Z
+# "Ready to fight" banner (200-205 draws): move the hand onto it and press A = start the battle
+60:r/50 20:d/8 30:Z
+# loading splash (38-45 draws), then the battle itself (more than 205 draws per frame); the countdown takes about 250 polls
+@draws:30-60/20
+@draws:206-450/60
+120:u/2
+58:u/2
+200

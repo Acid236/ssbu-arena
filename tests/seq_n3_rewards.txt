@@ -1,0 +1,20 @@
+# N3 (plan\phases\N3_new_kind.md, experiment (i) with many extra roster rows): tests\seq_n3_select.txt with ONE change:
+# between the title and the main menu the game shows reward screens ("Complimenti! Gettoni 1500": it counts the extra
+# available fighters towards a milestone); A is pressed every 400 polls until the main menu (700-800 draws) is up.
+# The character select is recognised by 175-700 draws (91 icons draw far more than 13).
+@movie
+@draws:22-26/30
+@draws:36-44/30
+30:Z
+@until:700-800/40:Z/400
+30:Z
+150:Z
+@draws:370-400/40 30:Z
+@draws:270-295/40 30:Z
+@draws:175-700/60
+30:u/30 20:l/18 30:Z
+60:r/50 20:d/8 30:Z
+@draws:30-60/20
+@draws:206-450/60
+280
+60:r/50 10:Z 25:Z 25:Z 40:l/50 10:C 40:X 30:l/30 10:Z 40:r/20 5:Z 60:C/4 20:Z 40:d/20 10:X

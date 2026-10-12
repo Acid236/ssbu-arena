@@ -23,7 +23,37 @@ SYMTAB, STRTAB = 0x4197610, 0x41c11f0
 IMG = open(ELF, 'rb').read()
 
 
+# Instruction patch list (N3, plan\phases\N3_new_kind.md): DEFAULT OFF. A patch replaces one instruction word of the
+# game by another before it is lifted: the way a table size or a member offset that is fixed in the game's code becomes
+# ours without editing generated C by hand. File format, one patch per line:  <address> <original word> <new word>  # note
+# (hex; the original word is checked against the binary). Switched on by RECOMP_PATCHES=<file> (a full lift with
+# recomp_eh.py then applies it) or by recomp_partial.py, which re-lifts only the files that hold a patched address.
+# With no file the dictionary is empty and word() returns the binary's word: the lift is unchanged.
+PATCHES = {}
+
+
+def load_patches(path):
+    out = {}
+    with open(path) as f:
+        for line in f:
+            t = line.split('#', 1)[0].split()
+            if not t:
+                continue
+            addr, old, new = int(t[0], 16), int(t[1], 16), int(t[2], 16)
+            have = struct.unpack_from('<I', IMG, FILE_OFF + addr - BASE)[0]
+            if have != old:
+                raise ValueError('patch %x: the binary has %08x, the patch expects %08x' % (addr, have, old))
+            out[addr] = new
+    return out
+
+
+if __import__('os').environ.get('RECOMP_PATCHES'):
+    PATCHES = load_patches(__import__('os').environ['RECOMP_PATCHES'])
+
+
 def word(addr):
+    if PATCHES and addr in PATCHES:
+        return PATCHES[addr]
     return struct.unpack_from('<I', IMG, FILE_OFF + addr - BASE)[0]
 
 

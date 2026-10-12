@@ -1,0 +1,18 @@
+# S10 part D proof: enter the two statuses that exist only in the source (variant B of the charged fireball:
+# 0x1E3 = hold, 0x1E4 = shoot; the game's Mario has kinds up to 0x1E2), ground then air, then the button-free path
+# through the real neutral special (0x1DC = FIGHTER_STATUS_KIND_SPECIAL_N).
+at 420 pos 0 0 0.1
+at 421 status 0 0x1E3
+at 470 status 0 0x1E4
+at 540 status 0 0
+at 560 status 0 0x1DC
+at 640 status 0 0
+at 660 pos 0 0 35
+at 660 air 0 0
+at 661 status 0 0x1E3
+at 700 status 0 0x1E4
+at 760 status 0 14
+at 800 pos 0 0 0.1
+at 801 status 0 0x1E4
+at 860 status 0 0
+at 900 damage 0 0

@@ -1,0 +1,6 @@
+# exploration: reach character select, then measure the hand speed
+@movie 120:Z 180:Z 180:Z 180:Z 180:Z 180:Z 180:Z
+@draws:180-195/60
+30:u/30
+60:l/30
+60:Z

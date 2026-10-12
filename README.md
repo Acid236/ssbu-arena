@@ -29,12 +29,17 @@ something was not checked, it says so.
 | Adventure (World of Light) | intro reached; map and fights not tested |
 | Team battles, Squad Strike, Tourney, 3-8 players, Stage Builder editing | not tested |
 | Online | not available (the network services answer as an offline console) |
-| Renderer | Vulkan by default, OpenGL as a fallback |
-| Speed | 59-60 fps in a fight when nothing new has to be prepared; visible hitches the first time new content appears (shader/pipeline preparation is not complete) |
-| Integrated GPU | a whole match runs on an Intel Raptor Lake iGPU at 59-60 fps outside those hitches |
+| Renderer | Vulkan by default, OpenGL as a fallback. Pipeline libraries per shader stage, prepared ahead by background threads from the game's shader containers (the runtime reads them from your `data.arc` itself), and a loading barrier that waits for the containers the game is about to use: **0 pipeline holds in fight frames** in the measured first-run tests on an NVIDIA and an Intel GPU, with one scripted fight (and 0 in three more fights with other fighters and stages in the fast test mode). Not shown: every window clean on a cold first run (NVIDIA: 6 frames of 34-38 ms at the very start of the fight in one of two runs), a pixel comparison with the OpenGL renderer, and the preparation of a changed `data.arc`. The preparation takes about 15 minutes of play on a first run and costs disk (about 2.5 GB of shader files, up to 0.9 GB of pipeline cache) |
+| Freeze watchdog | no presented frame for 5 s writes a report (locks, waits, the stack of every thread) to the log and to `<exe name>_freeze.txt`; with a linker map next to the exe it names the host functions. A freeze that was reported once was not reproduced in long runs (26-27 min, three runs), so its cause is **not established** |
+| Speed | 59-60 fps in a fight when nothing new has to be prepared; after a first run's preparation the second run needs a loading barrier of 0.2-0.3 s |
+| Integrated GPU | a whole match runs on an Intel Raptor Lake iGPU at 59-60 fps; cold first run: 0 fight frames over 33.4 ms in 2 of 2 runs |
 | Controllers | any pad through SDL3 (database mapping, hot-plug, 8 players, remapping file, rumble, gyro) — passes its automated tests with virtual devices; **not yet confirmed with physical pads** |
 | Save data | journalled like the console's (two-phase commit) |
 | Mods | fighter scripts as readable C++ rebuilt in about a second; a hook table makes every function of the game and of the script modules replaceable from a mod DLL without rebuilding the game (self-tested; shown with two small edits) |
+| Fighter source | the shared state machine: 489 functions are installed as readable C++ in place of the lifted code, each proven on real calls (the lifted and the source version compared on the same arguments); the per-fighter status scripts of all 96 fighter modules: 20,256 of 23,834 functions (85.0%) decompile to source that is equal to the original offline (19,162 bound functions compared, 0 differing); 8 fighters (Mario, Luigi, Link, Samus, Fox, Captain Falcon, Donkey Kong, Ness) run their status source in deterministic matches with identical per-frame logs (2,010 fight frames each, against the lifted version; one fighter, Pikachu, was reverted after one differing function). Not shown: the other fighters in matches |
+| Test modes | a deterministic mode (fixed clock seed, per-frame state hash log) to compare two builds frame for frame, and a debug fast mode (`tests/DEBUG_MODE.md`: speed-up, movie skip, fighters/stage/stocks chosen from the environment, a fixed end after N fight frames). Test-only; none set, the code paths are not taken |
+| New fighter kinds | a 95th fighter kind fights as a copy of an existing fighter, on a separately built game DLL produced by a patch list (`tools/lifter/patches/`, 175 instruction patches in 73 functions; the default build is untouched); own kind hash, own parameter-table rows and a roster row work. Own files and own moves are **in progress**: a fighter under its own file name does not load yet. See [docs/NEW_FIGHTER.md](docs/NEW_FIGHTER.md) |
+| Matching decompilation | paused |
 | Rollback netcode | planned, not started |
 | Linux / Steam Deck | not started (the runtime is Windows-only today) |
 | Building from a fresh clone | **verified** (October 2026): `python scripts/setup.py --dump <your dump> ...` builds a running game in about 45 minutes and passes the scripted match; see [BUILDING.md](BUILDING.md) |
@@ -107,7 +112,7 @@ rules) is being converted with a second, general decompiler.
 
 ## Plans
 
-1. Every mode playable from start to end, steady 60 fps (finish shader/pipeline preparation)
+1. Every mode playable from start to end, steady 60 fps (fight frames are hold-free in the tests above; other modes are not measured)
 2. Internal resolution scale and a low-end profile
 3. Mod platform: file overrides, the function hook API with a small C++ SDK, documentation
 4. The shared fighter state machine as readable source (movement tech, cancel rules), so that changes to
@@ -134,13 +139,14 @@ self-test reference data, and your dump. Exact versions, links and the one comma
 | `tools/extract/` | reading your dump |
 | `tools/audit/` | the "what is really implemented" audit |
 | `fighter_sdk/` | fighter script decompilers, the C++ SDK and runtime for fighter source, the hook API |
-| `tests/` | scripted input sequences and measuring scripts |
-| `docs/` | design notes |
+| `mods/` | small test mods (C++ source) for the hook API and the new-fighter experiments |
+| `tests/` | scripted input sequences, test drivers and measuring scripts (`DEBUG_MODE.md` documents the test modes) |
+| `docs/` | `MODDING.md` (mods and fighter source), `NEW_FIGHTER.md` (what a new fighter needs, what works) |
 
 ## Related work
 
 The matching decompilation that this project also contributes to is a separate effort based on
-[sbergeron42/ssbu-decomp](https://github.com/sbergeron42/ssbu-decomp). Technique was learned from the
+[sbergeron42/ssbu-decomp](https://github.com/sbergeron42/ssbu-decomp); the project's own work on it is paused. Technique was learned from the
 open-source emulators (yuzu and its successors), from SDL, from the N64 static-recompilation projects and
 from other Switch recompilation and decompilation projects; names of script functions and constants come
 from the Smash modding community's public work (param labels, skyline-smash, ARCropolis).
@@ -162,6 +168,12 @@ between having the idea and seeing whether it works is now very short.
 Two rules kept it honest: every claim has to come from a test or a measurement (this README says what was
 measured and what was not), and nothing derived from the game goes into the repository. It is a study
 project; expect rough edges, and mistakes that a specialist would not have made.
+
+## Contributing
+
+Testers with other GPUs and controllers, and people who know the game's internals or the modding scene's
+tooling, are very welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) first: three rules (nothing derived from
+the game in the repository, clean sources only, every claim measured) apply to every contribution.
 
 ## Legal
 

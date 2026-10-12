@@ -1,0 +1,18 @@
+# S11 part 4 proof (tests\s10_partd_debug.txt moved 300 frames later: the fast sequence has its countdown until
+# about fight frame 500): the two statuses that exist only in the source (variant B: 0x1E3 hold, 0x1E4 shoot), which
+# now keep their charge / first flag / shot counter in NAMED new work variables of the registry.
+at 720 pos 0 0 0.1
+at 721 status 0 0x1E3
+at 770 status 0 0x1E4
+at 840 status 0 0
+at 860 status 0 0x1DC
+at 940 status 0 0
+at 960 pos 0 0 35
+at 960 air 0 0
+at 961 status 0 0x1E3
+at 1000 status 0 0x1E4
+at 1060 status 0 14
+at 1100 pos 0 0 0.1
+at 1101 status 0 0x1E4
+at 1160 status 0 0
+at 1200 damage 0 0

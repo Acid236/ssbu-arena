@@ -1,0 +1,12 @@
+# exploration: anchored menus, pick Mario, go to the CPU token
+@movie
+@draws:22-26/30
+@until:36-44/30:Z/200
+30:Z
+@draws:700-800/40 30:Z
+150:Z
+@draws:370-400/40 30:Z
+@draws:270-295/40 30:Z
+@draws:175-205/60
+30:u/30 20:l/18 30:Z
+60:r/50 20:d/8 30:Z

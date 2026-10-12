@@ -1,0 +1,26 @@
+# S13 coverage sequence (any fighter as player 1, a level-9 CPU of a grab-heavy fighter as player 2): menus as seq_s12_generic.txt, then from the
+# first fight frame: one neutral special at once (a final smash if SSBU_FIGHTER_DEBUG gave the fighter the final flag: tests\s13_final_dbg.txt),
+# 330 frames to let it run, then blocks that alternate shield (held), attacks, specials (tapped, up/down/side), smash attacks, air specials, so the
+# opponent can hit and grab the fighter. Keys: X = B (special), Z = A (attack), C/V = jump, Q/E/S/A = shield buttons; r l u d = stick.
+@movie
+@draws:22-26/30
+@draws:36-44/30
+30:Z
+@draws:700-800/40 30:Z
+150:Z
+@draws:370-400/40 30:Z
+@draws:270-295/40 30:Z
+@draws:175-205/60
+30:u/30 20:l/18 30:Z
+60:r/50 20:d/8 30:Z
+@fight
+40:X/4
+330
+20:Q/45 10:Z/4 20:Q/30 10:X/4 40:Q/50 10:rZ/4 30:Q/40 10:uX/4 40:Q/60 10:dX/4 30:Q/30
+10:C/4 10:X/4 40:Z/4 15:Z/4 15:Z/4 30:Q/50 10:rX/4 40:Q/40 10:uZ/4 30:Q/40 10:dZ/4 30:Q/30
+20:C/4 10:rX/25 40:Q/60 10:Z/4 20:Q/45 10:uX/25 40:Q/40 10:dX/25 40:Q/50 10:X/25
+10:C/4 10:uX/4 50:Q/40 10:Z/4 15:Z/4 30:Q/50 10:rZ/4 30:dZ/4 30:Q/40 10:X/4 40:Q/40 10:rX/4
+20:Q/60 10:Z/4 20:Q/30 10:uZ/4 30:Q/50 10:C/4 10:dX/4 40:Q/40 10:X/25 50:Q/40 10:uX/25 50:Q/30
+20:Q/45 10:Z/4 20:Q/30 10:X/4 40:Q/50 10:rZ/4 30:Q/40 10:uX/4 40:Q/60 10:dX/4 30:Q/30
+10:C/4 10:X/4 40:Z/4 15:Z/4 15:Z/4 30:Q/50 10:rX/4 40:Q/40 10:uZ/4 30:Q/40 10:dZ/4 30:Q/30
+200:r/40 100:l/40 100:X/4 100:rX/4

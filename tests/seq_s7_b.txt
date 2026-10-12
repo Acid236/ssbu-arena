@@ -1,0 +1,40 @@
+# S session 7, sequence B: run off stage and recover to the ledge, each ledge option, air dodge in every direction, charged
+# smashes, the four specials, aerials, tilts. Boot as seq_battle_play.txt.
+# Boot -> battle (Mario vs CPU), for SSBU_SEQ (see nnhid.c). Lines starting with # are dropped by tests/run_battle.sh.
+# Screens are recognised by their draw count per frame, so loading times do not matter.
+# opening movie created and playing (24 draws); it ignores A for the first seconds: press A every 200 polls until the title logo (39-41 draws) is up
+@movie
+@draws:22-26/30
+@until:36-44/30:Z/200
+# title -> main menu (746-759 draws); "Mischia" (Smash) is the item under the cursor
+30:Z
+@draws:700-800/40 30:Z
+# Smash menu (same draw count): "Incontro normale" is the default item -> rules screen (384 draws)
+150:Z
+# rules -> stage select (274-289 draws): A picks the stage under the hand, the first one (Battlefield)
+@draws:370-400/40 30:Z
+@draws:270-295/40 30:Z
+# loading (45 draws), then character select (185-199 draws): P1 hand starts on its panel at about (340,415) of 960x540
+@draws:175-205/60
+# hand up to the first portrait row, left onto Mario, A = pick. Player 2 is already a level 3 CPU with a random fighter.
+30:u/30 20:l/18 30:Z
+# "Ready to fight" banner (200-205 draws): move the hand onto it and press A = start the battle
+60:r/50 20:d/8 30:Z
+# loading splash (38-45 draws), then the battle itself (more than 205 draws per frame); the countdown takes about 250 polls
+@draws:30-60/20
+@draws:206-450/60
+280
+# ledge: run off a short way, double jump back, up-B, hold to the stage, then an option (get-up / attack / jump / roll / drop)
+60:r/52 4:C/4 14:l/20 5:uX/8 6:l/50 90:l/4 80
+60:l/52 4:C/4 14:r/20 5:uX/8 6:r/50 90:Z/4 80
+60:r/52 4:C/4 14:l/20 5:uX/8 6:l/50 90:u/4 80
+60:l/52 4:C/4 14:r/20 5:uX/8 6:r/50 90:S/4 80
+60:r/52 4:C/4 14:l/20 5:uX/8 6:l/50 90:d/4 80
+60:C/4 12:Sl/8 70:C/4 12:Sr/8 70:C/4 12:Su/8 70:C/4 12:Sd/8 70:C/4 12:S/8 70:C/4 12:Sul/8 60:C/4 12:Sdr/8
+60:rZ/70 50:lZ/70 50:uZ/70 50:dZ/70
+60:X 50:rX/6 50:lX/6 50:dX/30 60:uX/6 60:X/50
+60:C/4 20:Z 40:C/4 15:rZ/6 40:C/4 15:lZ/6 40:C/4 15:uZ/6 40:C/4 15:dZ/6
+60:r/50 4:Z 30:u/6 20:Z/4 30:d/10 10:Z/4
+60:V/30 40:rV/4 30:lV/4 30:uV/4 30:dV/4
+60:r/20 10:Z 25:Z 25:Z 30:r/40 5:Z 30:l/40 5:Z 40:u/20 3:Z
+60:C/4 20:C/4 12:X 40:C/4 20:uX/6 30:C/4 20:dX/12 60

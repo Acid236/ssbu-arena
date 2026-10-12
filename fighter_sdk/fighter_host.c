@@ -29,7 +29,9 @@ typedef struct { const char *name; const char *spec; } FsSym;
 typedef struct { const FsSym *syms; int sym_count; uint64_t *addr; const FsOverride *ovr; int ovr_count; } FsTable;
 typedef void (*FsBindFn)(const FsHost *, FsTable *);
 
-typedef struct { long long calls, equal, partial, differ, synth_equal, synth_differ, synth_cut; int lifted; char first[200]; } FsStat;
+typedef struct { long long calls, equal, partial, differ, synth_equal, synth_differ, synth_cut; int lifted; char first[200];
+                 long long unreplayable, stale; char why_not[120];
+                 int modified, is_new; long long direct; } FsStat;                /* S10: FS_MODIFIED / only in the source; calls run without comparison */    /* S6: recordings the replay cannot answer soundly (see fs_unreplayable) */
 typedef struct FsMod {
     NroModule *mod;
     HMODULE dll;
@@ -50,6 +52,9 @@ typedef struct {
     uint64_t x[8]; uint32_t f[8]; uint8_t lv[8][16];
     uint64_t r_x0; V128 r_v0; uint8_t sret[16]; uint64_t x8; int done;
     uint64_t target;              /* a call through a function pointer: the address called */
+    /* S6: a game function the SDK has no description of (only lifted code of the module calls it): 1 = nothing known
+     * about its result; 2 = it changed the 16 bytes at x8 (kept in sret: an L2CValue or small struct result) */
+    int unknown; uint8_t x8_before[16];
 } FsEvent;
 
 typedef struct {
@@ -60,9 +65,15 @@ typedef struct {
     uint64_t res_at; uint8_t res_before[16];       /* S3: result buffer of the function under test */
     uint64_t lr;                                   /* S3: return address the running source function was called with */
     FsEvent *ev;
+    /* S6: table elements. look = every element the ORIGINAL looked up (lib::L2CValue::operator[]) and what it held at
+     * that moment; touch = every element the replay looked up and what it held when the replay began. */
+    struct FsLook { uint64_t addr; uint8_t v[16]; int at, used; } *look;
+    struct FsTouch { uint64_t addr; uint8_t post[16], seen[16]; } *touch;      /* seen = what the replay was last given there */
+    int look_count, look_pos, look_over, ix_pending, touch_count, stale;
     char why[200];
     jmp_buf jb, synth_jb;
 } FsFiber;
+#define FS_MAX_LOOKS 4096
 #define FS_SYNTH_CAP 400                           /* synthetic test: calls after which a run of the original is cut */
 static int g_fs_offline;                           /* SSBU_FIGHTER_OFFLINE: modules are loaded by fighter_offline, the game never starts */
 
@@ -85,13 +96,113 @@ static int fs_is_pure(const char *n) {
     return strncmp(n, "_ZN3lib8L2CValue", 16) == 0 || strncmp(n, "_ZNK3lib8L2CValue", 17) == 0;
 }
 
+/* S6: the value functions that touch memory shared with the game: 1 operator[] (returns the address of a table
+ * element), 2 operator=, 3 destructor, 4 copy constructor, 5 constructor from a table / inner function pointer.
+ * 2-5 count references; in a replay they must not (the original's run already did all the counting). */
+static int fs_pure_kind(const char *n) {
+    if (strncmp(n, "_ZNK3lib8L2CValueix", 19) == 0) return 1;
+    if (strncmp(n, "_ZN3lib8L2CValue", 16) != 0) return 0;
+    n += 16;
+    if (strcmp(n, "aSERKS0_") == 0) return 2;
+    if (strcmp(n, "D1Ev") == 0 || strcmp(n, "D2Ev") == 0) return 3;
+    if (strcmp(n, "C1ERKS0_") == 0 || strcmp(n, "C2ERKS0_") == 0) return 4;
+    if (strcmp(n + 1, "1EPNS_8L2CTableE") == 0 || strcmp(n + 1, "2EPNS_8L2CTableE") == 0) return 5;
+    if (strcmp(n + 1, "1EPNS_20L2CInnerFunctionBaseE") == 0 || strcmp(n + 1, "2EPNS_20L2CInnerFunctionBaseE") == 0) return 6;
+    return 0;
+}
+static int fs_writable16(uint64_t p);
+static int fs_readable16(uint64_t p) {                 /* S10: 16 bytes that can be read (a vector argument) */
+    MEMORY_BASIC_INFORMATION mi;
+    if (p < 0x10000 || (p & 3) || ((p + 15) >> 12) != (p >> 12) || !VirtualQuery((void *)(uintptr_t)p, &mi, sizeof mi)) return 0;
+    return mi.State == MEM_COMMIT && !(mi.Protect & (PAGE_GUARD | PAGE_NOACCESS));
+}
+static long long g_fs_n_look, g_fs_n_match, g_fs_n_putback, g_fs_n_touch, g_fs_n_undone, g_fs_n_inlifted;      /* report */
+static int fs_lv_simple(const uint8_t *v) { uint32_t t; memcpy(&t, v, 4); return t <= 4 || t == 7; }
+/* recording: the original looked the element at `addr` up; keep what it holds now */
+static void fs_look_add(FsFiber *ff, uint64_t addr) {
+    if (!ff->look) ff->look = malloc(sizeof *ff->look * FS_MAX_LOOKS);
+    if (ff->look_count >= FS_MAX_LOOKS) { ff->look_over = 1; return; }
+    if (!fs_writable16(addr)) return;
+    struct FsLook *l = &ff->look[ff->look_count++];
+    l->addr = addr; l->at = ff->count; l->used = 0; memcpy(l->v, (const void *)(uintptr_t)addr, 16);
+    g_fs_n_look++;
+}
+/* replay: the source (or lifted code of the module run inside the replay) looked the element at `addr` up, for real.
+ * The element is given the value it had when the original looked it up at the same point (between the same two
+ * game calls), so the source reads what the original read, not what the original left behind; whatever the replay
+ * then writes there is compared with what the original left and taken back at the end (fs_touch_end). */
+static void fs_replay_look(FsFiber *ff, uint64_t addr) {
+    if (!fs_writable16(addr)) return;
+    if (!ff->touch) ff->touch = malloc(sizeof *ff->touch * FS_MAX_LOOKS);
+    int k = 0;
+    while (k < ff->touch_count && ff->touch[k].addr != addr) k++;
+    if (k == ff->touch_count) {
+        if (k >= FS_MAX_LOOKS) { ff->stale++; return; }
+        ff->touch[k].addr = addr; memcpy(ff->touch[k].post, (const void *)(uintptr_t)addr, 16); ff->touch_count++;
+        memcpy(ff->touch[k].seen, ff->touch[k].post, 16);
+    }
+    /* the first lookup of this element the original made between the same two game calls and the replay has not used
+     * yet (the source need not look elements up in the original's order) */
+    while (ff->look_pos < ff->look_count && ff->look[ff->look_pos].at < ff->pos) ff->look_pos++;
+    for (int i = ff->look_pos; i < ff->look_count && ff->look[i].at == ff->pos; i++) {
+        if (ff->look[i].used || ff->look[i].addr != addr) continue;
+        ff->look[i].used = 1; g_fs_n_match++;
+        if (memcmp(ff->look[i].v, (const void *)(uintptr_t)addr, 16) == 0) { memcpy(ff->touch[k].seen, ff->look[i].v, 16); return; }
+        /* a table / string the original has replaced since may be freed: it is not put back, and the comparison
+         * of this call is not counted as a difference if it fails (stale) */
+        if (!fs_lv_simple(ff->look[i].v)) { ff->stale++; return; }
+        memcpy((void *)(uintptr_t)addr, ff->look[i].v, 16);
+        memcpy(ff->touch[k].seen, ff->look[i].v, 16);
+        g_fs_n_putback++;
+        return;
+    }
+}
+/* end of a replay: what the source left in every element it looked up against what the original left; then the
+ * original's values are put back, so the game goes on from exactly the state the original's run produced. */
+static void fs_touch_end(FsFiber *ff, int compare) {
+    for (int k = 0; k < ff->touch_count; k++) {
+        struct FsTouch *t = &ff->touch[k];
+        if (!fs_writable16(t->addr)) continue;
+        if (compare && !ff->bad) {
+            uint32_t ta, tb; uint64_t ra, rb;
+            memcpy(&ta, t->post, 4); memcpy(&ra, t->post + 8, 8);
+            memcpy(&tb, (const void *)(uintptr_t)t->addr, 4); memcpy(&rb, (const void *)(uintptr_t)(t->addr + 8), 8);
+            uint64_t m = ta == 0 ? 0 : ta == 1 ? 1 : ta == 3 ? 0xffffffffull : (ta == 2 || ta == 4 || ta == 7) ? ~0ull : 0;
+            /* the source left the element as it was given it, and the original's state has another value: either the
+             * original stored and the source did not (a difference), or a game call the original made changed it
+             * (no difference). The test cannot tell: no verdict for this call. */
+            if ((ta != tb || ((ra ^ rb) & m)) && memcmp(t->seen, (const void *)(uintptr_t)t->addr, 16) == 0) ff->stale++;
+            if (ta != tb || ((ra ^ rb) & m))
+                { ff->bad = 1; snprintf(ff->why, sizeof ff->why, "leaves type %u %llx in a table element (looked up as number %d), original type %u %llx", tb, (unsigned long long)rb, k, ta, (unsigned long long)ra); }
+        }
+        g_fs_n_touch++;
+        if (memcmp((const void *)(uintptr_t)t->addr, t->post, 16) != 0) g_fs_n_undone++;
+        memcpy((void *)(uintptr_t)t->addr, t->post, 16);
+    }
+    ff->touch_count = 0;
+}
+/* S6: a recording the replay cannot answer soundly: the original allocated or freed memory (operator new/delete, a
+ * lib::L2CTable). The answer would be a pointer the original may have freed again before it returned, and value
+ * functions run for real in the replay would then count references in freed memory (a double free). Such a call
+ * is not replayed; it is counted apart, by function. */
+static const char *fs_unreplayable(const FsFiber *ff) {
+    for (int i = 0; i < ff->count; i++) {
+        const char *n = ff->ev[i].name;
+        if (strncmp(n, "_Znwm", 5) == 0 || strncmp(n, "_Znam", 5) == 0 || strncmp(n, "_ZdlPv", 6) == 0 || strncmp(n, "_ZdaPv", 6) == 0 || strstr(n, "L2CTable")) return n;
+    }
+    return ff->look_over ? "more table lookups than the test keeps" : NULL;
+}
+
 static void fs_capture(FsEvent *e, const Ctx *c, const char *name, const char *spec) {
-    e->name = name; e->spec = spec; e->x8 = c->x[8]; e->done = 0;
+    e->name = name; e->spec = spec; e->x8 = c->x[8]; e->done = 0; e->unknown = 0;
     for (int i = 0; i < 8; i++) { e->x[i] = c->x[i]; e->f[i] = c->v[i].w[0]; }
     int xi = 0;
     for (const char *p = spec ? spec : ""; *p; p++) {
         if (*p == 'S' || *p == 'f') continue;
         if (*p == 'V' && xi < 8 && c->x[xi]) memcpy(e->lv[xi], (const void *)(uintptr_t)c->x[xi], 16);
+        /* S10: '2' '3' '4' = pointer to a phx::Vector2f / 3f / 4f: the CONTENT is the argument (the vector is built
+         * on the caller's stack, so the pointer itself always differs between the original and the source) */
+        if (*p >= '2' && *p <= '4' && xi < 8) { memset(e->lv[xi], 0, 16); if (fs_readable16(c->x[xi])) memcpy(e->lv[xi], (const void *)(uintptr_t)c->x[xi], 4 * (size_t)(*p - '0')); else e->lv[xi][15] = 0xee; }
         xi++;
     }
 }
@@ -109,6 +220,13 @@ static int fs_same(const FsEvent *a, const FsEvent *b, char *why, size_t n) {
             memcpy(&ta, a->lv[xi], 4); memcpy(&tb, b->lv[xi], 4); memcpy(&ra, a->lv[xi] + 8, 8); memcpy(&rb, b->lv[xi] + 8, 8);
             uint64_t m = ta == 0 ? 0 : ta == 1 ? 1 : ta == 3 ? 0xffffffffull : ~0ull;
             if (ta != tb || ((ra ^ rb) & m)) { snprintf(why, n, "%.60s: value %d is type %u %llx, original type %u %llx", a->name, k, tb, (unsigned long long)rb, ta, (unsigned long long)ra); return 0; }
+            xi++; continue;
+        }
+        if (*p >= '2' && *p <= '4') {                  /* S10: a vector, by content */
+            if (memcmp(a->lv[xi], b->lv[xi], 16) != 0) {
+                float fa[4], fb[4]; memcpy(fa, a->lv[xi], 16); memcpy(fb, b->lv[xi], 16);
+                snprintf(why, n, "%.60s: vector argument %d is (%g %g %g %g), original (%g %g %g %g)", a->name, k, fb[0], fb[1], fb[2], fb[3], fa[0], fa[1], fa[2], fa[3]); return 0;
+            }
             xi++; continue;
         }
         if (*p == 'i') mask = 0xffffffffull; else if (*p == 'b') mask = 1; else if (*p == 'H') mask = 0xffffffffffull;
@@ -148,14 +266,28 @@ static void fs_replay_event(FsFiber *ff, Ctx *c, const char *name, const char *s
     if (ff->bad || !e->done) longjmp(ff->jb, 1);            /* a difference, or the call the original never came back from */
     c->x[0] = e->r_x0; c->v[0] = e->r_v0;
     if (spec[0] == 'S' && c->x[8]) memcpy((void *)(uintptr_t)c->x[8], e->sret, 16);
+    if (e->unknown) {                                   /* S6: answered as well as the test can; a difference after this is no verdict */
+        ff->stale++;
+        if (e->unknown == 2 && fs_writable16(c->x[8])) memcpy((void *)(uintptr_t)c->x[8], e->sret, 16);
+    }
 }
 static volatile LONG g_fs_replaying;
+static void nro_import_host_inner(Ctx *c, void *module, int sym);
 /* nro_import_host during a replay: lifted code of the module under test (run by fs_call, see there) calls an import */
 static int fighter_replay_import(Ctx *c, NroModule *m, int sym) {
     FsFiber *ff = FlsGetValue(g_fs_fls);
     if (!ff || !ff->replay || !ff->inlifted || ff->rec_mod->mod != m) return 0;
     const char *name = m->syms[sym].name;
-    if (fs_is_pure(name)) return 0;
+    if (fs_is_pure(name)) {
+        /* S6: value functions of lifted code inside a replay: no reference is counted (the original's run did), and
+         * a table lookup is treated like the source's (fs_replay_look) */
+        int kind = fs_pure_kind(name);
+        if (kind == 2 || kind == 4) { if (c->x[0] != c->x[1]) memcpy((void *)(uintptr_t)c->x[0], (const void *)(uintptr_t)c->x[1], 16); return 1; }
+        if (kind == 3) return 1;
+        if (kind == 5 || kind == 6) { wr64(c->x[0], kind == 5 ? 5 : 6); wr64(c->x[0] + 8, c->x[1]); return 1; }
+        if (kind == 1) { nro_import_host_inner(c, m, sym); fs_replay_look(ff, c->x[0]); return 1; }
+        return 0;
+    }
     int slot = ff->rec_mod->slot_of_sym[sym];
     fs_replay_event(ff, c, name, slot >= 0 ? ff->rec_mod->t.syms[slot].spec : "");
     return 1;
@@ -174,11 +306,21 @@ static void fs_call(Ctx *c, int slot) {
          * event of its own in the recording, only the calls it made: here its lifted code runs, and those calls are
          * answered from the recording (fighter_replay_import). */
         if (fm->local[slot] && fm->fn[slot] && (ff->pos >= ff->count || strcmp(ff->ev[ff->pos].name, s->name) != 0)) {
+            g_fs_n_inlifted++;
             ff->inlifted++; fm->fn[slot](c); ff->inlifted--;
             return;
         }
         fs_replay_event(ff, c, s->name, s->spec);
         return;
+    }
+    if (ff->replay) {                                   /* S6: a value function in a replay (see fs_pure_kind) */
+        int kind = fs_pure_kind(s->name);
+        if (kind == 2) { if (c->x[0] != c->x[1]) memcpy((void *)(uintptr_t)c->x[0], (const void *)(uintptr_t)c->x[1], 16); return; }
+        if (kind == 1) {
+            if (fm->fn[slot]) fm->fn[slot](c); else call_indirect(c, fm->t.addr[slot]);
+            fs_replay_look(ff, c->x[0]);
+            return;
+        }
     }
     if (g_fs_export_mod && !g_fs_hookmode && !ff->replay && fighter_export_override(c, fm->t.addr[slot], fm->fn[slot])) return;   /* source calls source */
     /* S3: a source function has no frame on the game's stack. What it calls must see the return address the source
@@ -252,12 +394,13 @@ static FsEvent *fighter_rec_begin(Ctx *c, NroModule *m, int sym) {
     if (!ff || !ff->rec) return NULL;
     if (ff->depth++ || ff->rec_mod->mod != m) return NULL;
     const char *name = m->syms[sym].name;
-    if (fs_is_pure(name)) return NULL;
+    if (fs_is_pure(name)) { if (fs_pure_kind(name) == 1) ff->ix_pending = 1; return NULL; }      /* S6: see fighter_rec_end */
     if (ff->synth && ff->count >= FS_SYNTH_CAP) longjmp(ff->synth_jb, 1);     /* a script that loops on made-up answers: compared up to here */
     if (ff->count >= FS_MAX_EVENTS) { ff->bad = 1; snprintf(ff->why, sizeof ff->why, "more than %d calls", FS_MAX_EVENTS); return NULL; }
     int slot = ff->rec_mod->slot_of_sym[sym];
     FsEvent *e = &ff->ev[ff->count++];
     fs_capture(e, c, name, slot >= 0 ? ff->rec_mod->t.syms[slot].spec : "");
+    if (slot < 0 && !ff->synth) { e->unknown = 1; if (fs_writable16(e->x8)) { e->unknown = 3; memcpy(e->x8_before, (const void *)(uintptr_t)e->x8, 16); } }
     return e;
 }
 /* SSBU_FIGHTER_SYNTH: the recorded call is not made; it is answered with a made-up value (see fighter_synth) */
@@ -267,7 +410,16 @@ static int fighter_synth_answer(Ctx *c, FsEvent *e) {
     ff->depth--;
     uint64_t b = ff->synth == 1 ? 0 : ff->synth == 2 ? 1 : (ff->synth_n++ * 2654435761u >> 16) & 1;
     c->x[0] = b; c->v[0].d[0] = 0; c->v[0].d[1] = 0;
-    { float f = b ? 1.0f : -1.0f; memcpy(&c->v[0], &f, 4); }      /* S2: a float result is -1 / +1, so that both sides of float comparisons run */
+    {   /* S2: a float result is negative / positive with the bit, so that both sides of float comparisons run.
+         * S10: its size differs from call to call (2.5, 2.625 ... by the number of the call in this run) and is never
+         * what x0 holds: a source that uses the float of an EARLIER call, or converts the float where the original
+         * reads x0, now hands a different value to the next game call. SSBU_FIGHTER_SYNTH_FLOATS=old: -1 / +1 as before. */
+        static int old = -1;
+        if (old < 0) old = getenv("SSBU_FIGHTER_SYNTH_FLOATS") != NULL;
+        float f = old ? 1.0f : 2.5f + 0.125f * (float)(ff->count % 16);
+        if (!b) f = -f;
+        memcpy(&c->v[0], &f, 4);
+    }
     if (e->spec[0] == 'S' && e->x8) { wr64(e->x8, 1); wr64(e->x8 + 8, b); }      /* an L2CValue: bool b */
     e->r_x0 = c->x[0]; e->r_v0 = c->v[0]; e->done = 1;
     if (e->spec[0] == 'S' && e->x8) memcpy(e->sret, (const void *)(uintptr_t)e->x8, 16);
@@ -277,9 +429,14 @@ static void fighter_rec_end(Ctx *c, FsEvent *e) {
     FsFiber *ff = FlsGetValue(g_fs_fls);
     if (!ff || !ff->rec) return;
     ff->depth--;
+    if (ff->ix_pending) { ff->ix_pending = 0; if (!ff->depth) fs_look_add(ff, c->x[0]); }      /* S6: the element the original just looked up */
     if (!e) return;
     e->r_x0 = c->x[0]; e->r_v0 = c->v[0]; e->done = 1;
     if (e->spec[0] == 'S' && e->x8) memcpy(e->sret, (const void *)(uintptr_t)e->x8, 16);
+    if (e->unknown == 3) {                              /* S6: did it write a result through x8? */
+        e->unknown = 1;
+        if (fs_writable16(e->x8) && memcmp(e->x8_before, (const void *)(uintptr_t)e->x8, 16) != 0) { memcpy(e->sret, (const void *)(uintptr_t)e->x8, 16); e->unknown = 2; }
+    }
 }
 
 static void fighter_report(void) {
@@ -302,10 +459,16 @@ static void fighter_report(void) {
         long long se = 0, sd = 0;
         for (int i = 0; i < fm->ovr_count; i++) { if (fm->stat[i].synth_differ) sd++; else if (fm->stat[i].synth_equal == 3) se++; }
         fprintf(f, "  synthetic differential (SSBU_FIGHTER_SYNTH, 3 passes per script): %lld scripts equal on all passes, %lld differing\n", se, sd);
+        if (k == 0) fprintf(f, "  table elements, all modules (S6): %lld looked up by the originals; in the replays %lld lookups matched one of them, %lld were given the value the original read (it had changed), "
+                               "%lld elements compared at the end, %lld of them put back to the original's value; lifted functions of the module run inside a replay: %lld\n",
+                            g_fs_n_look, g_fs_n_match, g_fs_n_putback, g_fs_n_touch, g_fs_n_undone, g_fs_n_inlifted);
         for (int i = 0; i < fm->ovr_count; i++) {
             FsStat *s = &fm->stat[i];
-            if (s->calls || s->synth_differ)fprintf(f, "  %-44s calls %6lld  equal %6lld  equal-interrupted %6lld  differ %6lld%s%s%s\n", fm->ovr[i].name, s->calls, s->equal, s->partial, s->differ,
-                                  s->lifted ? "  (forced lifted)" : "", s->first[0] ? "  first: " : "", s->first);
+            /* S6: "at 0x<offset in the module>": 1,424 of the 1,964 names of lua2cpp_common are bound at two addresses */
+            if (s->calls || s->synth_differ)fprintf(f, "  %-44s calls %6lld  equal %6lld  equal-interrupted %6lld  differ %6lld  at 0x%x%s%s%s%s\n", fm->ovr[i].name, s->calls, s->equal, s->partial, s->differ,
+                                  (unsigned)fm->ovr[i].off, s->lifted ? "  (forced lifted)" : "", s->is_new ? "  (NEW: only in the source, not compared)" : s->modified ? "  (MODIFIED on purpose, not compared)" : "",
+                                  s->first[0] ? "  first: " : "", s->first);
+            if (s->unreplayable || s->stale) fprintf(f, "      not replayed: %lld (allocates/frees), no verdict: %lld; %s\n", s->unreplayable, s->stale, s->why_not);
         }
     }
     fclose(f);
@@ -358,12 +521,25 @@ static void fighter_attach(NroModule *m) {
     if (GetFileAttributesA(src) == INVALID_FILE_ATTRIBUTES) return;
     if (g_fs_fls == FLS_OUT_OF_INDEXES) {
         g_fs_fls = FlsAlloc(NULL);
-        /* once per run: remove the DLL copies earlier runs left (a copy another running game still uses cannot be deleted: it stays) */
+        /* once per run: remove the DLL copies earlier runs left. S10: ONLY those whose process no longer exists (the
+         * name carries the process id: <name>.run<pid>_<n>.dll). It used to try to delete all of them and relied on
+         * Windows refusing for a mapped file; a copy that a live game had not loaded YET, or had detached, was lost. */
         char pat[MAX_PATH * 2]; WIN32_FIND_DATAA fd;
         memcpy(pat, src, n); snprintf(pat + n, sizeof pat - n, "fighters_bin\\*.run*.dll");
         HANDLE h = FindFirstFileA(pat, &fd);
         if (h != INVALID_HANDLE_VALUE) {
-            do { char old[MAX_PATH * 2]; memcpy(old, src, n); snprintf(old + n, sizeof old - n, "fighters_bin\\%s", fd.cFileName); DeleteFileA(old); } while (FindNextFileA(h, &fd));
+            do {
+                const char *r = strstr(fd.cFileName, ".run");
+                unsigned long pid = r ? strtoul(r + 4, NULL, 10) : 0;
+                if (!pid || pid == GetCurrentProcessId()) continue;
+                HANDLE ph = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+                DWORD code = 0;
+                int alive = ph != NULL && GetExitCodeProcess(ph, &code) && code == STILL_ACTIVE;
+                if (!ph && GetLastError() == ERROR_ACCESS_DENIED) alive = 1;      /* it exists and is not ours to look at: leave its file */
+                if (ph) CloseHandle(ph);
+                if (alive) continue;
+                char old[MAX_PATH * 2]; memcpy(old, src, n); snprintf(old + n, sizeof old - n, "fighters_bin\\%s", fd.cFileName); DeleteFileA(old);
+            } while (FindNextFileA(h, &fd));
             FindClose(h);
         }
     }
@@ -417,6 +593,15 @@ static void fighter_attach(NroModule *m) {
         size_t len = strlen(fm->ovr[i].name);
         if (hit && (strcmp(lifted, "1") == 0 || ((hit == lifted || hit[-1] == ',') && (hit[len] == 0 || hit[len] == ',')))) { fm->stat[i].lifted = 1; forced++; }
     }
+    /* S10 (part D): FS_MODIFIED(name) in the source exports the data symbol fs_modified_<name>; a binding whose
+     * address is not a function of the module is a function that exists only in the source */
+    int n_mod = 0, n_new = 0;
+    for (int i = 0; i < fm->ovr_count; i++) {
+        char sym[200]; snprintf(sym, sizeof sym, "fs_modified_%.180s", fm->ovr[i].name);
+        if (GetProcAddress(dll, sym)) { fm->stat[i].modified = 1; n_mod++; }
+        if (!fn_in_table(m->fns, m->fn_count, m->info->base + fm->ovr[i].off)) { fm->stat[i].is_new = 1; n_new++; }
+    }
+    if (n_mod || n_new) printf("fighter source: %s: %d functions marked modified (not compared), %d functions that exist only in the source\n", name, n_mod, n_new);
     { const char *hm = getenv("SSBU_FIGHTER_HOOK"); if (hm) g_fs_hookmode = hm[0] != '0'; }
     if (g_fs_hookmode) for (int i = 0; i < fm->ovr_count; i++) fs_hook_function(m, m->info->base + fm->ovr[i].off, fm->ovr[i].name);
     m->fighter = fm;
@@ -481,6 +666,11 @@ static void __declspec(noinline) fs_compare(Ctx *c, FsFiber *ff, int partial) {
     ff->rec = 0;
     InterlockedDecrement(&g_fs_recording);
     if (!fm->dll) return;                              /* its module was unloaded meanwhile */
+    if (!ff->synth) {                                  /* S6 */
+        const char *no = fs_unreplayable(ff);
+        if (no) { if (!st->unreplayable++) snprintf(st->why_not, sizeof st->why_not, "%.100s", no); ff->res_at = 0; return; }
+    }
+    ff->look_pos = 0; ff->touch_count = 0; ff->stale = 0;
     uint8_t res_lifted[16];
     fs_soup_reset();
     if (partial) ff->res_at = 0;                      /* ended from outside: no result, and its buffer may be gone */
@@ -506,6 +696,13 @@ static void __declspec(noinline) fs_compare(Ctx *c, FsFiber *ff, int partial) {
             { ff->bad = 1; snprintf(ff->why, sizeof ff->why, "returns type %u %llx, original type %u %llx", tb, (unsigned long long)rb, ta, (unsigned long long)ra); }
         memcpy((void *)(uintptr_t)ff->res_at, res_lifted, 16);      /* the original's result stands */
         ff->res_at = 0;
+    }
+    fs_touch_end(ff, !partial);                        /* S6: table elements: compared, then the original's values stand */
+    if (ff->bad && ff->stale && !ff->synth) {          /* S6: the replay could not be given what the original read: no verdict */
+        if (!st->stale++) { snprintf(st->why_not, sizeof st->why_not, "replay incomplete, then: %.90s", ff->why); printf("fighter diff: %s: no verdict (the replay could not be given everything the original read), then: %s\n", fm->ovr[ff->rec_at].name, ff->why); }
+        ff->mod = saved_mod; ff->script = saved_script; ff->ctx = saved_ctx;
+        *c = after;
+        return;
     }
     if (ff->synth) {
         if (!ff->bad) st->synth_equal++;
@@ -552,6 +749,7 @@ static void fighter_synth(Ctx *c, NroModule *m, FsMod *fm, FsFiber *ff) {
     for (int i = 0; i < fm->ovr_count; i++) {
         ImportFn lifted = fs_lifted(m, m->info->base + fm->ovr[i].off);
         if (!lifted) continue;
+        if (fm->stat[i].modified) { printf("fighter synthetic diff: %s is marked modified: not compared\n", fm->ovr[i].name); continue; }      /* S10 */
         {   /* S3: SSBU_FIGHTER_OFFLINE_SKIP=<file>: names (one per line) the test leaves out, e.g. those that stopped an earlier run */
             static char *skip; static int skip_read;
             if (!skip_read) {
@@ -567,6 +765,7 @@ static void fighter_synth(Ctx *c, NroModule *m, FsMod *fm, FsFiber *ff) {
             *c = saved;
             memcpy(ff->entry, c->x, sizeof ff->entry);
             ff->count = 0; ff->bad = 0; ff->depth = 0; ff->why[0] = 0; ff->synth_n = (unsigned)i * 7919u;
+            ff->look_count = 0; ff->look_over = 0; ff->ix_pending = 0;
             ff->rec_mod = fm; ff->rec_at = i; ff->rec_sp = c->x[31];
             ff->synth = pass; ff->rec = 1; ff->cut = 0;
             fs_soup_reset();
@@ -636,11 +835,26 @@ static int fighter_dispatch(Ctx *c, NroModule *m, uint64_t addr, ImportFn lifted
         if (fm->ovr[mid].off == off) { at = mid; break; }
         if (fm->ovr[mid].off < off) lo = mid + 1; else hi = mid - 1;
     }
-    if (at < 0 || fm->stat[at].lifted || !fm->dll) return 0;
+    if (at < 0 || !fm->dll) return 0;
+    if (fm->stat[at].lifted && lifted) return 0;
     static int diff = -1;
     if (diff < 0) diff = getenv("SSBU_FIGHTER_DIFF") != NULL;
     FsFiber *ff = fs_fiber();
     FsStat *st = &fm->stat[at];
+    /* S10 (part D): a function that exists only in the source (no original: `lifted` is NULL, its address is one of
+     * the module's synthetic addresses, see nro_call_indirect), or one marked FS_MODIFIED in the source ("changed on
+     * purpose"): the source runs, nothing is recorded or compared for it; the report says "new" / "modified". */
+    if (!lifted || st->modified) {
+        if (ff->replay && lifted) return 0;            /* inside a replay the original of a modified function answers from the recording */
+        if (ff->rec && lifted) { st->calls++; return 0; }      /* inside another function's recording: the original, as for every nested call */
+        st->calls++; st->direct++;
+        FsMod *saved_mod = ff->mod; const char *saved_script = ff->script; Ctx *saved_ctx = ff->ctx; uint64_t saved_lr = ff->lr;
+        ff->mod = fm; ff->script = fm->ovr[at].name; ff->ctx = c; ff->lr = 0;
+        fm->ovr[at].fn(c);
+        ff = fs_fiber();
+        ff->mod = saved_mod; ff->script = saved_script; ff->ctx = saved_ctx; ff->lr = saved_lr;
+        return 1;
+    }
     if (ff->replay) return 0;
     static int statelog = -1;
     if (statelog < 0) statelog = getenv("SSBU_FIGHTER_LOG") != NULL && !g_fs_offline;
@@ -671,6 +885,7 @@ static int fighter_dispatch(Ctx *c, NroModule *m, uint64_t addr, ImportFn lifted
     if (!ff->ev) ff->ev = malloc(sizeof(FsEvent) * FS_MAX_EVENTS);
     memcpy(ff->entry, c->x, sizeof ff->entry);
     ff->count = 0; ff->bad = 0; ff->depth = 0; ff->why[0] = 0;
+    ff->look_count = 0; ff->look_over = 0; ff->ix_pending = 0;
     ff->rec_mod = fm; ff->rec_at = at; ff->rec_sp = c->x[31]; ff->rec_host = (uintptr_t)&at;
     fs_result_begin(ff, fm, c);
     ff->rec = 1;
@@ -766,4 +981,324 @@ static void fighter_offline(Ctx *c) {
     fighter_report();
     printf("fighter offline: finished\n");
     ExitProcess(0);
+}
+
+/* ---------------------------------------------------------------- S10: SSBU_FIGHTER_DEBUG=<script file>: debug injection
+ * TEST ONLY. Without the variable nothing here is installed and nothing runs. The file gives commands that provoke a
+ * situation instead of waiting for it to happen in a match; every command is one or two calls of the GAME'S OWN
+ * functions (the lua_bind exports the fighter sources call too), made on the game's own thread at one fixed point of
+ * the fighter's frame: the entry of lua2cpp::L2CFighterCommon::sys_line_system_control_fighter (the script line the
+ * game runs for every fighter once per frame, before that frame's status scripts), reached through a pass-through
+ * hook (hook_host.c). At that point no status script of the fighter is running and no recording of the differential
+ * test is open (if one is, the command waits for the next frame), so with SSBU_FIGHTER_DIFF=1 the original and the
+ * source see exactly the same forced situation.
+ *
+ *   at <frame> <command> ...        once, when the fighter's own frame counter reaches <frame> (it counts calls of the
+ *                                   line above for that fighter since the fight began: "fight frames")
+ *   every <n> <command> ...         every n-th frame
+ *   # ...                           comment
+ * commands (fighter = the entry id, 0 = player 1; a number can be decimal, 0x.., or the NAME of a Lua constant, which
+ * is looked up in fighters\sdk_generated\lua_const.h and read from the game's constant table at run time):
+ *   status <fighter> <kind> [0|1]   StatusModule::change_status_request_from_script(kind, clear command = 1)
+ *   statusreq <fighter> <kind> [0|1] StatusModule::change_status_request(kind, 0)
+ *   item <fighter> <item kind> [variation]  ItemModule::have_item(kind, variation, 0, false, false)
+ *   noitem <fighter>                ItemModule::remove_all
+ *   final <fighter>                 WorkModule::on_flag(FIGHTER_INSTANCE_WORK_ID_FLAG_FINAL): what the fighter has after
+ *                                   breaking a Smash Ball (the flag the shared scripts test); then `status .. FINAL`
+ *   flag <fighter> <work flag> [0|1] WorkModule::on_flag / off_flag
+ *   damage <fighter> <percent>      DamageModule::add_damage(percent, 0)
+ *   pos <fighter> <x> <y>           PostureModule::set_pos_2d
+ *   air <fighter> [dy]              leave the ground: position y + dy (default 30), StatusModule::set_situation_kind(AIR),
+ *                                   GroundModule::set_correct(GROUND_CORRECT_KIND_AIR)
+ * Every executed command is one log line `[debug] frame F fighter K: ...` written BEFORE the calls are made (the
+ * sweep driver tests\s10_sweep.py reads the last one after a trap). */
+enum { FD_STATUS, FD_STATUSREQ, FD_ITEM, FD_NOITEM, FD_FINAL, FD_FLAG, FD_DAMAGE, FD_POS, FD_AIR, FD_KINDS };
+static const char *const g_fd_names[FD_KINDS] = {"status", "statusreq", "item", "noitem", "final", "flag", "damage", "pos", "air"};
+typedef struct { int every, cmd, fighter, done, nargs; long long at; char arg[3][72]; } FsDbgCmd;
+static FsDbgCmd *g_fd_cmd;
+static int g_fd_count, g_fd_n;
+static ImportFn g_fd_orig;
+static struct { uint64_t boma; int entry; long long frame; } g_fd_f[8];
+static long long g_fd_done, g_fd_waited;
+
+/* a number, or the name of a Lua constant (index from the generated header, value from the game's table) */
+static int fd_value(const char *tok, double *out) {
+    char *end; double v = strtod(tok, &end);
+    if (end != tok && *end == 0) { *out = v; return 1; }
+    long long iv = strtoll(tok, &end, 0);
+    if (end != tok && *end == 0) { *out = (double)iv; return 1; }
+    static char *hdr;
+    if (!hdr) {
+        char path[MAX_PATH * 2]; DWORD n = GetModuleFileNameA(NULL, path, MAX_PATH);
+        while (n && path[n - 1] != '\\' && path[n - 1] != '/') n--;
+        snprintf(path + n, sizeof path - n, "fighters\\sdk_generated\\lua_const.h");
+        FILE *f = fopen(path, "rb");
+        if (!f) { printf("[debug] cannot open %s\n", path); hdr = ""; }
+        else { fseek(f, 0, SEEK_END); long size = ftell(f); fseek(f, 0, SEEK_SET); hdr = calloc(1, (size_t)size + 1); if (fread(hdr, 1, (size_t)size, f) != (size_t)size) hdr[0] = 0; fclose(f); }
+    }
+    char key[96]; snprintf(key, sizeof key, " %.80s{", tok);
+    const char *hit = strstr(hdr, key);
+    const Export *tab = exp_find("_ZN7lua2cpp21L2CAgentGeneratedBase19const_value_table__E");
+    if (!hit || !tab) return 0;
+    *out = (double)(int32_t)rd32(tab->value + 4ull * (unsigned)atoi(hit + strlen(key)));
+    return 1;
+}
+static uint64_t fd_fn(const char *name) {
+    static struct { const char *name; uint64_t addr; } cache[24]; static int n;
+    for (int i = 0; i < n; i++) if (cache[i].name == name) return cache[i].addr;
+    uint64_t a = hk_address_of(name);
+    if (!a) printf("[debug] game function not found: %s\n", name);
+    if (n < 24) { cache[n].name = name; cache[n].addr = a; n++; }
+    return a;
+}
+/* one call of a game function: x0 = the module accessor, up to 5 integer arguments, one float; the context is put back */
+static uint64_t fd_call(Ctx *c, const char *name, uint64_t boma, uint64_t x1, uint64_t x2, uint64_t x3, uint64_t x4, uint64_t x5, float f0, float *fret) {
+    uint64_t a = fd_fn(name);
+    if (!a) return 0;
+    Ctx saved = *c;
+    c->x[0] = boma; c->x[1] = x1; c->x[2] = x2; c->x[3] = x3; c->x[4] = x4; c->x[5] = x5;
+    c->v[0].d[0] = 0; c->v[0].d[1] = 0; memcpy(&c->v[0], &f0, 4);
+    call_indirect(c, a);
+    uint64_t r = c->x[0];
+    if (fret) memcpy(fret, &c->v[0], 4);
+    *c = saved;
+    return r;
+}
+#define FD_N(s) "_ZN3app8lua_bind" s "EPNS_26BattleObjectModuleAccessorE"
+static void fd_run(Ctx *c, FsDbgCmd *d, uint64_t boma, int k) {
+    double a[3] = {0, 0, 0};
+    for (int i = 0; i < d->nargs; i++)
+        if (!fd_value(d->arg[i], &a[i])) { printf("[debug] frame %lld fighter %d: %s: unknown value %s\n", g_fd_f[k].frame, d->fighter, g_fd_names[d->cmd], d->arg[i]); return; }
+    int status = (int)fd_call(c, FD_N("30StatusModule__status_kind_impl"), boma, 0, 0, 0, 0, 0, 0, NULL);
+    int situation = (int)fd_call(c, FD_N("33StatusModule__situation_kind_impl"), boma, 0, 0, 0, 0, 0, 0, NULL);
+    printf("[debug] frame %lld fighter %d: %s %s %s %s (status now 0x%x, situation %d)\n", g_fd_f[k].frame, d->fighter, g_fd_names[d->cmd],
+           d->nargs > 0 ? d->arg[0] : "", d->nargs > 1 ? d->arg[1] : "", d->nargs > 2 ? d->arg[2] : "", status, situation);
+    fflush(stdout);
+    g_fd_done++;
+    switch (d->cmd) {
+    case FD_STATUS: fd_call(c, FD_N("52StatusModule__change_status_request_from_script_impl") "ib", boma, (uint64_t)(int64_t)a[0], d->nargs > 1 ? (uint64_t)a[1] : 1, 0, 0, 0, 0, NULL); break;
+    case FD_STATUSREQ: fd_call(c, FD_N("40StatusModule__change_status_request_impl") "ib", boma, (uint64_t)(int64_t)a[0], d->nargs > 1 ? (uint64_t)a[1] : 0, 0, 0, 0, 0, NULL); break;
+    case FD_ITEM: {
+        uint64_t r = fd_call(c, "_ZN3app8lua_bind26ItemModule__have_item_implEPNS_26BattleObjectModuleAccessorENS_8ItemKindEiibb", boma, (uint64_t)(int64_t)a[0], (uint64_t)(int64_t)a[1], 0, 0, 0, 0, NULL);
+        uint64_t have = fd_call(c, FD_N("29ItemModule__is_have_item_impl") "i", boma, 0, 0, 0, 0, 0, 0, NULL);
+        printf("[debug]   have_item returned %llx, is_have_item(0) = %d\n", (unsigned long long)r, (int)(have & 1));
+        break; }
+    case FD_NOITEM: fd_call(c, FD_N("27ItemModule__remove_all_impl"), boma, 0, 0, 0, 0, 0, 0, NULL); break;
+    case FD_FINAL: {
+        double flag;
+        if (!fd_value("FIGHTER_INSTANCE_WORK_ID_FLAG_FINAL", &flag)) { printf("[debug]   FIGHTER_INSTANCE_WORK_ID_FLAG_FINAL not found\n"); break; }
+        fd_call(c, FD_N("24WorkModule__on_flag_impl") "i", boma, (uint64_t)(int64_t)flag, 0, 0, 0, 0, 0, NULL);
+        printf("[debug]   is_flag(FIGHTER_INSTANCE_WORK_ID_FLAG_FINAL) = %d\n", (int)(fd_call(c, FD_N("24WorkModule__is_flag_impl") "i", boma, (uint64_t)(int64_t)flag, 0, 0, 0, 0, 0, NULL) & 1));
+        break; }
+    case FD_FLAG: fd_call(c, d->nargs > 1 && a[1] == 0 ? FD_N("25WorkModule__off_flag_impl") "i" : FD_N("24WorkModule__on_flag_impl") "i", boma, (uint64_t)(int64_t)a[0], 0, 0, 0, 0, 0, NULL); break;
+    case FD_DAMAGE: fd_call(c, FD_N("29DamageModule__add_damage_impl") "fi", boma, 0, 0, 0, 0, 0, (float)a[0], NULL); break;
+    case FD_POS: case FD_AIR: {
+        static float v[4];
+        if (d->cmd == FD_POS) { v[0] = (float)a[0]; v[1] = (float)a[1]; }
+        else {
+            fd_call(c, FD_N("25PostureModule__pos_x_impl"), boma, 0, 0, 0, 0, 0, 0, &v[0]);
+            fd_call(c, FD_N("25PostureModule__pos_y_impl"), boma, 0, 0, 0, 0, 0, 0, &v[1]);
+            v[1] += d->nargs > 0 ? (float)a[0] : 30.0f;
+        }
+        v[2] = v[3] = 0;
+        fd_call(c, FD_N("30PostureModule__set_pos_2d_impl") "RKN3phx8Vector2fE", boma, (uint64_t)(uintptr_t)v, 0, 0, 0, 0, 0, NULL);
+        if (d->cmd == FD_AIR) {
+            double air, correct;
+            if (fd_value("SITUATION_KIND_AIR", &air)) fd_call(c, FD_N("37StatusModule__set_situation_kind_impl") "NS_13SituationKindEb", boma, (uint64_t)(int64_t)air, 0, 0, 0, 0, 0, NULL);
+            if (fd_value("GROUND_CORRECT_KIND_AIR", &correct)) fd_call(c, FD_N("30GroundModule__set_correct_impl") "NS_17GroundCorrectKindE", boma, (uint64_t)(int64_t)correct, 0, 0, 0, 0, 0, NULL);
+        }
+        break; }
+    }
+}
+static void fd_hook(Ctx *c, void *user) {
+    (void)user;
+    uint64_t agent = c->x[0], boma = agent ? rd64(agent + 0x40) : 0;
+    FsFiber *ff = g_fs_fls != FLS_OUT_OF_INDEXES ? FlsGetValue(g_fs_fls) : NULL;
+    if (boma && (rd32(boma + 8) >> 28) == 0) {
+        int k = 0;
+        while (k < g_fd_n && g_fd_f[k].boma != boma) k++;
+        if (k == g_fd_n && g_fd_n < 8) {
+            double id = 0;
+            g_fd_f[k].boma = boma; g_fd_f[k].frame = 0; g_fd_f[k].entry = -1;
+            if (fd_value("FIGHTER_INSTANCE_WORK_ID_INT_ENTRY_ID", &id)) g_fd_f[k].entry = (int)fd_call(c, FD_N("24WorkModule__get_int_impl") "i", boma, (uint64_t)(int64_t)id, 0, 0, 0, 0, 0, NULL);
+            printf("[debug] fighter with entry id %d seen (module accessor %d of this run)\n", g_fd_f[k].entry, k);
+            g_fd_n++;
+        }
+        if (k < g_fd_n) {
+            if (ff && (ff->rec || ff->replay)) g_fd_waited++;      /* inside a recording of the differential test: next frame */
+            else {
+                long long f = ++g_fd_f[k].frame;
+                for (int i = 0; i < g_fd_count; i++) {
+                    FsDbgCmd *d = &g_fd_cmd[i];
+                    if (d->fighter != g_fd_f[k].entry) continue;
+                    if (d->every ? f % d->every != 0 : (d->done || f < d->at)) continue;
+                    d->done = 1;
+                    fd_run(c, d, boma, k);
+                }
+            }
+        }
+    }
+    g_fd_orig(c);
+}
+/* ---------------------------------------------------------------- S11: SSBU_FIGHT_HASH / SSBU_DETERMINISTIC (test only)
+ * SSBU_FIGHT_HASH=<file>|1: one line per fighter per FIGHT FRAME (frame = that fighter's count of calls of the frame
+ * line sys_line_system_control_fighter since it was first seen; nothing to do with the time since process start),
+ * written at the ENTRY of the frame line: position, status kind, motion hash, motion frame, damage (the game's own
+ * lua_bind getters), the script random generators (the 9 xorshift128 generators of 20 bytes that app::sv_math::rand
+ * indexes by its Hash40 argument: [[[main 0x52c25b0]]] + 0x14 * i = 4 state words + a call counter; logged: sum of the
+ * 9 counters, FNV-1a of the 180 bytes) and a running FNV-1a over everything logged so far.
+ * The first frame of the first fighter raises the input mark "fight" (SSBU_SEQ step `@fight`, nnhid.c marks).
+ * SSBU_DETERMINISTIC=1: see plan\phases\R0_determinism.md. Here: the 9 generators are set to a fixed state at the
+ * first battle frame (SSBU_DET_OFF=1 leaves them alone, for diagnosis). */
+void input_mark(const char *what);                      /* nnhid.c */
+static ImportFn g_fh_orig;
+static struct { uint64_t boma; int entry; long long frame; } g_fh_f[8];
+static int g_fh_n, g_fh_det, g_fh_detoff;
+static FILE *g_fh_out;
+static uint64_t g_fh_run = 0xcbf29ce484222325ull;
+static long long g_fh_poll_hist[4]; static unsigned long g_fh_poll_tid;
+static long long g_fh_drop_calls, g_fh_drop_frames, g_fh_frame_ends;
+static uint64_t fh_fnv(uint64_t h, const void *p, size_t n) { const uint8_t *b = p; while (n--) { h ^= *b++; h *= 0x100000001b3ull; } return h; }
+static uint64_t fh_rng_base(void) {
+    uint64_t p = rd64(0x71052c25b0ull);
+    if (p) p = rd64(p);
+    if (p) p = rd64(p);
+    return p;
+}
+static void fh_hook(Ctx *c, void *user) {
+    (void)user;
+    uint64_t agent = c->x[0], boma = agent ? rd64(agent + 0x40) : 0;
+    if (boma && (rd32(boma + 8) >> 28) == 0) {
+        int k = 0;
+        while (k < g_fh_n && g_fh_f[k].boma != boma) k++;
+        if (k == g_fh_n && g_fh_n < 8) {
+            double id = 0;
+            g_fh_f[k].boma = boma; g_fh_f[k].frame = 0; g_fh_f[k].entry = -1;
+            if (fd_value("FIGHTER_INSTANCE_WORK_ID_INT_ENTRY_ID", &id)) g_fh_f[k].entry = (int)fd_call(c, FD_N("24WorkModule__get_int_impl") "i", boma, (uint64_t)(int64_t)id, 0, 0, 0, 0, 0, NULL);
+            g_fh_n++;
+            if (k == 0) {
+                uint64_t rb = fh_rng_base();
+                printf("[fight] first battle frame (fighter entry %d); input mark \"fight\" raised; script random generators at %llx\n", g_fh_f[k].entry, (unsigned long long)rb);
+                if (rb) { printf("[fight] generators before:"); for (int i = 0; i < 9; i++) printf(" %08x.%u", rd32(rb + 0x14ull * i + 12), rd32(rb + 0x14ull * i + 16)); printf("\n"); }
+                if (g_fh_det && !(g_fh_detoff & 1) && rb) {
+                    for (int i = 0; i < 9; i++) {
+                        wr32(rb + 0x14ull * i, 0x12345678u + 0x9E3779B9u * (unsigned)i); wr32(rb + 0x14ull * i + 4, 0x2468ACE1u ^ (unsigned)i);
+                        wr32(rb + 0x14ull * i + 8, 0x0F1E2D3Cu + (unsigned)i); wr32(rb + 0x14ull * i + 12, 0x89ABCDEFu - (unsigned)i); wr32(rb + 0x14ull * i + 16, 0);
+                    }
+                    printf("[fight] SSBU_DETERMINISTIC: the 9 script random generators set to a fixed state, counters 0\n");
+                }
+                if (getenv("SSBU_WORK_RESEARCH")) {        /* S11 part 4: where the work module keeps its variables */
+                    uint64_t wm = rd64(boma + 0x50), vt = wm ? rd64(wm) : 0;
+                    printf("[work] module %llx vtable %llx: get_float %llx get_int %llx set_int %llx is_flag %llx\n", (unsigned long long)wm, (unsigned long long)vt,
+                           (unsigned long long)rd64(vt + 0x58), (unsigned long long)rd64(vt + 0x98), (unsigned long long)rd64(vt + 0xa0), (unsigned long long)rd64(vt + 0x108));
+                    uint64_t areas = rd64(wm + 0x18);
+                    for (int a = 0; a < 2 && areas; a++) {
+                        uint64_t ar = rd64(areas + 8ull * a);
+                        printf("[work] area %d at %llx:", a, (unsigned long long)ar);
+                        for (int i = 0; i < 0x50 && ar; i += 8) printf(" %llx", (unsigned long long)rd64(ar + i));
+                        printf("\n");
+                    }
+                    for (int i = 0; i < 0x60; i += 0x20) printf("[work]   +%03x: %016llx %016llx %016llx %016llx\n", i, (unsigned long long)rd64(wm + i), (unsigned long long)rd64(wm + i + 8), (unsigned long long)rd64(wm + i + 16), (unsigned long long)rd64(wm + i + 24));
+                }
+                fflush(stdout);
+                input_mark("fight");
+            }
+        }
+        if (k < g_fh_n && !g_fh_out) ++g_fh_f[k].frame;
+        if (k < g_fh_n && g_fh_out) {
+            long long f = ++g_fh_f[k].frame;
+            float x = 0, y = 0, mf = 0, dmg = 0;
+            int st = (int)fd_call(c, FD_N("30StatusModule__status_kind_impl"), boma, 0, 0, 0, 0, 0, 0, NULL);
+            uint64_t mot = fd_call(c, FD_N("30MotionModule__motion_kind_impl"), boma, 0, 0, 0, 0, 0, 0, NULL);
+            fd_call(c, FD_N("24MotionModule__frame_impl"), boma, 0, 0, 0, 0, 0, 0, &mf);
+            fd_call(c, FD_N("25PostureModule__pos_x_impl"), boma, 0, 0, 0, 0, 0, 0, &x);
+            fd_call(c, FD_N("25PostureModule__pos_y_impl"), boma, 0, 0, 0, 0, 0, 0, &y);
+            fd_call(c, FD_N("25DamageModule__damage_impl") "i", boma, 0, 0, 0, 0, 0, 0, &dmg);
+            uint64_t rb = fh_rng_base(), rh = 0xcbf29ce484222325ull; uint32_t rc = 0, w[45];
+            if (rb) { for (int i = 0; i < 45; i++) w[i] = rd32(rb + 4ull * i); for (int i = 0; i < 9; i++) rc += w[i * 5 + 4]; rh = fh_fnv(rh, w, sizeof w); }
+            struct { long long f; int k, st; uint64_t mot; float mf, x, y, dmg; uint64_t rh; } rec;
+            memset(&rec, 0, sizeof rec);
+            rec.f = f; rec.k = g_fh_f[k].entry; rec.st = st; rec.mot = mot; rec.mf = mf; rec.x = x; rec.y = y; rec.dmg = dmg; rec.rh = rh;
+            g_fh_run = fh_fnv(g_fh_run, &rec, sizeof rec);
+            uint32_t bx, by, bm, bd; memcpy(&bx, &x, 4); memcpy(&by, &y, 4); memcpy(&bm, &mf, 4); memcpy(&bd, &dmg, 4);
+            fprintf(g_fh_out, "F %lld e %d st %x mot %llx mf %08x x %08x y %08x dmg %08x rngcalls %u rng %08x H %016llx  (%.3f %.3f frame %.2f %.2f%%)\n",
+                    f, g_fh_f[k].entry, st, (unsigned long long)mot, bm, bx, by, bd, rc, (unsigned)(rh ^ (rh >> 32)), (unsigned long long)g_fh_run, (double)x, (double)y, (double)mf, (double)dmg);
+            if ((f & 63) == 0) fflush(g_fh_out);
+            if (k == 0 && f % 300 == 0 && rb) {            /* which generators are drawn from: the 9 call counters */
+                printf("[fight] frame %lld: generator calls", f);
+                for (int i = 0; i < 9; i++) printf(" %u", w[i * 5 + 4]);
+                printf("; frame line on thread %lu, pad poll on thread %lu; polls that saw 0 / 1 / 2 / 3+ new fight frames: %lld %lld %lld %lld; frame ends %lld, of them %lld reported dropped refreshes (%lld in all)\n", (unsigned long)GetCurrentThreadId(), (unsigned long)g_fh_poll_tid,
+                       g_fh_poll_hist[0], g_fh_poll_hist[1], g_fh_poll_hist[2], g_fh_poll_hist[3], g_fh_frame_ends, g_fh_drop_calls, g_fh_drop_frames);
+            }
+        }
+    }
+    g_fh_orig(c);
+}
+/* SSBU_DETERMINISTIC: main 0x710386fc30 (frame end of the graphics module: acquires the window texture) compares the
+ * refresh count of the game's VSync Count Thread (window + 0x138) with the count at the last frame (+ 0x140) and
+ * reports count - (last + 1) "dropped" refreshes through its third argument, result code 0xF0044007 / 0xF0044005; the
+ * game then runs that many EXTRA logic frames on the same pad sample. The number depends on when the counting thread
+ * ran: wall time. Here: the report is cleared after the call (no extra logic frames, ever). SSBU_DET_OFF=4 leaves it. */
+static ImportFn g_fh_orig_frame_end;
+static void fh_frame_end(Ctx *c, void *user) {
+    (void)user;
+    uint64_t p1 = c->x[0], p3 = c->x[2];
+    g_fh_orig_frame_end(c);
+    g_fh_frame_ends++;
+    if (p3 && rd64(p3)) {
+        g_fh_drop_calls++; g_fh_drop_frames += (long long)rd64(p3);
+        if (!(g_fh_detoff & 4)) { wr64(p3, 0); if (p1 && (rd32(p1) == 0xF0044007u || rd32(p1) == 0xF0044005u)) wr32(p1, 0); }
+    }
+}
+/* nnhid.c, once per pad poll of player 1: how many steps the input sequence (SSBU_SEQ) advances. Normally 1 (the
+ * sequence counts polls). SSBU_DETERMINISTIC, from the first battle frame on: the number of FIGHT FRAMES of the first
+ * fighter since the last poll, so that the sequence position is a function of the fight frame alone (measured S11:
+ * the fighters' frame line ran 510 times in one run and 605 times in another during the same 462 polls after the
+ * first battle frame). SSBU_DET_OFF=2 keeps poll counting. Nothing after the fight (no fight frames, no steps). */
+int fight_seq_ticks(void) {
+    static long long last;
+    if (!g_fh_det || (g_fh_detoff & 2) || !g_fh_n) return 1;
+    long long f = g_fh_f[0].frame, n = f - last;
+    last = f;
+    g_fh_poll_hist[n < 0 ? 0 : n > 3 ? 3 : n]++; g_fh_poll_tid = GetCurrentThreadId();
+    return n < 0 ? 0 : n > 100000 ? 100000 : (int)n;
+}
+static void fh_exit(void) { if (g_fh_out) { fflush(g_fh_out); if (g_fh_out != stdout) fclose(g_fh_out); g_fh_out = NULL; } }
+static void fight_hash_start(void) {
+    const char *h = getenv("SSBU_FIGHT_HASH"), *d = getenv("SSBU_DETERMINISTIC"), *o = getenv("SSBU_DET_OFF");
+    g_fh_det = d && d[0] && d[0] != '0';
+    g_fh_detoff = o ? atoi(o) : 0;
+    if ((!h || !h[0] || h[0] == '0') && !g_fh_det) return;
+    if (h && h[0] && h[0] != '0') g_fh_out = strcmp(h, "1") == 0 ? stdout : fopen(h, "w");
+    int id = hook_install_name("_ZN7lua2cpp16L2CFighterCommon31sys_line_system_control_fighterEv", fh_hook, NULL, &g_fh_orig);
+    printf("[fight] SSBU_FIGHT_HASH %s, SSBU_DETERMINISTIC %d (off mask %d); hook on the fighters' frame line: %s\n", g_fh_out ? "on" : "off", g_fh_det, g_fh_detoff, id ? "installed or waiting for lua2cpp_common" : hook_error());
+    if (g_fh_det) printf("[fight] SSBU_DETERMINISTIC: hook on the frame end 710386fc30 (dropped refreshes -> extra logic frames): %s\n",
+                         hook_install(0x710386fc30ull, fh_frame_end, NULL, &g_fh_orig_frame_end) ? "installed" : hook_error());
+    atexit(fh_exit);
+}
+static void fd_exit(void) { printf("[debug] %lld commands executed, %lld frames skipped because a differential recording was open\n", g_fd_done, g_fd_waited); fflush(stdout); }
+static void fighter_debug_start(void) {
+    const char *path = getenv("SSBU_FIGHTER_DEBUG");
+    fight_hash_start();
+    if (!path || !path[0]) return;
+    FILE *f = fopen(path, "r");
+    if (!f) { printf("[debug] cannot open %s\n", path); return; }
+    char line[400]; int cap = 0, bad = 0;
+    while (fgets(line, sizeof line, f)) {
+        char when[16], cmd[16], a0[72] = "", a1[72] = "", a2[72] = ""; long long n; int fighter;
+        if (line[0] == '#' || line[0] == '\n' || line[0] == '\r') continue;
+        int got = sscanf(line, "%15s %lld %15s %d %71s %71s %71s", when, &n, cmd, &fighter, a0, a1, a2);
+        int kind = 0;
+        while (kind < FD_KINDS && (got < 3 || strcmp(cmd, g_fd_names[kind]) != 0)) kind++;
+        if (got < 4 || kind == FD_KINDS || (strcmp(when, "at") != 0 && strcmp(when, "every") != 0) || n < 1) { if (bad++ < 5) printf("[debug] line not understood: %s", line); continue; }
+        if (g_fd_count == cap) { cap = cap ? cap * 2 : 256; g_fd_cmd = realloc(g_fd_cmd, (size_t)cap * sizeof *g_fd_cmd); }
+        FsDbgCmd *d = &g_fd_cmd[g_fd_count++];
+        memset(d, 0, sizeof *d);
+        d->every = strcmp(when, "every") == 0 ? (int)n : 0; d->at = n; d->cmd = kind; d->fighter = fighter; d->nargs = got - 4;
+        strcpy(d->arg[0], a0); strcpy(d->arg[1], a1); strcpy(d->arg[2], a2);
+    }
+    fclose(f);
+    int id = hook_install_name("_ZN7lua2cpp16L2CFighterCommon31sys_line_system_control_fighterEv", fd_hook, NULL, &g_fd_orig);
+    printf("[debug] SSBU_FIGHTER_DEBUG: %d commands read from %s (%d lines not understood); hook on the fighters' frame line: %s\n", g_fd_count, path, bad, id ? "installed or waiting for lua2cpp_common" : hook_error());
+    atexit(fd_exit);
 }

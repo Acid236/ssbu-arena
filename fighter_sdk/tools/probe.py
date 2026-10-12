@@ -87,13 +87,18 @@ def run(tag, env_extra, mode='run'):
     for p in (log, rep):
         if os.path.exists(p):
             os.remove(p)
-    with open(os.path.join(STUDY, 'tests', os.environ.get('PROBE_SEQ', 'seq_battle_play.txt'))) as f:
+    given = lambda k: k in os.environ or any(a.startswith(k + '=') for a in env_extra)     # tests\DEBUG_MODE.md: the debug variables switch the fast mode on (uncapped unless PROBE_FAST says otherwise)
+    fast = os.environ.get('PROBE_FAST') or ('0' if any(given(k) for k in ('SSBU_DEBUG_MATCH', 'SSBU_DEBUG_MATCH_LIST', 'SSBU_DEBUG_END')) else '')
+    with open(os.path.join(STUDY, 'tests', os.environ.get('PROBE_SEQ', 'seq_debug_list.txt' if given('SSBU_DEBUG_MATCH_LIST') else 'seq_battle_play_fast.txt' if fast else 'seq_battle_play.txt'))) as f:
         seq = ' '.join(l.strip() for l in f if not l.startswith('#'))
     env = dict(os.environ)
     env.update(SSBU_SEQ=seq, SSBU_USERDATA=ud, SSBU_FIXED_SEED='1', SSBU_PAIR_WARM='0', SSBU_FIGHTER_REPORT=rep,
                SSBU_FIGHTER_REPORT_EVERY='500', SSBU_REC=os.path.join(LOGS, 's4_input.rec'),
                SSBU_TRACE=os.path.join(LOGS, 's4_%s.trace.txt' % tag))
     env['SSBU_FIGHT_HEALTH'] = '5'
+    if fast:                                   # tests\DEBUG_MODE.md: PROBE_FAST=<speed> (0 = uncapped) also skips the movies; needs an exe linked with debug_mode.c
+        env.setdefault('SSBU_SPEED', fast)
+        env.setdefault('SSBU_SKIP_MOVIES', '1')
     for kv in env_extra:
         k, v = kv.split('=', 1)
         if v == '(unset)':

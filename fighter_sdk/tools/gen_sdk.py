@@ -17,10 +17,15 @@ import re
 
 import luaconst
 import mangle
-from acmd_decomp import wrapper_name
+from acmd_decomp import wrapper_name, singleton_name
 from nrolib import Nro, HERE, STUDY
 
 INC = SRC = os.path.join(STUDY, 'fighters', 'sdk_generated')      # S3: generated from the game -> with the generated sources, not with the SDK
+# S8 (options, the default is unchanged): SSBU_SDK_DIR=<folder under fighters\> writes the headers there instead (work
+# in progress keeps its own SDK; build_fighter.py reads it with SSBU_FIGHTER_SDK); SSBU_SDK_EXTRA=<json> adds what
+# that file lists (imports_used, float_returns, void_calls, lua_calls) to what the tools_out files give.
+if os.environ.get('SSBU_SDK_DIR'):
+    INC = SRC = os.path.join(STUDY, 'fighters', os.environ['SSBU_SDK_DIR'])
 
 FIXED = [  # slot name, mangled name (or unique substring to look up in the common import list), spec override
     ('S_clear_lua_stack', '_ZN3lib8L2CAgent15clear_lua_stackEv', None),
@@ -108,6 +113,10 @@ def param(t, i):
             return 'L2CAgent *', a + '->lua_state', 'p'
         if inner == ('class', 'app::BattleObjectModuleAccessor'):
             return 'BattleObjectModuleAccessor *', a, 'p'
+        if isinstance(inner, tuple) and inner[0] == 'class' and inner[1] in ('phx::Vector2f', 'phx::Vector3f', 'phx::Vector4f'):
+            # S10: a vector by address: the test compares its CONTENT (letters 2 3 4); besides the wrapper that takes
+            # a pointer (one the game returned) a second one takes the object built in the source (4th element)
+            return 'void *', a, inner[1][11], 'const %s &' % inner[1][5:]
         return 'void *', a, 'p'
     raise ValueError(str(t))
 
@@ -121,17 +130,32 @@ def main():
     used = set()
     lua_calls = {}
     floats, voids = set(), set()       # found by the decompiler: result read from the float register / called without a result buffer
+    values = set()                     # S10: called WITH a result somewhere: never declared void (see below)
     for path in glob.glob(os.path.join(STUDY, 'fighters', 'tools_out', '*_acmd.json')) + glob.glob(os.path.join(STUDY, 'fighters', 'tools_out', '*_status.json')):
         j = json.load(open(path))
         used |= set(j['imports_used'])
         floats |= set(j.get('float_returns', []))
         voids |= set(j.get('void_calls', []))
+        values |= set(j.get('value_calls', []))
     with open(os.path.join(STUDY, 'fighters', 'tools_out', 'lua_calls_global.json')) as f:       # batch.py: how each script call is used over all modules
         g = json.load(f)
     sp = os.path.join(STUDY, 'fighters', 'tools_out', 'status_lua_calls.json')                  # S3: script calls only the state machine makes (status_decomp.py)
+    if os.environ.get('SSBU_SDK_STATUS_CALLS'):                                                 # S10: the copy of a work run (status_decomp.py SSBU_FIGHTERS_ROOT)
+        sp = os.environ['SSBU_SDK_STATUS_CALLS']
     if os.path.exists(sp):
         for s, e in json.load(open(sp)).items():
             g.setdefault(s, e)
+    for extra in [p for p in (os.environ.get('SSBU_SDK_EXTRA') or '').split(';') if p]:         # S8; S10: several files, ';' between them
+        j = json.load(open(extra))
+        used |= set(j.get('imports_used', []))
+        floats |= set(j.get('float_returns', []))
+        voids |= set(j.get('void_calls', []))
+        values |= set(j.get('value_calls', []))          # called without a result in one module, with one in another: the wrapper returns it
+        for s, e in j.get('lua_calls', {}).items():
+            g.setdefault(s, e)
+    # S10: over ALL inputs (it was only applied inside one extra file: a function lua2cpp_common calls with a result
+    # and a fighter's status script without one became void, and common no longer compiled)
+    voids -= values
     lua_calls ={s: {'proto': g[s]['proto'], 'autopop': g[s]['autopop']} for s in used if s in g}
     common_imports = set(Nro('mario').plt.values()) | set(Nro('mario').got.values())
     rets = rust_returns()
@@ -145,6 +169,9 @@ def main():
     wrappers = []
     seen_names = {}
     for sym in sorted(used):
+        if singleton_name(sym):                                     # S8: a data symbol: the slot only (read with singleton(slot))
+            slots.append(('S_singleton_' + singleton_name(sym), sym, ''))
+            continue
         path, params, const = mangle.parse(sym)
         name = wrapper_name(sym)
         enum = 'S_' + re.sub(r'\W', '_', name)
@@ -161,7 +188,11 @@ def main():
         if sym in lua_calls:
             lc = lua_calls[sym]
             if not lc['proto']:
-                if lc['autopop']:
+                if sym in floats:                      # S8: returns its float directly (sv_kinetic_energy::get_speed_x): nothing is popped
+                    body = ('template <class... A> inline float %s(L2CAgent *agent, A... v) { L2CValue args[sizeof...(v) + 1] = {L2CValue(v)...}; '
+                            'fs_lua_clear(agent); for (int i = 0; i < (int)sizeof...(v); i++) fs_lua_push(agent, args[i]); '
+                            'return gcall<float>(%s, agent->lua_state); }' % (short, enum))
+                elif lc['autopop']:
                     body = ('template <class... A> inline void %s(L2CAgent *agent, A... v) { L2CValue args[sizeof...(v) + 1] = {L2CValue(v)...}; '
                             'fs_lua_call(agent, %s, args, (int)sizeof...(v)).pop(); }' % (short, enum))
                 else:
@@ -192,11 +223,16 @@ def main():
                 body = 'inline L2CValue %s(%s) { return gcall_value(%s); }' % (short, ', '.join(decl), ', '.join([enum] + passed))
             else:
                 body = 'inline %s %s(%s) { return gcall<%s>(%s); }' % (ret, short, ', '.join(decl), ret, ', '.join([enum] + passed))
+                if any(len(p) > 3 for p in ps):          # S10: the same function taking its vectors as objects
+                    decl2 = (['L2CAgent *self'] if member else []) + ['%s a%d' % (p[3] if len(p) > 3 else p[0], i) for i, p in enumerate(ps)]
+                    wrappers.append(in_namespaces(name, 'inline %s %s(%s) { return gcall<%s>(%s); }' % (ret, short, ', '.join(decl2), ret, ', '.join([enum] + passed))))
         wrappers.append(in_namespaces(name, body))
     os.makedirs(SRC, exist_ok=True)
     with open(os.path.join(INC, 'lua_bind.h'), 'w', newline='\n') as f:
         f.write('// GENERATED by fighter_sdk/tools/gen_sdk.py - do not edit. One wrapper per game function the scripts call.\n#pragma once\n\n')
         f.write('enum FsSlot : int {\n' + ''.join('    %s,\n' % s[0] for s in slots) + '    S_COUNT\n};\n\n')
+        f.write('// S8: the instance of one of the game\'s manager objects (lib::Singleton<app::X>::instance_), slot S_singleton_X\n'
+                'inline void *singleton(int slot) { return *(void **)(uintptr_t)fs_addr[slot]; }\n\n')
         f.write('\n'.join(wrappers) + '\n')
     with open(os.path.join(SRC, 'fs_syms.inc'), 'w', newline='\n') as f:
         f.write('// GENERATED by fighter_sdk/tools/gen_sdk.py - do not edit. Slot -> game symbol, argument description.\n')

@@ -10,6 +10,7 @@
  * Debug: SSBU_VK_DEBUG=1 turns on the checks that stand in for the validation layer that is not installed (image used
  * after destroy, barrier inside a pass, a view of an image in an unexpected layout) and prints every new pipeline. */
 #include <stdarg.h>
+#include <math.h>
 #include "tex_decode.h"
 static int have_targets_live(void);
 
@@ -39,14 +40,22 @@ static struct {
     VkPhysicalDeviceVertexInputDynamicStateFeaturesEXT vids; VkPhysicalDeviceCustomBorderColorFeaturesEXT cbc; VkPhysicalDeviceProvokingVertexFeaturesEXT pv;
     VkPhysicalDeviceIndexTypeUint8FeaturesEXT iu8; VkPhysicalDevicePrimitiveTopologyListRestartFeaturesEXT plr; VkPhysicalDeviceVertexAttributeDivisorFeaturesEXT vad;
     VkPhysicalDeviceExtendedDynamicState3FeaturesEXT eds3;
+    VkPhysicalDeviceGraphicsPipelineLibraryFeaturesEXT gpl;
     const char *exts[16]; uint32_t next;
     int has_vids, has_cbc, has_pv, has_iu8, has_plr, has_vad, has_push, has_eds3, debug;
+    int has_gpl, ext_gpl, ext_so;
     VkPhysicalDeviceMemoryProperties mp;
 } D;
 static void vkd_fail(const char *fmt, ...) {
     va_list ap; va_start(ap, fmt); printf("nvn_vk: FATAL: "); vprintf(fmt, ap); printf("\n"); va_end(ap); fflush(stdout); ExitProcess(6);
 }
 #define DBG_ASSERT(c, ...) do { if (D.debug && !(c)) vkd_fail(__VA_ARGS__); } while (0)
+/* Session 11: the pipeline-library mode. SSBU_VK_GPL wins (0 = whole pipelines, the path before session 9; 1 = a library per
+ * stage pair, a measurement mode; 2 = a library per stage + preparation + barrier); without it VK_GPL_DEFAULT. */
+#ifndef VK_GPL_DEFAULT
+#define VK_GPL_DEFAULT 2                           /* session 11: on by default where the driver has the extension (validation run s11v3 and the first-run table of V1_vulkan.md "Session 11"); -DVK_GPL_DEFAULT=0 or SSBU_VK_GPL=0 for the old path */
+#endif
+static int vk_gpl_mode(void) { static int m = -1; if (m < 0) { const char *e = getenv("SSBU_VK_GPL"); m = e && e[0] ? atoi(e) : VK_GPL_DEFAULT; } return m; }
 
 /* ---------------------------------------------------------------- device features */
 static void vkd_device_info(VkDeviceCreateInfo *di, const VkExtensionProperties *dext, uint32_t ndext) {
@@ -68,6 +77,10 @@ static void vkd_device_info(VkDeviceCreateInfo *di, const VkExtensionProperties 
     EXT(has_plr, "VK_EXT_primitive_topology_list_restart", plr, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRIMITIVE_TOPOLOGY_LIST_RESTART_FEATURES_EXT)
     EXT(has_vad, "VK_EXT_vertex_attribute_divisor", vad, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES_EXT)
     if (!(getenv("SSBU_VK_EDS3") && !atoi(getenv("SSBU_VK_EDS3")))) { EXT(has_eds3, "VK_EXT_extended_dynamic_state3", eds3, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_FEATURES_EXT) }
+    /* session 9: graphics pipeline libraries (nvn_vk_m4.c "graphics pipeline libraries"): the stage pair is compiled at loading
+     * without the pass formats, a draw only LINKS. SSBU_VK_GPL=1 turns it on (needs extended dynamic state 3 as well). */
+    D.ext_gpl = has_name(dext, ndext, "VK_EXT_graphics_pipeline_library") && has_name(dext, ndext, "VK_KHR_pipeline_library"); D.ext_so = has_name(dext, ndext, "VK_EXT_shader_object");
+    if (D.ext_gpl && vk_gpl_mode()) { D.exts[D.next++] = "VK_KHR_pipeline_library"; EXT(has_gpl, "VK_EXT_graphics_pipeline_library", gpl, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_FEATURES_EXT) }
 #undef EXT
     if (has_name(dext, ndext, "VK_KHR_push_descriptor") && !(getenv("SSBU_VK_PUSH") && !atoi(getenv("SSBU_VK_PUSH")))) { D.has_push = 1; D.exts[D.next++] = "VK_KHR_push_descriptor"; }
     vkGetPhysicalDeviceFeatures2(V.gpu, &D.f2);                    /* every supported feature of these structures is enabled */
@@ -77,6 +90,17 @@ static void vkd_device_info(VkDeviceCreateInfo *di, const VkExtensionProperties 
     D.has_eds3 = D.has_eds3 && D.eds3.extendedDynamicState3ColorBlendEnable && D.eds3.extendedDynamicState3ColorBlendEquation && D.eds3.extendedDynamicState3ColorWriteMask && D.eds3.extendedDynamicState3PolygonMode &&
                  D.eds3.extendedDynamicState3AlphaToCoverageEnable && D.eds3.extendedDynamicState3SampleMask && (D.eds3.extendedDynamicState3DepthClampEnable || !D.f2.features.depthClamp);
     printf("nvn_vk: extended dynamic state 3 (blend enable / equation / write mask, polygon mode, alpha to coverage, sample mask, depth clamp dynamic = not in the pipeline key): %s\n", D.has_eds3 ? "yes" : "no");
+    D.has_gpl = D.has_gpl && D.gpl.graphicsPipelineLibrary && D.has_eds3 && D.has_vids;
+    printf("nvn_vk: driver support for pipelines without a hold: VK_EXT_graphics_pipeline_library %s, VK_EXT_shader_object %s, extended dynamic state 3 (all seven states) %s, vertex input dynamic state %s | pipeline libraries in use: %s\n",
+           D.ext_gpl ? "yes" : "NO", D.ext_so ? "yes" : "NO", D.has_eds3 ? "yes" : "NO", D.has_vids ? "yes" : "NO", D.has_gpl ? "YES" : "no");
+    /* session 11: ONE line that says which path draws and why */
+    {   const char *e = getenv("SSBU_VK_GPL");
+        int m = vk_gpl_mode();
+        printf("nvn_vk_path: %s: %s (SSBU_VK_GPL %s; default %d; SSBU_VK_GPL=0 is the switch back to whole pipelines)\n",
+               D.has_gpl && m >= 2 ? "STAGE LIBRARIES + preparation + loading barrier (a draw links, nothing is compiled in a fight)" : D.has_gpl ? "PAIR LIBRARIES (SSBU_VK_GPL=1, a measurement mode)" : "WHOLE PIPELINES (made by the workers from the list of earlier runs; a first use can hold a frame)",
+               !m ? (e ? "turned off by SSBU_VK_GPL=0" : "off by default in this build") : D.has_gpl ? (e ? "asked for by SSBU_VK_GPL" : "the default: the driver has VK_EXT_graphics_pipeline_library, extended dynamic state 3 and dynamic vertex input") :
+               !D.ext_gpl ? "the driver has NO VK_EXT_graphics_pipeline_library: fallen back" : "the driver lacks extended dynamic state 3 or dynamic vertex input: fallen back", e ? e : "not set", VK_GPL_DEFAULT);
+    }
     if (!D.f13.dynamicRendering || !D.f13.synchronization2) vkd_fail("the device lacks dynamicRendering / synchronization2");
     if (!D.has_vids) nvn_vk_missing("a GPU without VK_EXT_vertex_input_dynamic_state (the vertex layout is not yet part of the pipeline key)");
     if (!D.f2.features.textureCompressionBC) nvn_vk_missing("a GPU without BC texture compression");
@@ -158,7 +182,7 @@ static VkBuffer vbuf_new(uint64_t size, VkFlags usage, VMem *mem) {
 
 /* ---------------------------------------------------------------- command buffers in flight */
 #define NSLOT 8
-typedef struct { VkCommandBuffer cmd; VkFence fence; VkDescriptorPool pool[16]; int npool, ipool, pending; uint64_t serial; } Slot;
+typedef struct { VkCommandBuffer cmd; VkFence fence; VkDescriptorPool pool[16]; int npool, ipool, pending; uint64_t serial; LONG64 ts_frame; } Slot;
 typedef struct VTex VTex;
 static struct {
     Slot slot[NSLOT]; int cur, recording; uint64_t serial, done;      /* serial: number of the last submission; done: every submission up to here has finished */
@@ -169,6 +193,7 @@ static struct {
     VkBuffer zero; VMem zero_mem;
     /* pass */
     int in_pass, pass_w, pass_h;
+    int pass_rs; float pass_sx, pass_sy;           /* track O: the pass draws into scaled images (pass_w, pass_h are the images'; sx, sy = image / game) */
     /* NVN state as left by the commands executed so far */
     TexPool *tpool; SamplerPool *spool;
     Prog *prog[6];
@@ -202,6 +227,12 @@ static int g_ts_on = -1;
 static VkQueryPool g_ts_pool;
 static double g_ts_ns;
 static LONG64 g_ts_n;
+/* Session 9: the same per FRAME (the frame a buffer was recorded for), with the time between two presents and whether the frame
+ * was a battle frame (compute dispatches and more than 120 draws): median / p99 of the battle frames at exit ("nvn_vk_gpu_fight:"). */
+#define FRSTAT_N 40000
+static float g_fr_gpu[FRSTAT_N], g_fr_wall[FRSTAT_N];
+static uint8_t g_fr_fight[FRSTAT_N];
+static LONG64 g_cur_frame, g_battle_frames;
 static void slot_wait(Slot *s) {
     if (!s->pending) return;
     LONG64 t0 = tk();
@@ -211,7 +242,7 @@ static void slot_wait(Slot *s) {
     VKC(vkResetFences(V.device, 1, &s->fence));
     if (g_ts_on > 0) {                             /* SSBU_VK_GPUTIME=1: the GPU's own clock at the first and the last command of this buffer */
         uint64_t ts[2] = {0, 0};
-        if (vkGetQueryPoolResults(V.device, g_ts_pool, (uint32_t)(s - R.slot) * 2, 2, sizeof ts, ts, 8, VK_QUERY_RESULT_64_BIT) == VK_SUCCESS && ts[1] >= ts[0]) { g_ts_ns += (double)(ts[1] - ts[0]) * (double)V.props.limits.timestampPeriod; g_ts_n++; }
+        if (vkGetQueryPoolResults(V.device, g_ts_pool, (uint32_t)(s - R.slot) * 2, 2, sizeof ts, ts, 8, VK_QUERY_RESULT_64_BIT) == VK_SUCCESS && ts[1] >= ts[0]) { double ns = (double)(ts[1] - ts[0]) * (double)V.props.limits.timestampPeriod; g_ts_ns += ns; g_ts_n++; if (s->ts_frame >= 0 && s->ts_frame < FRSTAT_N) g_fr_gpu[s->ts_frame] += (float)(ns / 1e6); }
     }
     s->pending = 0;
     if (s->serial > R.done) R.done = s->serial;
@@ -236,6 +267,7 @@ static void cmd_begin(void) {
         g_ts_on = getenv("SSBU_VK_GPUTIME") && atoi(getenv("SSBU_VK_GPUTIME")) && V.props.limits.timestampComputeAndGraphics;
         if (g_ts_on) { VkQueryPoolCreateInfo qi = {VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO}; qi.queryType = VK_QUERY_TYPE_TIMESTAMP; qi.queryCount = NSLOT * 2; VKC(vkCreateQueryPool(V.device, &qi, NULL, &g_ts_pool)); }
     }
+    s->ts_frame = g_cur_frame;
     if (g_ts_on > 0) { vkCmdResetQueryPool(s->cmd, g_ts_pool, (uint32_t)R.cur * 2, 2); vkCmdWriteTimestamp(s->cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, g_ts_pool, (uint32_t)R.cur * 2); }
     garbage_collect();
 }
@@ -347,8 +379,41 @@ typedef struct VView { EView e; int vtype, attach; VkImageView view; struct VVie
 struct VTex {
     uint32_t magic; Tex *t; VkImage img; VMem mem; VkFormat fmt; VkImageLayout layout; VkFlags aspect;
     int w, h, d, levels, layers, samples, expand, decode, is3d, feedback, bpb, bw, bh;
+    int rs; float sx, sy;                          /* track O: rs = 1 when the image is smaller than the game's texture (w, h are the image's; sx, sy = image / game) */
     VView *views; VTex *next, *prev;
 };
+/* ---- Track O: internal resolution scale (graphics.ini resolution_scale; SSBU_VK_SCALE wins; plan\phases\O1_options.md, session 7).
+ * A texture of the screen class (2D, one layer, attachable, the game's size exactly 1920x1080 >> k, k = 0..6) gets an image
+ * of round(size * scale); everything the game says in ITS pixels about such an image is converted where it is used:
+ * viewport, scissor, clear rectangles, copy / blit / resolve / downsample regions, uploads and read-backs (through a
+ * temporary image of the game's size), the crop of the present. The size table of the shaders (c2) and the regions the game
+ * reads keep the game's sizes. Fragment stages are translated with MxIn.screen_scale (another hash: ssrc_hb). At 1.0 none
+ * of this runs: every branch is behind RS_ON or VTex.rs / R.pass_rs, which are then 0. */
+static float g_rs = -1.0f;
+static LONG64 g_rs_images, g_rs_stages, g_rs_fcs, g_rs_tf, g_rs_up, g_rs_down, g_rs_blits;
+static float rs_scale(void) {
+    if (g_rs < 0) {
+        const char *e = getenv("SSBU_VK_SCALE");
+        float v = e && atof(e) > 0 ? (float)atof(e) : gfx_options()->scale;
+        if (v < 0.25f) v = 0.25f;
+        if (v > 1.0f) v = 1.0f;                    /* above 1.0 (supersampling) is not offered: not tested */
+        g_rs = v;
+    }
+    return g_rs;
+}
+#define RS_ON (rs_scale() != 1.0f)
+static int rs_screen_class(int w, int h) { for (int k = 0; k < 7; k++) if (w == 1920 >> k && h == 1080 >> k) return 1; return 0; }
+/* A coordinate of the game's grid on a scaled image (nearest image texel edge, inside 0..max). */
+static int rs_edge(int v, float s, int max) { int r = (int)floorf((float)v * s + 0.5f); return r < 0 ? 0 : r > max ? max : r; }
+/* Session 9: the textures of the game's window (nvn_gl.c win_initialize keeps the list; also noted here at every present).
+ * SSBU_VK_UI_NATIVE=1 (resolution scale, experiment): a window texture is NOT scaled, so what the game draws straight into it
+ * (its last full-screen pass and the 2D interface after it) is drawn at the game's 1920x1080. */
+int nvn_front_tex_is_window(const Tex *t);
+static Tex *g_wintex[8];
+static LONG64 g_rs_mixed;
+static int wintex_is(const Tex *t) { if (nvn_front_tex_is_window(t)) return 1; for (int i = 0; i < 8; i++) if (g_wintex[i] == t) return 1; return 0; }
+static void wintex_note(Tex *t) { if (!t || wintex_is(t)) return; for (int i = 0; i < 8; i++) if (!g_wintex[i]) { g_wintex[i] = t; return; } }
+static int rs_ui_native(void) { static int on = -1; if (on < 0) on = getenv("SSBU_VK_UI_NATIVE") && atoi(getenv("SSBU_VK_UI_NATIVE")); return on; }
 static VTex *g_vtex_all;
 static struct { VTex *vt; uint64_t serial; } *g_garbage;
 static int g_ngarbage, g_garbage_cap;
@@ -388,7 +453,14 @@ static void vt_destroy(VTex *vt) {
 }
 static void garbage_collect(void) {
     int n = 0;
+    LONG64 t0 = g_ngarbage ? tk() : 0;
     for (int i = 0; i < g_ngarbage; i++) if (g_garbage[i].serial <= R.done) vt_destroy(g_garbage[i].vt); else g_garbage[n++] = g_garbage[i];
+    if (t0 && g_ngarbage - n >= 50) {              /* session 8: what destroying many images at once costs (the end of a screen) */
+        LARGE_INTEGER fq; QueryPerformanceFrequency(&fq);
+        double ms = (double)(tk() - t0) * 1000.0 / (double)fq.QuadPart;
+        static int nl;
+        if (ms > 10.0 && nl++ < 40) printf("nvn_vk_tex: frame %lld: %d images destroyed in %.1f ms\n", (long long)nvn_front_frame_next(), g_ngarbage - n, ms);
+    }
     g_ngarbage = n;
 }
 static void vk_drop(int kind, void *host) {
@@ -403,6 +475,53 @@ static void vk_drop(int kind, void *host) {
     g_garbage[g_ngarbage].vt = vt; g_garbage[g_ngarbage++].serial = R.serial + 1;       /* the command buffer being recorded may still name it */
 }
 static int lvl_(int v, int l) { v >>= l; return v > 0 ? v : 1; }
+/* Track O. A temporary image of w x h (one level, one layer, the format of `like`) for an upload into, or a read-back from,
+ * an image that is smaller than the game's texture. The command buffer is being recorded; the image goes when it has finished. */
+static VTex *rs_temp(VTex *like, int w, int h) {
+    VTex *vt = calloc(1, sizeof *vt);
+    VkImageCreateInfo ci = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    VkMemoryRequirements rq;
+    vt->magic = 0x56544558; vt->fmt = like->fmt; vt->aspect = like->aspect; vt->w = w; vt->h = h; vt->d = 1; vt->levels = 1; vt->layers = 1; vt->samples = 1;
+    vt->bpb = like->bpb; vt->bw = like->bw; vt->bh = like->bh;
+    ci.imageType = VK_IMAGE_TYPE_2D; ci.format = vt->fmt; ci.extent.width = (uint32_t)w; ci.extent.height = (uint32_t)h; ci.extent.depth = 1; ci.mipLevels = 1; ci.arrayLayers = 1;
+    ci.samples = VK_SAMPLE_COUNT_1_BIT; ci.tiling = VK_IMAGE_TILING_OPTIMAL; ci.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE; ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    VKC(vkCreateImage(V.device, &ci, NULL, &vt->img));
+    vkGetImageMemoryRequirements(V.device, vt->img, &rq);
+    vt->mem = vmem_alloc(rq, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0);
+    VKC(vkBindImageMemory(V.device, vt->img, vt->mem.mem, vt->mem.off));
+    vt->layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    vt->next = g_vtex_all; if (g_vtex_all) g_vtex_all->prev = vt; g_vtex_all = vt;
+    R.images_live++;
+    if (g_ngarbage == g_garbage_cap) { g_garbage_cap = g_garbage_cap ? g_garbage_cap * 2 : 256; g_garbage = realloc(g_garbage, sizeof *g_garbage * (size_t)g_garbage_cap); }
+    g_garbage[g_ngarbage].vt = vt; g_garbage[g_ngarbage++].serial = R.serial + 1;
+    return vt;
+}
+static VkFilter rs_filter(VTex *vt) { return vt->aspect == VK_IMAGE_ASPECT_COLOR_BIT && fmt_supported(vt->fmt, VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) ? VK_FILTER_LINEAR : VK_FILTER_NEAREST; }
+/* Texels of the game's grid (w x h at `off` of the stream ring, for the rectangle x, y of one level) into a scaled image:
+ * through a temporary image of the game's size and a filtered blit. The command buffer is being recorded, no pass is open. */
+static void rs_upload(VTex *vt, int level, int layer, uint64_t off, uint32_t rowlen, uint32_t rows, int x, int y, int w, int h) {
+    int lw = lvl_(vt->w, level), lh = lvl_(vt->h, level);
+    VkBufferImageCopy c;
+    VkImageBlit b;
+    if (w <= 0 || h <= 0) return;
+    if (!fmt_supported(vt->fmt, VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT)) { nvn_vk_missing("resolution scale: an upload into a scaled texture whose format cannot be blitted"); return; }
+    VTex *tmp = rs_temp(vt, w, h);
+    memset(&c, 0, sizeof c); memset(&b, 0, sizeof b);
+    c.bufferOffset = off; c.bufferRowLength = rowlen; c.bufferImageHeight = rows;
+    c.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT; c.imageSubresource.layerCount = 1;
+    c.imageExtent.width = (uint32_t)w; c.imageExtent.height = (uint32_t)h; c.imageExtent.depth = 1;
+    vt_layout(tmp, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    vkCmdCopyBufferToImage(R.cmd, R.ring, tmp->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c);
+    vt_layout(tmp, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL); vt_layout(vt, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    b.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT; b.srcSubresource.layerCount = 1;
+    b.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT; b.dstSubresource.mipLevel = (uint32_t)level; b.dstSubresource.baseArrayLayer = (uint32_t)layer; b.dstSubresource.layerCount = 1;
+    b.srcOffsets[1].x = w; b.srcOffsets[1].y = h; b.srcOffsets[1].z = 1;
+    b.dstOffsets[0].x = rs_edge(x, vt->sx, lw); b.dstOffsets[0].y = rs_edge(y, vt->sy, lh); b.dstOffsets[1].x = rs_edge(x + w, vt->sx, lw); b.dstOffsets[1].y = rs_edge(y + h, vt->sy, lh); b.dstOffsets[1].z = 1;
+    if (b.dstOffsets[1].x <= b.dstOffsets[0].x || b.dstOffsets[1].y <= b.dstOffsets[0].y) return;
+    vkCmdBlitImage(R.cmd, tmp->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, vt->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &b, rs_filter(vt));
+    g_rs_up++;
+}
 static VTex *g_put_vt;
 static uint32_t g_fmt_hist[256];                   /* images made per NVN format (printed with the totals) */
 static void vt_put(Tex *t, int level, int layer, int w, int h, int d, const void *data, size_t size, int rgba8, int64_t row_stride) {
@@ -423,6 +542,11 @@ static void vt_put(Tex *t, int level, int layer, int w, int h, int d, const void
     uint64_t off = ring_raw(data, size);           /* may submit what was recorded so far */
     free(tmp);
     pass_end(); cmd_begin();
+    if (vt->rs) {                                  /* track O: the texture's own memory holds the game's size */
+        if (!vt->is3d && (uint32_t)layer < (uint32_t)vt->layers) rs_upload(vt, level, layer, off, row_stride && vt->bpb ? (uint32_t)(row_stride / vt->bpb) : 0, 0, 0, 0, w, h);
+        R.upload_bytes += (LONG64)size;
+        return;
+    }
     vt_layout(vt, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
     VkBufferImageCopy c;
     memset(&c, 0, sizeof c);
@@ -435,9 +559,15 @@ static void vt_put(Tex *t, int level, int layer, int w, int h, int d, const void
     R.upload_bytes += (LONG64)size;
 }
 /* The image of a texture: made at first use, and holding what the guest memory holds (unless the GPU wrote it). */
+/* Session 8: textures made and read AHEAD of their first draw (tex_ahead, below), and what is still made at a draw. */
+static LONG64 g_ta_n, g_ta_bytes, g_ta_tk, g_ta_max_tk, g_late_n, g_late_tk, g_late_fight_n, g_late_fight_tk, g_up_fr_tk, g_up_fr_bytes;
+static int g_up_fr_n, g_ta_inside;
+static volatile LONG g_in_fight;                   /* nvn_vk_m4.c (included further down) */
 static VTex *vt_get2(Tex *t, int sync) {
     VTex *vt = t->vk;
+    LONG64 tu0 = 0, ub0 = R.upload_bytes;
     if (!vt) {
+        tu0 = tk();
         TexBuilder *b = &t->b;
         Fmt f;
         VkImageCreateInfo ci = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
@@ -451,6 +581,16 @@ static VTex *vt_get2(Tex *t, int sync) {
         vt->levels = nvn_front_tex_levels(t); vt->layers = nvn_front_tex_layers(t); vt->samples = b->samples > 1 ? b->samples : 1; vt->is3d = b->target == 2;
         if (b->target == 0 || b->target == 3) { ci.imageType = VK_IMAGE_TYPE_1D; vt->h = 1; if (b->target == 3) vt->layers = b->height > 0 && b->depth <= 1 ? b->height : vt->layers; }
         else ci.imageType = vt->is3d ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D;
+        if (RS_ON && (b->target == 1 || b->target == 5) && vt->layers == 1 && !vt->decode && rs_screen_class(vt->w, vt->h) && !(rs_ui_native() && wintex_is(t)) &&
+            (vt->aspect != VK_IMAGE_ASPECT_COLOR_BIT || (f.kind != 4 && fmt_supported(vt->fmt, VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT)))) {      /* track O: a screen-class target */
+            int gw = vt->w, gh = vt->h, lv = 1;
+            vt->w = (int)((float)gw * rs_scale() + 0.5f); vt->h = (int)((float)gh * rs_scale() + 0.5f);
+            if (vt->w < 1) vt->w = 1; if (vt->h < 1) vt->h = 1;
+            vt->rs = 1; vt->sx = (float)vt->w / (float)gw; vt->sy = (float)vt->h / (float)gh;
+            while ((vt->w >> lv) || (vt->h >> lv)) lv++;
+            if (vt->levels > lv) vt->levels = lv;
+            g_rs_images++;
+        }
         ci.format = vt->fmt; ci.extent.width = (uint32_t)vt->w; ci.extent.height = (uint32_t)vt->h; ci.extent.depth = (uint32_t)(vt->is3d ? vt->d : 1);
         ci.mipLevels = (uint32_t)vt->levels; ci.arrayLayers = (uint32_t)(vt->is3d ? 1 : vt->layers); ci.samples = (VkSampleCountFlagBits)vt->samples; ci.tiling = VK_IMAGE_TILING_OPTIMAL;
         ci.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
@@ -482,14 +622,75 @@ static VTex *vt_get2(Tex *t, int sync) {
     }
     vt_check(vt);
     if (sync && nvn_front_tex_changed(t)) {
+        if (!tu0) tu0 = tk();
         g_put_vt = vt;
         cmd_begin();
         if (!nvn_front_tex_read(t, vt->decode, vt_put)) { static int n; if (n++ < 20) printf("nvn_vk: texture %dx%d format 0x%x: its memory is not readable; not uploaded\n", t->b.width, t->b.height, t->b.format); }
         R.uploads++;
     }
+    if (tu0 && !g_ta_inside) {                     /* made or read again at its use (a draw, a copy, a target): the frame pays */
+        LONG64 d = tk() - tu0;
+        g_up_fr_tk += d; g_up_fr_n++; g_up_fr_bytes += R.upload_bytes - ub0;
+        g_late_n++; g_late_tk += d;
+        if (g_in_fight) { g_late_fight_n++; g_late_fight_tk += d; }
+    }
     return vt;
 }
 static VTex *vt_get(Tex *t) { return vt_get2(t, 1); }
+/* Session 8, render thread, after every present. A texture used to get its image, and its texels read out of the game's
+ * memory (hash, de-swizzle, copy into the stream ring), at the first draw that sampled it: the first frame of a fight paid
+ * 37-50 ms for the stage's and the fighters' textures (runs s7fn2 / s7gn2, frames 1804-1823). Here every block-compressed
+ * texture the game has made (nvnTextureInitialize) and not yet drawn with is given its image two frames after the render
+ * thread first saw it, under a time budget per frame (4 ms outside a fight, 1 ms in one; one texture is always taken, so a
+ * very large one can exceed it): the loading screen absorbs the work. Only compressed formats: they cannot be render
+ * targets, so nothing the GPU is about to write is touched; if the game fills the memory later, the draw sees the change
+ * (nvn_front_tex_changed) and reads it again, as before. SSBU_VK_TEXAHEAD=0 = as before (everything at the first draw). */
+static int fight_recent(void);                     /* nvn_vk_m4.c */
+static void present_progress(float frac);          /* session 11: the held loading screen presented again with the progress bar (defined above vk_present) */
+static LONG64 g_ovl_presents, g_ovl_frames;        /* extra presents of a held loading screen; normal frames drawn with the thin bar */
+static int holdlog_on(void);
+static void tex_ahead(LONG64 frame) {
+    static int on = -1;
+    static Tex *done_head;
+    static LONG64 fq;
+    if (on < 0) { const char *e = getenv("SSBU_VK_TEXAHEAD"); LARGE_INTEGER f; QueryPerformanceFrequency(&f); fq = f.QuadPart; on = !(e && !atoi(e)); }
+    if (!on) return;
+    Tex *head = nvn_front_tex_first();
+    if (head == done_head) return;
+    int fr = fight_recent();
+    LONG64 t0 = tk(), budget = fq * (fr ? 1 : 4) / 1000;
+    int pending = 0, taken = 0;
+    g_ta_inside = 1;
+    for (Tex *t = head; t && t != done_head; t = t->all_next) {
+        Fmt f;
+        if (t->ahead_seen < 0) continue;
+        if (t->vk || t->dead) { t->ahead_seen = -1; continue; }
+        if (!t->ahead_seen) { t->ahead_seen = frame + 1; pending++; continue; }
+        if (frame + 1 - t->ahead_seen < 2) { pending++; continue; }
+        if (t->gpu_written || (!t->mem && !t->b.packaged) || t->b.samples > 1 || t->b.width <= 0 || t->b.height <= 0 || !nvn_front_fmt(t->b.format, &f) || f.kind != 4) { t->ahead_seen = -1; continue; }
+        if (taken && tk() - t0 > budget) { pending++; continue; }
+        if (fr) {
+            /* in and around a fight (a frame of the last 600 had fighters) only what is certainly cheap: at most 512 KB, no
+             * decoding on the CPU, no wrap of the stream ring (a wrap waits for the GPU). Measured without this rule (runs s8b
+             * frame 3549, s8d 4297, s8f 3840: the result screen's textures arriving while the fight ends, in frames without
+             * a dispatch): 15-22 ms after one present and a frame of 34-35 ms. The others wait for a frame far from a fight,
+             * or are made at their use as before. */
+            VTex probe;
+            if (t->data_size > (512u << 10) || R.ring_pos + 2 * (uint64_t)t->data_size + (1u << 20) > R.ring_size) { pending++; continue; }
+            tex_vkfmt(t->b.format, &probe.expand, &probe.decode);
+            if (probe.decode) { pending++; continue; }
+        }
+        LONG64 b0 = R.upload_bytes;
+        vt_get(t);
+        t->ahead_seen = -1; taken++;
+        g_ta_n++; g_ta_bytes += R.upload_bytes - b0;
+    }
+    g_ta_inside = 0;
+    LONG64 d = tk() - t0;
+    g_ta_tk += d; if (d > g_ta_max_tk) g_ta_max_tk = d;
+    if (d * 1000 > 6 * fq && holdlog_on()) { static int nl; if (nl++ < 100) printf("nvn_vk_tex: frame %lld (%s): %d textures made ahead after the present in %.1f ms\n", (long long)frame, fr ? "in or near a fight" : "far from a fight", taken, (double)d * 1000.0 / (double)fq); }
+    if (!pending) done_head = head;
+}
 /* tex_view_obj's rules: the effective view of `t` through `v`. */
 static void eview_of(Tex *t, VTex *vt, const View *v, EView *e) {
     EView base;
@@ -900,6 +1101,7 @@ static int pass_begin(void) {
     int w = 0, h = 0;
     if (R.in_pass) return 1;
     cmd_begin();
+    R.pass_rs = 0;
     memset(ca, 0, sizeof ca); memset(&da, 0, sizeof da);
     for (int i = 0; i < R.ncol; i++) {
         Tex *t = R.col[i].tex;
@@ -910,22 +1112,34 @@ static int pass_begin(void) {
         t->gpu_written = 1;
         vt_layout(vt, vt->feedback ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
         ca[i].imageView = target_view(&R.col[i], vt); ca[i].imageLayout = vt->layout;
-        if (!w) { w = lvl_(vt->w, target_level(&R.col[i])); h = lvl_(vt->h, target_level(&R.col[i])); }
+        if (!w) { w = lvl_(vt->w, target_level(&R.col[i])); h = lvl_(vt->h, target_level(&R.col[i])); if (vt->rs) { R.pass_rs = 1; R.pass_sx = vt->sx; R.pass_sy = vt->sy; } }
     }
     if (R.depth.tex && !R.depth.tex->dead) {
         VTex *vt = vt_get(R.depth.tex);
         R.depth.tex->gpu_written = 1;
         if (vt->aspect == VK_IMAGE_ASPECT_COLOR_BIT) nvn_vk_missing("a colour format bound as depth target");
+        else if (RS_ON && rs_ui_native() && vt->rs && !R.pass_rs && w && (lvl_(vt->w, target_level(&R.depth)) < w || lvl_(vt->h, target_level(&R.depth)) < h)) g_rs_mixed++;      /* session 9 (SSBU_VK_UI_NATIVE): an unscaled colour target with a scaled depth target: the pass runs WITHOUT depth (counted, reported at exit) */
         else {
             vt_layout(vt, vt->feedback ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
             da.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO; da.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD; da.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
             da.imageView = target_view(&R.depth, vt); da.imageLayout = vt->layout;
             if (vt->aspect & VK_IMAGE_ASPECT_DEPTH_BIT) ri.pDepthAttachment = &da;
             if (vt->aspect & VK_IMAGE_ASPECT_STENCIL_BIT) ri.pStencilAttachment = &da;
-            if (!w) { w = lvl_(vt->w, target_level(&R.depth)); h = lvl_(vt->h, target_level(&R.depth)); }
+            if (!w) { w = lvl_(vt->w, target_level(&R.depth)); h = lvl_(vt->h, target_level(&R.depth)); if (vt->rs) { R.pass_rs = 1; R.pass_sx = vt->sx; R.pass_sy = vt->sy; } }
         }
     }
     if (!w) return 0;
+    {   /* session 9, SSBU_VK_UILOG=<n>: every pass begun in the n-th battle frame ("nvn_vk_ui:" lines): its targets, whether the
+         * colour target is a texture of the window, and the draws of the frame so far (the next line's number minus this one = its draws) */
+        static int uil = -2, np;
+        if (uil == -2) uil = getenv("SSBU_VK_UILOG") ? atoi(getenv("SSBU_VK_UILOG")) : -1;
+        if (uil > 0 && g_battle_frames == uil) {
+            Tex *c0 = R.ncol ? R.col[0].tex : NULL, *dt = R.depth.tex && !R.depth.tex->dead ? R.depth.tex : NULL;
+            printf("nvn_vk_ui: pass %d: %d colour, first %dx%d format 0x%x level %d%s%s | depth %dx%d format 0x%x%s | image size of the pass %dx%d | %lld draws so far, %lld dispatches so far\n", np++, R.ncol,
+                   c0 ? c0->b.width : 0, c0 ? c0->b.height : 0, c0 ? (int)c0->b.format : 0, c0 ? target_level(&R.col[0]) : 0, c0 && wintex_is(c0) ? " WINDOW TEXTURE" : "", c0 && c0->vk && ((VTex *)c0->vk)->rs ? " (scaled)" : "",
+                   dt ? dt->b.width : 0, dt ? dt->b.height : 0, dt ? (int)dt->b.format : 0, dt && dt->vk && ((VTex *)dt->vk)->rs ? " (scaled)" : "", w, h, (long long)R.frame_draws, (long long)R.dispatches);
+        }
+    }
     {   /* SSBU_VK_RTLOG=1 (track O, resolution scale survey): every distinct render-target size a pass is begun with, with
          * the colour / depth formats and how many passes used it (printed at exit: "nvn_vk_rt:" lines) */
         static int on = -1;
@@ -999,20 +1213,30 @@ static void resolve_sampler(int s, VStage *v, int i) {
     g_ndtex++;
 }
 static int have_targets_live(void);
+/* Track O: a rectangle of the game's pixels (scissor, clear) on the scaled images of the pass: every image pixel the
+ * rectangle touches (floor of the first edge, ceiling of the last). */
+static void rs_rect(int *x, int *y, int *w, int *h) {
+    int x0 = (int)floorf((float)*x * R.pass_sx), y0 = (int)floorf((float)*y * R.pass_sy);
+    int x1 = (int)ceilf((float)(*x + *w) * R.pass_sx - 0.001f), y1 = (int)ceilf((float)(*y + *h) * R.pass_sy - 0.001f);
+    *x = x0; *y = y0; *w = x1 > x0 ? x1 - x0 : 0; *h = y1 > y0 ? y1 - y0 : 0;
+}
 static void set_dynamic_state(void) {
     VkViewport vp;
     VkRect2D sc;
     uint64_t d = R.ds;
     float x = R.have_viewport ? R.viewport[0] : 0, y = R.have_viewport ? R.viewport[1] : 0, w = R.have_viewport ? R.viewport[2] : (float)R.pass_w, h = R.have_viewport ? R.viewport[3] : (float)R.pass_h;
+    if (R.pass_rs && R.have_viewport) { x *= R.pass_sx; w *= R.pass_sx; y *= R.pass_sy; h *= R.pass_sy; }      /* track O: the game's rectangle on the scaled image */
     vp.x = x; vp.y = y + h; vp.width = w; vp.height = -h; vp.minDepth = R.drange[0]; vp.maxDepth = R.drange[1];      /* NVN upper-left origin: clip y = +1 is row y (design, section 3) */
     if (vp.minDepth < 0) vp.minDepth = 0; if (vp.maxDepth > 1) vp.maxDepth = 1;
     vkCmdSetViewport(R.cmd, 0, 1, &vp);
     int sx = R.have_scissor ? R.scissor[0] : 0, sy = R.have_scissor ? R.scissor[1] : 0, sw = R.have_scissor ? R.scissor[2] : R.pass_w, sh = R.have_scissor ? R.scissor[3] : R.pass_h;
+    if (R.pass_rs && R.have_scissor) rs_rect(&sx, &sy, &sw, &sh);
     if (sx < 0) { sw += sx; sx = 0; } if (sy < 0) { sh += sy; sy = 0; }
     if (sx > R.pass_w) sx = R.pass_w; if (sy > R.pass_h) sy = R.pass_h;
     if (sw > R.pass_w - sx) sw = R.pass_w - sx; if (sh > R.pass_h - sy) sh = R.pass_h - sy;
     sc.offset.x = sx; sc.offset.y = sy; sc.extent.width = (uint32_t)(sw > 0 ? sw : 0); sc.extent.height = (uint32_t)(sh > 0 ? sh : 0);
     vkCmdSetScissor(R.cmd, 0, 1, &sc);
+    if (R.pass_rs && D.f2.features.wideLines) { float lw = R.line_width * R.pass_sx; vkCmdSetLineWidth(R.cmd, lw < V.props.limits.lineWidthRange[0] ? V.props.limits.lineWidthRange[0] : lw); } else
     vkCmdSetLineWidth(R.cmd, D.f2.features.wideLines ? R.line_width : 1.0f);
     vkCmdSetDepthBias(R.cmd, R.polyoff[1], D.f2.features.depthBiasClamp ? R.polyoff[2] : 0.0f, R.polyoff[0]);
     vkCmdSetBlendConstants(R.cmd, R.blendc);
@@ -1363,6 +1587,7 @@ static int draw_prepare(unsigned prim) {
     VStage *cur = R.prog[0]->st[0].vk;
     VStage *fs = depth_only ? NULL : vstage_get(R.prog[1], 1, key1, 0), *vs = vstage_get(R.prog[0], 0, key0, cur ? cur->fo : 0);
     if (vs) { uint32_t need = fs ? fs->in_attr & ~(vs->out_attr & ~vs->fo) : 0; if (need != vs->fo) vs = vstage_get(R.prog[0], 0, key0, need); }
+    if (g_skip_flag) { g_skip_flag = 0; if (!vs || (!depth_only && !fs)) return 0; }      /* shader_wait = skip: the draw is left out (counted in vstage_get) */
     if (!vs || (!depth_only && !fs)) { nvn_vk_missing("a draw whose vertex or fragment stage could not be translated or compiled (the log names the stage)"); return 0; }
 
     /* 1. textures (may upload, change layouts, end the pass) */
@@ -1418,7 +1643,8 @@ static int draw_prepare(unsigned prim) {
     }
     pkey_targets(&k);
     Pipe *p = pipe_get(&k, vs, fs);
-    if (!R.pipe_bound) R.dyn3_dirty = 1;           /* a new command buffer, or a pipeline of our own with static state was bound */
+    if (!p) return 0;                              /* shader_wait = skip: the pipeline is being made by a worker, the draw is left out (counted in pipe_get) */
+    if (!R.pipe_bound) R.dyn3_dirty = 1;          /* a new command buffer, or a pipeline of our own with static state was bound */
     if (R.pipe_bound != p) { vkCmdBindPipeline(R.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, p->p); R.pipe_bound = p; }
     if (R.dyn_dirty) { set_dynamic_state(); R.dyn_dirty = 0; }
     if (D.has_eds3 && (R.dyn3_dirty || R.dyn3_samples != k.samples)) { set_dynamic_state3(k.samples); R.dyn3_dirty = 0; }
@@ -1489,6 +1715,7 @@ static int draw_prepare(unsigned prim) {
         if (p->nb[1]) {
             uint64_t key = fnv(0xcbf29ce484222325ULL, &p->dl[1], sizeof p->dl[1]);
             unsigned slot;
+            if (p->dl[1] == g_udl[1]) for (int s = 0; s < (fs ? 2 : 1); s++) { VStage *v = s ? fs : vs; for (int i = 0; i < v->nsmp; i++) key = fnv(key, &v->smp[i].binding, sizeof v->smp[i].binding); }      /* session 9: one layout for every pipeline: the binding numbers tell the lists apart */
             for (int i = 0; i < g_ndtex; i++) { key = fnv(key, &g_dtex[i].view, sizeof g_dtex[i].view); key = fnv(key, &g_dtex[i].smp, sizeof g_dtex[i].smp); key = fnv(key, &g_dtex[i].layout, sizeof g_dtex[i].layout); }
             if (!key) key = 1;
             for (slot = (unsigned)key & 4095; g_tset[slot].gen == g_tset_gen && g_tset[slot].key != key; slot = (slot + 1) & 4095) {}
@@ -1521,6 +1748,10 @@ static int draw_prepare(unsigned prim) {
     }
     {   uint32_t pc[4] = {(uint32_t)R.alpha_func, 0, 0, 0};
         memcpy(&pc[1], &R.alpha_ref, 4); memcpy(&pc[2], &R.point_size, 4);
+        if (RS_ON) {                               /* track O: mx_fcs = game pixels per image pixel of this pass (fragment stages translated with screen_scale); points shrink with the image */
+            float fcs = R.pass_rs ? 1.0f / R.pass_sx : 1.0f, ps = R.pass_rs ? R.point_size * R.pass_sx : R.point_size;
+            memcpy(&pc[3], &fcs, 4); memcpy(&pc[2], &ps, 4);
+        }
         vkCmdPushConstants(R.cmd, p->layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 16, pc);
     }
     return 1;
@@ -1609,6 +1840,7 @@ static void write_region(Tex *t, const View *vp, const int *r, const void *data,
     uint64_t bw = ((uint64_t)(rowlen ? rowlen : (uint64_t)r[3]) + vt->bw - 1) / vt->bw, bh = ((uint64_t)(rows ? rows : (uint64_t)r[4]) + vt->bh - 1) / vt->bh, size = bw * bh * vt->bpb * (uint64_t)depth;
     uint64_t off = ring_raw(data, size);
     pass_end(); cmd_begin();
+    if (vt->rs) { rs_upload(vt, level, layer, off, (uint32_t)rowlen, (uint32_t)rows, r[0], r[1], r[3], r[4]); t->gpu_written = 1; t->uploaded = 1; return; }      /* track O */
     vt_layout(vt, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
     VkBufferImageCopy c;
     memset(&c, 0, sizeof c);
@@ -1653,6 +1885,30 @@ static size_t read_region(Tex *t, const View *vp, const int *r, void *out, int64
     c.imageSubresource.aspectMask = vt->aspect; c.imageSubresource.mipLevel = (uint32_t)level; c.imageSubresource.baseArrayLayer = vt->is3d ? 0 : (uint32_t)(layer + r[2]); c.imageSubresource.layerCount = vt->is3d ? 1 : (uint32_t)depth;
     c.imageOffset.x = r[0]; c.imageOffset.y = r[1]; c.imageOffset.z = vt->is3d ? r[2] : 0;
     c.imageExtent.width = (uint32_t)r[3]; c.imageExtent.height = (uint32_t)r[4]; c.imageExtent.depth = (uint32_t)(vt->is3d ? depth : 1);
+    if (vt->rs) {                                  /* track O: the game reads ITS rectangle: the image's part of it is blitted up to a temporary image of that size */
+        int lw = lvl_(vt->w, level), lh = lvl_(vt->h, level);
+        VkImageBlit b;
+        if (r[3] <= 0 || r[4] <= 0 || !fmt_supported(vt->fmt, VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT)) {
+            nvn_vk_missing("resolution scale: ReadTexels / CopyTextureToBuffer of a scaled texture whose format cannot be blitted");
+            if (was != VK_IMAGE_LAYOUT_UNDEFINED) vt_layout(vt, was);
+            vkDestroyBuffer(V.device, buf, NULL); vmem_free(mem);
+            return 0;
+        }
+        VTex *tmp = rs_temp(vt, r[3], r[4]);
+        memset(&b, 0, sizeof b);
+        b.srcSubresource.aspectMask = vt->aspect; b.srcSubresource.mipLevel = (uint32_t)level; b.srcSubresource.baseArrayLayer = (uint32_t)(layer + r[2]); b.srcSubresource.layerCount = 1;
+        b.dstSubresource.aspectMask = vt->aspect; b.dstSubresource.layerCount = 1;
+        b.srcOffsets[0].x = rs_edge(r[0], vt->sx, lw); b.srcOffsets[0].y = rs_edge(r[1], vt->sy, lh); b.srcOffsets[1].x = rs_edge(r[0] + r[3], vt->sx, lw); b.srcOffsets[1].y = rs_edge(r[1] + r[4], vt->sy, lh); b.srcOffsets[1].z = 1;
+        if (b.srcOffsets[1].x <= b.srcOffsets[0].x) b.srcOffsets[1].x = b.srcOffsets[0].x + 1; if (b.srcOffsets[1].y <= b.srcOffsets[0].y) b.srcOffsets[1].y = b.srcOffsets[0].y + 1;
+        if (b.srcOffsets[1].x > lw) { b.srcOffsets[0].x = lw - 1; b.srcOffsets[1].x = lw; } if (b.srcOffsets[1].y > lh) { b.srcOffsets[0].y = lh - 1; b.srcOffsets[1].y = lh; }
+        b.dstOffsets[1].x = r[3]; b.dstOffsets[1].y = r[4]; b.dstOffsets[1].z = 1;
+        vt_layout(tmp, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        vkCmdBlitImage(R.cmd, vt->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, tmp->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &b, rs_filter(vt));
+        vt_layout(tmp, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        c.imageSubresource.mipLevel = 0; c.imageSubresource.baseArrayLayer = 0; c.imageSubresource.layerCount = 1; c.imageOffset.x = c.imageOffset.y = c.imageOffset.z = 0;
+        vkCmdCopyImageToBuffer(R.cmd, tmp->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buf, 1, &c);
+        g_rs_down++;
+    } else
     vkCmdCopyImageToBuffer(R.cmd, vt->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buf, 1, &c);
     if (was != VK_IMAGE_LAYOUT_UNDEFINED) vt_layout(vt, was);
     cmd_wait_all();
@@ -1674,7 +1930,7 @@ static void vk_present_movie(void *arg) {
     Tex *t = j->win && j->index >= 0 && j->index < j->win->count ? j->win->tex[j->index] : NULL;
     if (!V.alive || !t || t->dead || t->b.width <= 0 || t->b.height <= 0) return;
     VTex *vt = vt_get(t);
-    int w = vt->w, h = vt->h, r[6] = {0, 0, 0, w, h, 1}, bgr = vt->fmt == VK_FORMAT_B8G8R8A8_UNORM || vt->fmt == VK_FORMAT_B8G8R8A8_SRGB;
+    int w = vt->rs ? t->b.width : vt->w, h = vt->rs ? t->b.height : vt->h, r[6] = {0, 0, 0, w, h, 1}, bgr = vt->fmt == VK_FORMAT_B8G8R8A8_UNORM || vt->fmt == VK_FORMAT_B8G8R8A8_SRGB;      /* track O: read_region takes the game's rectangle */
     if (vt->bpb != 4 || vt->aspect != VK_IMAGE_ASPECT_COLOR_BIT) { nvn_vk_missing("nvnQueuePresentTexture to the movie maker's window with a window texture that is not 8-bit RGBA"); return; }
     uint8_t *px = malloc((size_t)w * h * 4);
     if (!px) return;
@@ -1696,12 +1952,27 @@ static void blit_tex(Tex *s, const View *sv, const int *sr, Tex *d, const View *
     b.dstSubresource.aspectMask = vd->aspect; b.dstSubresource.mipLevel = dv && (dv->set & 0x81) == 0x81 ? (uint32_t)dv->lvl0 : 0; b.dstSubresource.baseArrayLayer = dv && (dv->set & 0x82) == 0x82 && !vd->is3d ? (uint32_t)dv->lay0 : 0; b.dstSubresource.layerCount = 1;
     b.srcOffsets[0].x = sr[0]; b.srcOffsets[0].y = sr[1]; b.srcOffsets[1].x = sr[0] + sr[3]; b.srcOffsets[1].y = sr[1] + sr[4]; b.srcOffsets[1].z = 1;
     b.dstOffsets[0].x = dr[0]; b.dstOffsets[0].y = dr[1]; b.dstOffsets[1].x = dr[0] + dr[3]; b.dstOffsets[1].y = dr[1] + dr[4]; b.dstOffsets[1].z = 1;
+    int rs_sw = sr[3], rs_sh = sr[4], rs_dw = dr[3], rs_dh = dr[4];
+    if (vs->rs || vd->rs) {                        /* track O: the game's rectangles on the scaled images */
+        if (vs->rs) {
+            int lw = lvl_(vs->w, (int)b.srcSubresource.mipLevel), lh = lvl_(vs->h, (int)b.srcSubresource.mipLevel);
+            b.srcOffsets[0].x = rs_edge(sr[0], vs->sx, lw); b.srcOffsets[0].y = rs_edge(sr[1], vs->sy, lh); b.srcOffsets[1].x = rs_edge(sr[0] + sr[3], vs->sx, lw); b.srcOffsets[1].y = rs_edge(sr[1] + sr[4], vs->sy, lh);
+            rs_sw = b.srcOffsets[1].x - b.srcOffsets[0].x; rs_sh = b.srcOffsets[1].y - b.srcOffsets[0].y;
+        }
+        if (vd->rs) {
+            int lw = lvl_(vd->w, (int)b.dstSubresource.mipLevel), lh = lvl_(vd->h, (int)b.dstSubresource.mipLevel);
+            b.dstOffsets[0].x = rs_edge(dr[0], vd->sx, lw); b.dstOffsets[0].y = rs_edge(dr[1], vd->sy, lh); b.dstOffsets[1].x = rs_edge(dr[0] + dr[3], vd->sx, lw); b.dstOffsets[1].y = rs_edge(dr[1] + dr[4], vd->sy, lh);
+            rs_dw = b.dstOffsets[1].x - b.dstOffsets[0].x; rs_dh = b.dstOffsets[1].y - b.dstOffsets[0].y;
+        }
+        if (!rs_sw || !rs_sh || !rs_dw || !rs_dh) return;
+        g_rs_blits++;
+    }
     if (vs->aspect != vd->aspect) { nvn_vk_missing("CopyTextureToTexture between a colour and a depth format"); return; }
-    if (vs->samples > 1 && vd->samples == 1 && vs->aspect == VK_IMAGE_ASPECT_COLOR_BIT && sr[3] == dr[3] && sr[4] == dr[4]) {
+    if (vs->samples > 1 && vd->samples == 1 && vs->aspect == VK_IMAGE_ASPECT_COLOR_BIT && rs_sw == rs_dw && rs_sh == rs_dh) {
         VkImageResolve rv;
         memset(&rv, 0, sizeof rv);
         rv.srcSubresource = b.srcSubresource; rv.dstSubresource = b.dstSubresource; rv.srcOffset = b.srcOffsets[0]; rv.dstOffset = b.dstOffsets[0];
-        rv.extent.width = (uint32_t)sr[3]; rv.extent.height = (uint32_t)sr[4]; rv.extent.depth = 1;
+        rv.extent.width = (uint32_t)rs_sw; rv.extent.height = (uint32_t)rs_sh; rv.extent.depth = 1;
         vkCmdResolveImage(R.cmd, vs->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, vd->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &rv);
         return;
     }
@@ -1823,6 +2094,7 @@ static void exec(const Cmd *m, int depth) {
         VkClearAttachment ca;
         VkClearRect cr;
         int sx = R.have_scissor ? R.scissor[0] : 0, sy = R.have_scissor ? R.scissor[1] : 0, sw = R.have_scissor ? R.scissor[2] : R.pass_w, sh = R.have_scissor ? R.scissor[3] : R.pass_h;
+        if (R.pass_rs && R.have_scissor) rs_rect(&sx, &sy, &sw, &sh);
         if (sx < 0) { sw += sx; sx = 0; } if (sy < 0) { sh += sy; sy = 0; }
         if (sw > R.pass_w - sx) sw = R.pass_w - sx; if (sh > R.pass_h - sy) sh = R.pass_h - sy;
         if (sw <= 0 || sh <= 0) break;
@@ -1840,6 +2112,7 @@ static void exec(const Cmd *m, int depth) {
         VkClearAttachment ca;
         VkClearRect cr;
         int sx = R.have_scissor ? R.scissor[0] : 0, sy = R.have_scissor ? R.scissor[1] : 0, sw = R.have_scissor ? R.scissor[2] : R.pass_w, sh = R.have_scissor ? R.scissor[3] : R.pass_h;
+        if (R.pass_rs && R.have_scissor) rs_rect(&sx, &sy, &sw, &sh);
         if (sx < 0) { sw += sx; sx = 0; } if (sy < 0) { sh += sy; sy = 0; }
         if (sw > R.pass_w - sx) sw = R.pass_w - sx; if (sh > R.pass_h - sy) sh = R.pass_h - sy;
         if (sw <= 0 || sh <= 0 || !vt) break;
@@ -1991,6 +2264,39 @@ static void vk_no_grid(void *arg) { nvn_vk_missing("nvnMultisampleStateGetSample
 static void save_bmp_vk(const char *path, VTex *vt) {
     VMem mem;
     int w = vt->w, h = vt->h, bgr = vt->fmt == VK_FORMAT_B8G8R8A8_UNORM || vt->fmt == VK_FORMAT_B8G8R8A8_SRGB;
+    if (vt->rs && getenv("SSBU_VK_SHOT_NATIVE") && atoi(getenv("SSBU_VK_SHOT_NATIVE"))) {      /* track O: the scaled image itself, texel for texel (the default below is the game's size, filtered up as the window shows it) */
+        VMem m2;
+        uint64_t size = (uint64_t)w * h * 4;
+        VkBuffer buf = vbuf_new(size, VK_BUFFER_USAGE_TRANSFER_DST_BIT, &m2);
+        VkBufferImageCopy c;
+        if (vt->bpb != 4 || vt->aspect != VK_IMAGE_ASPECT_COLOR_BIT) { vkDestroyBuffer(V.device, buf, NULL); vmem_free(m2); return; }
+        pass_end(); cmd_begin();
+        VkImageLayout was = vt->layout;
+        vt_layout(vt, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        memset(&c, 0, sizeof c);
+        c.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT; c.imageSubresource.layerCount = 1; c.imageExtent.width = (uint32_t)w; c.imageExtent.height = (uint32_t)h; c.imageExtent.depth = 1;
+        vkCmdCopyImageToBuffer(R.cmd, vt->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buf, 1, &c);
+        if (was != VK_IMAGE_LAYOUT_UNDEFINED) vt_layout(vt, was);
+        cmd_wait_all();
+        FILE *f = fopen(path, "wb");
+        if (f) {
+            uint8_t head[54] = {'B', 'M'};
+            uint32_t row = ((uint32_t)w * 3 + 3) & ~3u, fsize = 54 + row * (uint32_t)h, v;
+            uint8_t *rowb = calloc(1, row);
+            memcpy(head + 2, &fsize, 4); v = 54; memcpy(head + 10, &v, 4); v = 40; memcpy(head + 14, &v, 4); memcpy(head + 18, &w, 4); memcpy(head + 22, &h, 4); head[26] = 1; head[28] = 24;
+            fwrite(head, 1, 54, f);
+            for (int y = h - 1; y >= 0; y--) {
+                const uint8_t *s = (const uint8_t *)m2.map + (size_t)y * w * 4;
+                for (int x = 0; x < w; x++) { rowb[x * 3] = s[x * 4 + (bgr ? 0 : 2)]; rowb[x * 3 + 1] = s[x * 4 + 1]; rowb[x * 3 + 2] = s[x * 4 + (bgr ? 2 : 0)]; }
+                fwrite(rowb, 1, row, f);
+            }
+            free(rowb); fclose(f);
+            printf("nvn_gl: saved %s (%dx%d)\n", path, w, h);
+        }
+        vkDestroyBuffer(V.device, buf, NULL); vmem_free(m2);
+        return;
+    }
+    if (vt->rs) { w = vt->t->b.width; h = vt->t->b.height; }      /* track O: read_region takes the game's rectangle */
     if (vt->bpb != 4 || vt->aspect != VK_IMAGE_ASPECT_COLOR_BIT) { printf("nvn_vk: screenshot: the window texture's format %d is not an 8-bit RGBA one; not saved\n", (int)vt->fmt); return; }
     /* session 5: through read_region, the path of ReadTexels / CopyTextureToBuffer (so every screenshot exercises it) */
     int rr[6] = {0, 0, 0, w, h, 1};
@@ -2015,8 +2321,61 @@ static void save_bmp_vk(const char *path, VTex *vt) {
     free(px);
 }
 static VkSemaphore g_sem[8][2];
+static VkSemaphore g_sem_img[16];                  /* session 11: the "rendering finished" semaphore, one per swapchain image */
 static int g_isem;
-static void vk_present(void *arg) {
+/* Session 11, the PROGRESS BAR: our own overlay, drawn over the swapchain image after the blit of the game's picture (never
+ * into the game's textures, so pictures saved by SSBU_SHOT* do not have it). A bar at the bottom of the window:
+ *   - while the loading barrier holds a loading screen: the same picture is presented again about ten times a second with
+ *     the bar growing (jobs done of jobs queued when the hold began), so the screen is not a still picture;
+ *   - while the container store is read from data.arc (first start) and while the preparation runs: a thinner bar on every
+ *     presented frame, NOT near a fight.
+ * SSBU_VK_PROGRESS=0 turns it off. The image: 8x8, two layers (bar colour, track colour), cleared once; drawn by two blits. */
+static struct { VkImage img; VMem mem; int made, on; float frac; int thick; void *bar_arg; } g_ovl = {.on = -1};
+static void overlay_draw(uint32_t index) {
+    if (g_ovl.on < 0) g_ovl.on = !(getenv("SSBU_VK_PROGRESS") && !atoi(getenv("SSBU_VK_PROGRESS")));
+    if (!g_ovl.on || g_ovl.thick <= 0) return;
+    if (g_ovl.thick < 8) g_ovl_frames++;
+    VkImageSubresourceRange sr2 = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    if (!g_ovl.made) {
+        VkImageCreateInfo ci = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+        VkMemoryRequirements rq;
+        VkClearColorValue c0 = {{0.92f, 0.92f, 0.92f, 1.0f}}, c1 = {{0.06f, 0.06f, 0.06f, 1.0f}};
+        ci.imageType = VK_IMAGE_TYPE_2D; ci.format = VK_FORMAT_B8G8R8A8_UNORM; ci.extent.width = 8; ci.extent.height = 8; ci.extent.depth = 1; ci.mipLevels = 1; ci.arrayLayers = 2;
+        ci.samples = VK_SAMPLE_COUNT_1_BIT; ci.tiling = VK_IMAGE_TILING_OPTIMAL; ci.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE; ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        VKC(vkCreateImage(V.device, &ci, NULL, &g_ovl.img));
+        vkGetImageMemoryRequirements(V.device, g_ovl.img, &rq);
+        g_ovl.mem = vmem_alloc(rq, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0);
+        VKC(vkBindImageMemory(V.device, g_ovl.img, g_ovl.mem.mem, g_ovl.mem.off));
+        image_barrier(g_ovl.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        vkCmdClearColorImage(R.cmd, g_ovl.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &c0, 1, &sr2);
+        sr2.baseArrayLayer = 1;
+        vkCmdClearColorImage(R.cmd, g_ovl.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &c1, 1, &sr2);
+        image_barrier(g_ovl.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        g_ovl.made = 1;
+    }
+    int W = (int)V.extent.width, H = (int)V.extent.height, th = g_ovl.thick * H / 720, x0 = W / 10, x1 = W - W / 10, y1 = H - H / 40, y0;
+    float f = g_ovl.frac < 0 ? 0 : g_ovl.frac > 1 ? 1 : g_ovl.frac;
+    if (th < 2) th = 2;
+    y0 = y1 - th;
+    if (x1 - x0 < 8 || y0 < 0) return;
+    for (int pass = 0; pass < 2; pass++) {          /* the track, then the bar over it */
+        VkImageBlit b;
+        int xe = pass ? x0 + (int)((float)(x1 - x0) * f) : x1;
+        if (xe <= x0) continue;
+        memset(&b, 0, sizeof b);
+        b.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT; b.srcSubresource.layerCount = 1; b.srcSubresource.baseArrayLayer = pass ? 0 : 1;
+        b.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT; b.dstSubresource.layerCount = 1;
+        b.srcOffsets[1].x = 8; b.srcOffsets[1].y = 8; b.srcOffsets[1].z = 1;
+        b.dstOffsets[0].x = pass ? x0 : x0 - 2; b.dstOffsets[0].y = pass ? y0 : y0 - 2; b.dstOffsets[1].x = pass ? xe : x1 + 2; b.dstOffsets[1].y = pass ? y1 : y1 + 2; b.dstOffsets[1].z = 1;
+        vkCmdBlitImage(R.cmd, g_ovl.img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, V.images[index], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &b, VK_FILTER_NEAREST);
+    }
+}
+static void vk_present2(void *arg, int progress);
+/* nvn_vk_m4.c m4_barrier, render thread, g_sh_lock NOT held: the held loading screen once more, with the bar at `frac` */
+static void present_progress(float frac) { if (!g_ovl.bar_arg) return; g_ovl.frac = frac; g_ovl.thick = 8; vk_present2(g_ovl.bar_arg, 1); g_ovl.thick = 0; }
+static void vk_present(void *arg) { vk_present2(arg, 0); }
+static void vk_present2(void *arg, int progress) {
     PresentJob *j = arg;
     static int shot = -2, every, shot_from;
     if (!V.alive) return;
@@ -2024,6 +2383,26 @@ static void vk_present(void *arg) {
     Tex *t = j->win && j->index >= 0 && j->index < j->win->count ? j->win->tex[j->index] : NULL;
     VTex *vt = t && !t->dead ? t->vk : NULL;
     LONG64 frame = nvn_front_frame_next();
+    {   /* session 12, TEST ONLY: SSBU_VK_WD_TEST=<frame>[,<seconds>] holds the render thread at that frame (default 12 s), to see the watchdog's report */
+        static int wt = -2, ws = 12;
+        if (wt == -2) { const char *e = getenv("SSBU_VK_WD_TEST"); wt = e ? atoi(e) : -1; if (e && strchr(e, ',')) ws = atoi(strchr(e, ',') + 1); }
+        if (wt > 0 && frame == wt && !progress) { printf("nvn_vk_watchdog: TEST: the render thread is held %d s at frame %lld (SSBU_VK_WD_TEST)\n", ws, (long long)frame); fflush(stdout); wt = -1; Sleep((DWORD)ws * 1000); }
+    }
+    if (progress) goto swap;
+    if (j->win) for (int i = 0; i < j->win->count && i < 8; i++) wintex_note(j->win->tex[i]);
+    g_ovl.bar_arg = arg;
+    g_wd_where = 1;
+    m4_barrier(frame, R.frame_draws);
+    g_wd_where = 0;
+    g_ovl.bar_arg = NULL;
+    /* the thin bar of a normal frame: the store being read, or the preparation running, and no fight near */
+    g_ovl.thick = 0;
+    if ((g_prep_state == 5 || g_prep_state == 1) && !fight_recent()) {
+        g_ovl.thick = 4;
+        g_ovl.frac = g_prep_state == 5 ? (float)g_store_pct / 100.0f : g_prep_nfiles ? (float)g_pq_done / (float)(g_pq_queued > 0 ? g_pq_queued + (LONG64)(g_prep_nfiles - g_prep_read) * 90 : 1) : 0;      /* about 90 variations a file */
+    }
+    g_render_tid = GetCurrentThreadId();
+    if (g_skip_fr_n) { g_skip_frames++; printf("nvn_vk_skipf: frame %lld (%s): %lld draws left out (shader_wait = skip)\n", (long long)frame, g_in_fight ? "fight" : "no fight", (long long)g_skip_fr_n); g_skip_fr_n = 0; }
     if (shot == -2) { shot = getenv("SSBU_SHOT") ? atoi(getenv("SSBU_SHOT")) : -1; every = getenv("SSBU_SHOT_EVERY") ? atoi(getenv("SSBU_SHOT_EVERY")) : 0; shot_from = getenv("SSBU_SHOT_FROM") ? atoi(getenv("SSBU_SHOT_FROM")) : 0; }
     pass_end();
     { int step = nvn_front_take_step_shot(); if (step && vt) { char path[300]; const char *dir = getenv("SSBU_SHOT_DIR"); snprintf(path, sizeof path, "%s%sstep_%03d.bmp", dir ? dir : "", dir ? "/" : "", step - 1); save_bmp_vk(path, vt); } }
@@ -2033,6 +2412,25 @@ static void vk_present(void *arg) {
         snprintf(path, sizeof path, "%s%sframe_%lld.bmp", dir ? dir : "", dir ? "/" : "", (long long)frame);
         save_bmp_vk(path, vt);
     }
+    {   /* session 9, SSBU_SHOT_BATTLE=<n>: one picture at the n-th battle frame (dispatches and more than 120 draws), i.e. at the
+         * same moment of the fight whatever the loading took: battle_<n>.bmp in SSBU_SHOT_DIR */
+        static int bshot = -2;
+        if (bshot == -2) bshot = getenv("SSBU_SHOT_BATTLE") ? atoi(getenv("SSBU_SHOT_BATTLE")) : -1;
+        if (vt && bshot > 0 && g_battle_frames == bshot) {
+            char path[300];
+            const char *dir = getenv("SSBU_SHOT_DIR");
+            snprintf(path, sizeof path, "%s%sbattle_%d.bmp", dir ? dir : "", dir ? "/" : "", bshot);
+            save_bmp_vk(path, vt);
+            printf("nvn_vk: picture of battle frame %d saved at frame %lld: %s\n", bshot, (long long)frame, path);
+            bshot = -1;
+        }
+    }
+swap: ;
+    pass_end();
+    /* an extra present of a held loading screen: everything submitted so far is waited for first, so that the semaphore pair
+     * taken below has no pending operation (validation run s11v2: VUID-vkAcquireNextImageKHR-semaphore-01779, three times,
+     * all at such presents: with one submission a present the pair came round before its command buffer had been waited for) */
+    if (progress) cmd_wait_all();
     /* The swapchain has the window texture's colour class: a blit between them then keeps the stored values (the OpenGL
      * path blits with FRAMEBUFFER_SRGB off). */
     VkFormat want = vt && (vt->fmt == VK_FORMAT_R8G8B8A8_SRGB || vt->fmt == VK_FORMAT_B8G8R8A8_SRGB) ? VK_FORMAT_B8G8R8A8_SRGB : VK_FORMAT_B8G8R8A8_UNORM;
@@ -2045,7 +2443,9 @@ static void vk_present(void *arg) {
     if (!g_sem[g_isem][0]) { VkSemaphoreCreateInfo smi = {VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO}; VKC(vkCreateSemaphore(V.device, &smi, NULL, &g_sem[g_isem][0])); VKC(vkCreateSemaphore(V.device, &smi, NULL, &g_sem[g_isem][1])); }
     VkSemaphore acq = g_sem[g_isem][0], rend = g_sem[g_isem][1];
     int ok = V.swapchain || swapchain_create();
+    InterlockedIncrement64(&g_wd_try);
     if (ok) {
+        g_wd_where = 2;
         r = vkAcquireNextImageKHR(V.device, V.swapchain, 1000000000ull, acq, NULL, &index);
         if (r == VK_ERROR_OUT_OF_DATE_KHR) { cmd_wait_all(); swapchain_destroy(); InterlockedIncrement64(&g_vk_recreated); ok = swapchain_create(); if (ok) r = vkAcquireNextImageKHR(V.device, V.swapchain, 1000000000ull, acq, NULL, &index); }
         if (ok && r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) { vk_ok("vkAcquireNextImageKHR", r); ok = 0; }
@@ -2054,6 +2454,14 @@ static void vk_present(void *arg) {
     else {
         int suboptimal = r == VK_SUBOPTIMAL_KHR;
         VkImageSubresourceRange sr = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        {   /* session 11: the semaphore a present waits for is one PER SWAPCHAIN IMAGE (validation run s11v3, twice in 9,783
+             * frames: VUID-vkQueueSubmit-pSignalSemaphores-00067, "may still be in use by the swapchain", when the driver
+             * hands out the same image many times in a row and the ring of 8 comes round); the acquire semaphore stays in the ring */
+            if (index < 16) {
+                if (!g_sem_img[index]) { VkSemaphoreCreateInfo smi2 = {VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO}; VKC(vkCreateSemaphore(V.device, &smi2, NULL, &g_sem_img[index])); }
+                rend = g_sem_img[index];
+            }
+        }
         cmd_begin();
         if (vt) vt_layout(vt, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
         cmd_begin();
@@ -2062,24 +2470,59 @@ static void vk_present(void *arg) {
             VkImageBlit b;
             int s4[4] = {0, 0, vt->w, vt->h};
             if (j->win->crop[2] > 0 && j->win->crop[3] > 0) memcpy(s4, j->win->crop, sizeof s4);
+            if (vt->rs && j->win->crop[2] > 0 && j->win->crop[3] > 0) {      /* track O: the crop is in the game's pixels */
+                int x1 = rs_edge(s4[0] + s4[2], vt->sx, vt->w), y1 = rs_edge(s4[1] + s4[3], vt->sy, vt->h);
+                s4[0] = rs_edge(s4[0], vt->sx, vt->w); s4[1] = rs_edge(s4[1], vt->sy, vt->h); s4[2] = x1 - s4[0]; s4[3] = y1 - s4[1];
+            }
             memset(&b, 0, sizeof b);
             b.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT; b.srcSubresource.layerCount = 1; b.dstSubresource = b.srcSubresource;
             b.srcOffsets[0].x = s4[0]; b.srcOffsets[0].y = s4[1]; b.srcOffsets[1].x = s4[0] + s4[2]; b.srcOffsets[1].y = s4[1] + s4[3]; b.srcOffsets[1].z = 1;
             b.dstOffsets[1].x = (int32_t)V.extent.width; b.dstOffsets[1].y = (int32_t)V.extent.height; b.dstOffsets[1].z = 1;
             vkCmdBlitImage(R.cmd, vt->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, V.images[index], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &b, VK_FILTER_LINEAR);
         } else { VkClearColorValue z; memset(&z, 0, sizeof z); z.float32[3] = 1.0f; vkCmdClearColorImage(R.cmd, V.images[index], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &z, 1, &sr); }
+        overlay_draw(index);
         image_barrier(V.images[index], VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
         cmd_submit(acq, rend);
         VkPresentInfoKHR pr = {VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
         pr.waitSemaphoreCount = 1; pr.pWaitSemaphores = &rend; pr.swapchainCount = 1; pr.pSwapchains = &V.swapchain; pr.pImageIndices = &index;
+        g_wd_where = 4;
         r = vkQueuePresentKHR(V.queue, &pr);
         if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR || suboptimal) { cmd_wait_all(); swapchain_destroy(); InterlockedIncrement64(&g_vk_recreated); }
         else vk_ok("vkQueuePresentKHR", r);
-        InterlockedIncrement64(&g_vk_frames);
+        if (r == VK_SUCCESS || r == VK_SUBOPTIMAL_KHR) { LONG64 nowt = tk(); if (g_gap_prev && nowt - g_gap_prev > g_gap_max) g_gap_max = nowt - g_gap_prev; g_gap_prev = nowt; g_wd_beat = nowt; }      /* session 12: the watchdog's heartbeat = a frame reached the window */
+        if (!progress) InterlockedIncrement64(&g_vk_frames);
     }
+    g_wd_where = 0;
+    if (progress) { g_ovl_presents++; return; }
     g_tm[4] += tk() - t_present;
     nvn_front_frame_end(R.frame_draws, R.frame_skipped, R.frame_clears);
-    { static LONG64 disp_prev; g_in_fight = R.dispatches != disp_prev; disp_prev = R.dispatches; }      /* a frame with compute dispatches (skinning): fighters are on screen */
+    { static LONG64 disp_prev; g_in_fight = R.dispatches != disp_prev; disp_prev = R.dispatches; if (g_in_fight) { g_fight_last = frame; if (g_prep_state == 1) g_prep_fight_frames++; } }      /* a frame with compute dispatches (skinning): fighters are on screen */
+    {   /* session 9: per-frame record for the "nvn_vk_gpu_fight:" line */
+        static LONG64 t_prev;
+        LONG64 t_now = tk();
+        int battle = g_in_fight && R.frame_draws > 120;      /* the fight draws 126..450 a frame (entrance over 205), loading screens 38..45 */
+        if (battle) g_battle_frames++;
+        {   /* how long the way to the fight took (menus are scripted by polls, so two runs differ by their loading) */
+            static LONG64 t_first, t_load; static int said;
+            LARGE_INTEGER fq; QueryPerformanceFrequency(&fq);
+            if (!t_first) t_first = t_now;
+            if (!battle && R.frame_draws <= 60 && frame > 600) { if (!t_load) t_load = t_now; } else if (!battle && R.frame_draws > 60) t_load = 0;      /* t_load: the start of the run of loading-screen frames before the battle */
+            if (battle && !said) { said = 1; printf("nvn_vk: first battle frame is frame %lld, %.1f s after the first present; the loading screen before it lasted %.1f s\n", (long long)frame, (double)(t_now - t_first) / (double)fq.QuadPart, t_load ? (double)(t_now - t_load) / (double)fq.QuadPart : 0.0); }
+        }
+        if (frame >= 0 && frame < FRSTAT_N) {
+            LARGE_INTEGER fq; QueryPerformanceFrequency(&fq);
+            g_fr_fight[frame] = (uint8_t)battle;
+            g_fr_wall[frame] = t_prev ? (float)((double)(t_now - t_prev) * 1000.0 / (double)fq.QuadPart) : 0.0f;
+        }
+        t_prev = t_now;
+        g_cur_frame = frame + 1;
+    }
+    {   /* session 8: what this frame paid for textures made or read at their use (hold log), then the textures made ahead */
+        LARGE_INTEGER fq; QueryPerformanceFrequency(&fq);
+        if (holdlog_on() && g_up_fr_tk * 1000 > 3 * fq.QuadPart) { static int nl; if (nl++ < 300) printf("nvn_vk_upl: frame %lld (%s): %d textures made or read at their use, %.1f MB, %.1f ms\n", (long long)frame, g_in_fight ? "fight" : "no fight", g_up_fr_n, (double)g_up_fr_bytes / 1048576.0, (double)g_up_fr_tk * 1000.0 / (double)fq.QuadPart); }
+        g_up_fr_tk = g_up_fr_bytes = 0; g_up_fr_n = 0;
+        tex_ahead(frame);
+    }
     if (frame % 300 == 0) {                      /* where the render thread's time went, per frame, in the last 300 frames */
         static LONG64 last[12], last_sets, last_flush, last_reused, last_disp;
         LARGE_INTEGER fq; QueryPerformanceFrequency(&fq);
@@ -2237,6 +2680,7 @@ static void pcache_save(void) {
     free(data);
 }
 #endif
+#include "nvn_vk_wd.c"                             /* session 12: the freeze watchdog (wd_start / wd_stop) */
 static void vkd_init(void) {
 #define X(n) n = (PFN_##n)vkGetDeviceProcAddr(V.device, #n); if (!n) vkd_fail("the device has no " #n);
     VKD(X)
@@ -2281,19 +2725,52 @@ static void vkd_init(void) {
     cmd_wait_all();
     CreateDirectoryA("../cache/vk", NULL);
     prewarm_start();
+    wd_start();
     printf("nvn_vk: drawing part ready: %d command buffers in flight, stream ring %llu MB, %u memory types; debug checks %s\n", NSLOT, (unsigned long long)(R.ring_size >> 20), (unsigned)D.mp.memoryTypeCount, D.debug ? "on" : "off (SSBU_VK_DEBUG=1)");
+    if (RS_ON) printf("nvn_vk_scale: internal resolution scale %.3f (%s): screen-class targets are made at %d x %d instead of 1920 x 1080; fragment stages are another translation\n",
+                      (double)rs_scale(), getenv("SSBU_VK_SCALE") ? "SSBU_VK_SCALE" : "graphics.ini", (int)(1920.0f * rs_scale() + 0.5f), (int)(1080.0f * rs_scale() + 0.5f));
     fflush(stdout);
 }
+static int frstat_cmp(const void *a, const void *b) { float x = *(const float *)a, y = *(const float *)b; return x < y ? -1 : x > y; }
+/* Session 9: battle frames only (dispatches and more than 120 draws: the fight and the result screen's fighters); the first 30 are left out (their buffers were recorded
+ * while the stage was still being set up). GPU ms = sum of the spans of the frame's command buffers (SSBU_VK_GPUTIME=1). */
+static void frstat_report(void) {
+    static float g[FRSTAT_N], w[FRSTAT_N];
+    int n = 0, seen = 0, slow = 0;
+    double wsum = 0, gsum = 0;
+    for (int f = 0; f < FRSTAT_N; f++) {
+        if (!g_fr_fight[f] || seen++ < 30) continue;
+        g[n] = g_fr_gpu[f]; w[n] = g_fr_wall[f]; wsum += w[n]; gsum += g[n]; if (w[n] > 33.4f) slow++; n++;
+    }
+    if (n < 100) return;
+    qsort(g, (size_t)n, sizeof g[0], frstat_cmp); qsort(w, (size_t)n, sizeof w[0], frstat_cmp);
+    printf("nvn_vk_gpu_fight: %d battle frames: GPU ms per frame median %.2f, p99 %.2f, max %.2f, mean %.2f%s | time between presents: median %.2f ms, p99 %.2f, max %.2f, %d frames over 33.4 ms | %.1f frames per second over the battle\n",
+           n, (double)g[n / 2], (double)g[n * 99 / 100], (double)g[n - 1], gsum / n, g_ts_on > 0 ? "" : " (SSBU_VK_GPUTIME not set: no GPU times)",
+           (double)w[n / 2], (double)w[n * 99 / 100], (double)w[n - 1], slow, wsum > 0 ? 1000.0 * n / wsum : 0.0);
+}
 static void vkd_shutdown(void) {
+    wd_stop();
     if (!R.ring) return;
+    {   LARGE_INTEGER fq; QueryPerformanceFrequency(&fq);
+        double k = 1000.0 / (double)fq.QuadPart;
+        printf("nvn_vk_tex: textures made ahead of their first use: %lld (%.0f MB, %.0f ms in all, at most %.1f ms after one present); made or read at their use: %lld times, %.0f ms (of them in fight frames: %lld, %.0f ms)\n",
+               (long long)g_ta_n, (double)g_ta_bytes / 1048576.0, (double)g_ta_tk * k, (double)g_ta_max_tk * k, (long long)g_late_n, (double)g_late_tk * k, (long long)g_late_fight_n, (double)g_late_fight_tk * k);
+    }
+    frstat_report();
+    if (RS_ON && rs_ui_native()) printf("nvn_vk_scale: SSBU_VK_UI_NATIVE=1: the window's textures are kept at the game's size; passes with such a colour target and a SCALED depth target (drawn without depth): %lld\n", (long long)g_rs_mixed);
+    if (RS_ON) printf("nvn_vk_scale: resolution scale %.3f: %lld images made scaled, %lld fragment stages translated in this run for it (%lld of them read the pixel position, %lld fetch texels by integer position), %lld uploads into and %lld read-backs from a scaled image, %lld copies / blits touching one\n",
+                      (double)rs_scale(), (long long)g_rs_images, (long long)g_rs_stages, (long long)g_rs_fcs, (long long)g_rs_tf, (long long)g_rs_up, (long long)g_rs_down, (long long)g_rs_blits);
     m4_stop();
     pcache_save();
     if (g_pcache) { vkDestroyPipelineCache(V.device, g_pcache, NULL); g_pcache = NULL; }
     for (int i = 0; i < NSLOT; i++) slot_wait(&R.slot[i]);
     R.done = ~0ull; garbage_collect();
     while (g_vtex_all) { VTex *vt = g_vtex_all; if (vt->t) vt->t->vk = NULL; vt_destroy(vt); }
-    for (int i = 0; i < 1024; i++) for (Pipe *p = g_pipes[i], *n; p; p = n) { n = p->next; vkDestroyPipeline(V.device, p->p, NULL); vkDestroyPipelineLayout(V.device, p->layout, NULL); vkDestroyDescriptorSetLayout(V.device, p->dl[0], NULL); vkDestroyDescriptorSetLayout(V.device, p->dl[1], NULL); free(p); }
+    for (int i = 0; i < 1024; i++) for (Pipe *p = g_pipes[i], *n; p; p = n) { n = p->next; vkDestroyPipeline(V.device, p->p, NULL); if (p->p_fast) vkDestroyPipeline(V.device, p->p_fast, NULL); if (!p->libbed) { vkDestroyPipelineLayout(V.device, p->layout, NULL); vkDestroyDescriptorSetLayout(V.device, p->dl[0], NULL); vkDestroyDescriptorSetLayout(V.device, p->dl[1], NULL); } free(p); }
+    gpl_destroy();
     for (int i = 0; i < 8; i++) for (int k = 0; k < 2; k++) if (g_sem[i][k]) { vkDestroySemaphore(V.device, g_sem[i][k], NULL); g_sem[i][k] = NULL; }
+    for (int i = 0; i < 16; i++) if (g_sem_img[i]) { vkDestroySemaphore(V.device, g_sem_img[i], NULL); g_sem_img[i] = NULL; }
+    if (g_ovl.made) { vkDestroyImage(V.device, g_ovl.img, NULL); g_ovl.made = 0; }      /* the progress bar's image; its memory goes with the blocks */
     for (int i = 0; i < 256; i++) if (g_cb[i].buf) { vkDestroyBuffer(V.device, g_cb[i].buf, NULL); g_cb[i].buf = NULL; g_cb[i].state = 0; }
     g_cb_live = g_cb_pending = g_ncdisp = 0;
     for (int i = 0; i < 4096; i++) for (VStage *v = g_vstage[i], *n; v; v = n) {

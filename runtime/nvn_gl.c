@@ -3859,9 +3859,28 @@ static int pw_queue_prog(Prog *p) {
 void nvn_front_pool_made(uint64_t memory, uint64_t size) { if (g_rb == &rb_vk && memory && size >= 0x40 && (memory >> 28) != 0x710 && rd32(memory) == 0x12345678u) nvn_vk_container_seen(memory, memory); }      /* such a pool begins with the code section of a stage (its magic); a search below every other pool cost 0.2 s each (measured) */
 /* nvnProgramSetShaders(program, count, const NVNshaderData *): { u64 data (GPU address), const void *control }.
  * control: magic 0x98761234, offset of the NV_gpu_program5 text at +0x14, its length at +0x18. */
-static void prog_set_shaders(Ctx *c) {
+__declspec(thread) long long nvn_setsh_part[8];
+static void prog_set_shaders_(Ctx *c);
+static void prog_set_shaders(Ctx *c) {             /* session 8: the call timed part by part; a line for every call over 2 ms (SSBU_VK_SETSH_LOG=<ms> changes the limit, 0 = no lines) */
+    static int lim = -1; static LONG nl; static LONG64 fq;
+    if (lim < 0) { LARGE_INTEGER f; QueryPerformanceFrequency(&f); fq = f.QuadPart; lim = getenv("SSBU_VK_SETSH_LOG") ? atoi(getenv("SSBU_VK_SETSH_LOG")) : 2; }
+    if (!lim || g_rb != &rb_vk) { prog_set_shaders_(c); return; }
+    memset(nvn_setsh_part, 0, sizeof nvn_setsh_part);
+    uint64_t guest = A0, ra = c->x[30];
+    LONG64 t0 = pf_now();
+    prog_set_shaders_(c);
+    LONG64 t = pf_now() - t0;
+    if (t * 1000 > (LONG64)lim * fq && (InterlockedIncrement(&nl) <= 400 || (t * 1000 > 20 * fq && nl <= 4000))) {      /* session 10: a call over 20 ms is logged after the first 400 lines too (Intel: the lines were used up at loading) */
+        long long *q = nvn_setsh_part;
+#define SETSH_MS(x) ((double)(x) * 1000.0 / (double)fq)
+        printf("nvn_setsh: frame %lld, program object %llx (called from %llx): %.1f ms | barrier %.1f | container %.1f (search %.1f, copy or walk %.1f) | program_set %.1f (hash + job copy %.1f, lock %.1f, HELD %.1f) | rest %.1f\n",
+               nvn_front_frame_next(), (unsigned long long)guest, (unsigned long long)ra, SETSH_MS(t), SETSH_MS(q[0]), SETSH_MS(q[1]), SETSH_MS(q[2]), SETSH_MS(q[3]), SETSH_MS(q[4]), SETSH_MS(q[5]), SETSH_MS(q[6]), SETSH_MS(q[7]), SETSH_MS(t - q[0] - q[1] - q[4]));
+        fflush(stdout);
+    }
+}
+static void prog_set_shaders_(Ctx *c) {
     static int nlog, nlog2;
-    gl_barrier();
+    { LONG64 tb = pf_now(); gl_barrier(); nvn_setsh_part[0] += pf_now() - tb; }
     Prog *p = hobj(A0, K_PROG);
     int count = (int)A1;
     uint64_t stride = strstr(hostfn_current_name(), "Ext") ? 24 : 16;      /* the Ext variant has a third pointer per shader */
@@ -3875,7 +3894,7 @@ static void prog_set_shaders(Ctx *c) {
         dump_stage_all(p->serial, i, control, data);
         /* V1 session 6: a program made by FUN_71000382a0 (13.0.4; the caller's return address lies in it) comes from a variation
          * of a "BNSH" container; that function keeps its third argument, the variation's program inside the file, in x20 */
-        if (g_rb == &rb_vk && i == 0 && c->x[30] - 0x71000382a0ull < 2884) nvn_vk_container_seen(control, c->x[20]);
+        if (g_rb == &rb_vk && i == 0 && c->x[30] - 0x71000382a0ull < 2884) { LONG64 tb = pf_now(); nvn_vk_container_seen(control, c->x[20]); nvn_setsh_part[1] += pf_now() - tb; }
         {   static int diag = -1; static LONG nd;      /* SSBU_SHADER_SRC_LOG=<n>: where the first n heap-held stages come from (guest return addresses, the memory around the control section) */
             if (diag < 0) diag = getenv("SSBU_SHADER_SRC_LOG") ? atoi(getenv("SSBU_SHADER_SRC_LOG")) : 0;
             if (diag && (control >> 28) != 0x710 && InterlockedIncrement(&nd) <= diag) {
@@ -3927,7 +3946,7 @@ static void prog_set_shaders(Ctx *c) {
         if (s < 0 || len <= 0 || len > (4 << 20)) { logf_limited(&nlog2, 10, "nvn_gl: program #%d shader %d: unexpected program header %08x, code size %d\n", p->serial, i, rd32(data + 0x30), len); continue; }
         p->st[s].code = P(data + 0x30); p->st[s].code_len = len; p->st[s].state = 4; p->st[s].dumped = 0; p->st[s].glsl_state = 0; memcpy(p->st[s].ctl, P(control + 0x6f0), 32);
     }
-    if (g_rb == &rb_vk) { nvn_vk_program_set(p); RET(1); return; }       /* V1 M4: the stages go to the Vulkan workers at once (nvn_vk_m4.c) */
+    if (g_rb == &rb_vk) { LONG64 tb = pf_now(); nvn_vk_program_set(p); nvn_setsh_part[4] += pf_now() - tb; RET(1); return; }       /* V1 M4: the stages go to the Vulkan workers at once (nvn_vk_m4.c) */
     if (!pw_queue_prog(p))
     for (int s = 0; s < 2; s++) {              /* P3: have the driver's binary ready before the first draw */
         Stage *st = &p->st[s];
@@ -4364,12 +4383,17 @@ static void wb_set_textures(Ctx *c) {                   /* (builder, count, text
     wr8(A0, (uint8_t)n);
     for (int i = 0; i < n; i++) wr64(A0 + 8 + (uint64_t)i * 8, rd64(A2 + (uint64_t)i * 8));
 }
+/* Track V/O session 9: the textures of every window the game made (for the Vulkan back end's resolution scale: nvn_vk_draw.c wintex_is). */
+static Tex *g_window_tex[16];
+static volatile int g_window_tex_n;
+int nvn_front_tex_is_window(const Tex *t) { for (int i = 0; i < g_window_tex_n; i++) if (g_window_tex[i] == t) return 1; return 0; }
 static void win_initialize(Ctx *c) {                    /* (window, builder) */
     Window *w = hnew(A0, K_WIN, sizeof *w);
     w->count = (int)(rd32(A1) & 0xff) <= 6 ? (int)(rd32(A1) & 0xff) : 0;
     w->interval = rd8(A1 + 4); w->nactive = rd8(A1 + 5); w->native = rd64(A1 + 56);
     display_set_interval(w->interval);
     for (int i = 0; i < w->count; i++) w->tex[i] = hobj(rd64(A1 + 8 + (uint64_t)i * 8), K_TEX);
+    for (int i = 0; i < w->count; i++) if (g_window_tex_n < 16) g_window_tex[g_window_tex_n++] = w->tex[i];
     printf("nvn_gl: window with %d textures", w->count);
     if (w->count && w->tex[0]) printf(" (%dx%d format 0x%x)", w->tex[0]->b.width, w->tex[0]->b.height, w->tex[0]->b.format);
     printf("\n");
@@ -5174,6 +5198,7 @@ static void vk_shutdown_at_exit(void) {
 }
 
 /* nvnBufferFlushMappedRange / nvnMemoryPoolFlushMappedRange (nvn_stub.c): the CPU wrote this memory. Textures stored there are read again. */
+Tex *nvn_front_tex_first(void) { return g_all_tex; }
 void nvn_gl_memory_written(uint64_t addr, uint64_t size) {
     for (Tex *t = g_all_tex; t; t = t->all_next)
         if (!t->dead && t->mem && (uint64_t)(uintptr_t)t->mem < addr + size && addr < (uint64_t)(uintptr_t)t->mem + t->storage) t->dirty = 1;

@@ -1,0 +1,37 @@
+# Session S3 edit proofs: boot -> battle (Mario vs CPU) as tests/seq_battle_play.txt, then player 1 stands at
+# its spawn point facing the CPU and throws fireballs (X = the B button), with a ground jump (C = the X button)
+# after every fourth one. For SSBU_SEQ (see nnhid.c); lines starting with # are dropped by tests/run_battle.sh.
+@movie
+@draws:22-26/30
+@until:36-44/30:Z/200
+30:Z
+@draws:700-800/40 30:Z
+150:Z
+@draws:370-400/40 30:Z
+@draws:270-295/40 30:Z
+@draws:175-205/60
+30:u/30 20:l/18 30:Z
+60:r/50 20:d/8 30:Z
+@draws:30-60/20
+@draws:206-450/60
+280
+45:X 45:X 45:X 45:X 60:C 45:X 45:X 45:X 45:X 60:C
+45:X 45:X 45:X 45:X 60:C 45:X 45:X 45:X 45:X 60:C
+45:X 45:X 45:X 45:X 60:C 45:X 45:X 45:X 45:X 60:C
+45:X 45:X 45:X 45:X 60:C 45:X 45:X 45:X 45:X 60:C
+45:X 45:X 45:X 45:X 60:C 45:X 45:X 45:X 45:X 60:C
+45:X 45:X 45:X 45:X 60:C 45:X 45:X 45:X 45:X 60:C
+45:X 45:X 45:X 45:X 60:C 45:X 45:X 45:X 45:X 60:C
+45:X 45:X 45:X 45:X 60:C 45:X 45:X 45:X 45:X 60:C
+45:X 45:X 45:X 45:X 60:C 45:X 45:X 45:X 45:X 60:C
+45:X 45:X 45:X 45:X 60:C 45:X 45:X 45:X 45:X 60:C
+45:X 45:X 45:X 45:X 60:C 45:X 45:X 45:X 45:X 60:C
+45:X 45:X 45:X 45:X 60:C 45:X 45:X 45:X 45:X 60:C
+45:X 45:X 45:X 45:X 60:C 45:X 45:X 45:X 45:X 60:C
+45:X 45:X 45:X 45:X 60:C 45:X 45:X 45:X 45:X 60:C
+45:X 45:X 45:X 45:X 60:C 45:X 45:X 45:X 45:X 60:C
+45:X 45:X 45:X 45:X 60:C 45:X 45:X 45:X 45:X 60:C
+45:X 45:X 45:X 45:X 60:C 45:X 45:X 45:X 45:X 60:C
+45:X 45:X 45:X 45:X 60:C 45:X 45:X 45:X 45:X 60:C
+45:X 45:X 45:X 45:X 60:C 45:X 45:X 45:X 45:X 60:C
+45:X 45:X 45:X 45:X 60:C 45:X 45:X 45:X 45:X 60:C

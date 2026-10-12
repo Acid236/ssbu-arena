@@ -522,7 +522,7 @@ static void fill_pad(uint64_t out, uint32_t id, int style_is_fullkey) {
     memset((void *)(uintptr_t)out, 0, 0x28);
     wr64(out, (uint64_t)InterlockedIncrement64(&g_sampling));
     if (id > 7 || !style_is_fullkey) return;                  /* every controller here is a full-key (Pro) controller */
-    if (id == 0) seq_tick();
+    if (id == 0) { int fight_seq_ticks(void); for (int n = fight_seq_ticks(); n > 0; n--) seq_tick(); }      /* S11: 1 per poll; SSBU_DETERMINISTIC in a fight: per fight frame (fighter_sdk\fighter_host.c) */
     if (!player_connected(id)) return;
     static const struct { int vk, bit; } map[] = {
         {'Z', BTN_A}, {'X', BTN_B}, {'C', BTN_X}, {'V', BTN_Y}, {'Q', BTN_L}, {'E', BTN_R}, {'A', BTN_ZL}, {'S', BTN_ZR},

@@ -55,6 +55,7 @@ def main():
         k, _, v = kv.partition('=')
         env[k] = v
     os.makedirs(a.userdata, exist_ok=True)
+    os.makedirs(os.path.join(a.build, 'cache'), exist_ok=True)      # the runtime creates ..\cache\vk below it but not the folder itself (found 2026-10-13: with SSBU_VK_PREP=0 on a clean build nothing was saved)
     cmd = [exe, os.path.join(a.build, 'binaries', '13.0.4', 'main.elf'), str(a.seconds)]
     t0 = time.time()
     out = open(a.log, 'wb') if a.log else None

@@ -18,7 +18,7 @@ One command, eleven resumable steps. When it ends it prints how to start the gam
 |---|---|---|
 | Windows 10/11 x64 | 11 | |
 | Python | 3.14 (3.10 or newer should do) | https://www.python.org/downloads/ |
-| Python packages | numpy, lz4, zstandard, Pillow, unicorn | `pip install numpy lz4 zstandard Pillow unicorn` |
+| Python packages | numpy, lz4, zstandard, Pillow, unicorn | `pip install numpy lz4 zstandard Pillow unicorn` (the build needs only these; the fighter tools and `tools/lifter/patches/kinds_scan.py` also use `capstone`) |
 | LLVM/clang | **9.0.0** (8.0.0 also works) | https://github.com/llvm/llvm-project/releases/tag/llvmorg-9.0.0 (Windows installer, 64-bit) |
 | MSVC Build Tools, with the "C++ x64/x86 build tools" and a Windows 10/11 SDK | 2026 (v18) / SDK 10.0.26100 | https://visualstudio.microsoft.com/downloads/ ("Build Tools"). clang finds it by itself; `build_glslang.bat` finds it with `vswhere` |
 | SDL3, development package for Visual C++ (`SDL3-devel-<ver>-VC.zip`) | 3.4.18 | https://github.com/libsdl-org/SDL/releases |
@@ -109,6 +109,16 @@ Scripted match, as used to verify the build (window off-screen and muted because
 ```
 python scripts/run.py --userdata <copy of a save folder> --seq tests/seq_battle_play.txt --seconds 240 --seed 1 --exe ssbu_match.exe --log match.log
 ```
+
+Fast test run (the debug mode, `tests/DEBUG_MODE.md`; the link step now also compiles `debug_mode.c`; the 44 host files of the
+timing table above are 45 since then):
+
+```
+python scripts/run.py --userdata <copy of a save folder> --seq tests/seq_battle_play_fast.txt --seconds 240 --exe ssbu_fast.exe --log fast.log --env SSBU_SPEED=0 --env SSBU_SKIP_MOVIES=1 --env SSBU_AUDIO_MUTE=1 --env SSBU_VK_PREP=0 --env SSBU_DEBUG_END=20s
+```
+
+`SSBU_SPEED=0` runs uncapped, `SSBU_DEBUG_END=20s` ends the run after 20 s of fight, `SSBU_VK_PREP=0` leaves out the background
+shader preparation (on a normal run it works for about 15 minutes of play and writes about 2.5 GB into `build/cache`).
 
 Options are environment variables, set with `--env NAME=VALUE` (full list: comments at the top of the runtime sources):
 `SSBU_RENDERER=vk|gl`, `SSBU_SHOW=1` (show the window of a test exe), `SSBU_STRICT=1|report|path` (list the host

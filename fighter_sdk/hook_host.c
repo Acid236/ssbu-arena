@@ -608,11 +608,13 @@ static void hook_selftest_module(Ctx *c, NroModule *m) {
 }
 
 static int g_hk_selftest;
+static void fighter_debug_start(void);                 /* S10: fighter_host.c, SSBU_FIGHTER_DEBUG (test only; nothing without the variable) */
 static void hook_start(Ctx *c) {                       /* once, before the game starts (nnro.c module_coverage_start) */
     ro_init_tables();
     g_hk_selftest = getenv("SSBU_HOOK_SELFTEST") != NULL;
     if (g_hk_selftest) hook_selftest_main(c);
     hook_count_start();
     hook_health_start();
+    fighter_debug_start();
     hook_load_mods();
 }
