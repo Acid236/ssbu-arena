@@ -1094,7 +1094,9 @@ def step_link(cx):
         copy_ffmpeg(cx)
         return
     cx.run('link', [os.environ.get('COMSPEC', 'cmd.exe'), '/c', os.path.join(cx.work, 'build_glslang.bat')], env=cx.env())
-    cx.run('link', [sys.executable, 'build.py', 'link'], env=cx.env(**{k: v for k, v in build_env(cx).items() if k != 'RECOMP_NRO_SUFFIX'}, RECOMP_EXE=EXE))
+    ldn = '1' if cx.state.get('ldn_online') else '0'                 # --ldn-online: built into the exe or absent from it
+    cx.run('link', [sys.executable, 'build.py', 'link'], env=cx.env(**{k: v for k, v in build_env(cx).items() if k != 'RECOMP_NRO_SUFFIX'}, RECOMP_EXE=EXE,
+                                                                   RECOMP_LDN_ONLINE=ldn))
     exe = os.path.join(cx.work, EXE)
     for f in (EXE, 'SDL3.dll', 'ssbu_glslang.dll', 'ssbu_game_eh_o1.dll'):
         if not os.path.exists(os.path.join(cx.work, f)):
@@ -1105,6 +1107,7 @@ def step_link(cx):
         shutil.copy2(opus, os.path.join(cx.work, name))
     say('  %s %.1f MB, SDL3.dll, ssbu_glslang.dll, ssbu_game_eh_o1.dll%s beside it' % (EXE, os.path.getsize(exe) / 1048576.0,
                                                                                          ', ' + name if opus else ''))
+    say('  local wireless over the internet (--ldn-online): %s' % (r'built in (config\online.ini, BUILDING.md)' if ldn == '1' else 'not built in'))
     if not opus:
         say('  WARNING: no libopus: music and the other Opus sounds will be silent (deps step above; BUILDING.md)')
     copy_ffmpeg(cx)
@@ -1290,6 +1293,8 @@ def main():
     ap.add_argument('--opus', help='libopus DLL (opus.dll or libopus-0.dll) or the folder holding it: the music (optional, BUILDING.md)')
     ap.add_argument('--imgui', help='Dear ImGui v1.91.9b source folder (imgui.h, imgui.cpp): the in-game settings menu (optional; BUILDING.md)')
     ap.add_argument('--sdk-roots', help='another list of SDK functions to lift (default: tools/lifter/sdklift_roots.txt)')
+    ap.add_argument('--ldn-online', choices=('on', 'off'), help='local wireless over the internet through a room server (runtime/ldn_online.inc) '
+                    'compiled into the exe: on / off (default off; kept for later runs; BUILDING.md)')
     ap.add_argument('--modules', help='script modules to build: all (default) or a comma list, e.g. lua2cpp_common,lua2cpp_mario')
     ap.add_argument('--runtime', help='prebuilt runtime package (zip or folder, scripts/make_release.py): the exe is not built here, '
                                       'and neither MSVC, the Windows SDK, SDL3, Vulkan-Headers, glslang nor suyu is needed')
@@ -1312,6 +1317,9 @@ def main():
         say(' '.join(STEPS))
         return 0
     cx = Ctx(a)
+    ldn_changed = bool(a.ldn_online) and (a.ldn_online == 'on') != bool(cx.state.get('ldn_online'))
+    if ldn_changed:
+        cx.state['ldn_online'] = a.ldn_online == 'on'
     if a.status:
         for s in STEPS:
             r = cx.state.get('done', {}).get(s)
@@ -1351,6 +1359,8 @@ def main():
         say('--rollback: the rollback pair is not built yet: compile (the marked game DLL), nro (the marked script modules) and link run again')
         for s in ('compile', 'nro', 'link'):
             done.pop(s, None)
+    if ldn_changed:                                     # the exe is linked again with or without local wireless online
+        force.add('link')
     t_all = time.time()
     for i, s in enumerate(STEPS):
         if s not in todo:
