@@ -539,8 +539,45 @@ static void err_ShowErrorCode(Ctx *c) {                   /* (ErrorCode { uint32
  * [sdk] PlayReport(): byte @0 = 0, three 8-byte fields @0x20..0x37 = 0. */
 static void prepo_PlayReport_ctor(Ctx *c) { wr8(A0, 0); wr64(A0 + 0x20, 0); wr64(A0 + 0x28, 0); wr64(A0 + 0x30, 0); }
 
-/* ---------------------------------------------------------------- nn::aoc: no add-on content installed */
-static void aoc_ListAddOnContent(Ctx *c) { RET(0); }      /* (int *out, int offset, int count) -> number written */
+/* ---------------------------------------------------------------- nn::aoc: the add-on content the player owns
+ * The console lists the installed add-on contents of the running application by INDEX (add-on content id =
+ * application id + 0x1000 + index). The game's DLC fighters, stages and costumes are data of the game update; an owned
+ * add-on content only unlocks them. Which ones this player owns is his own fact: <exe folder>\..\config\dlc.txt
+ * (SSBU_DLC_LIST overrides the path), one index per line, decimal or 0x.. hex, `#` comments; tools\dlc_list.py writes
+ * it from the file names of the player's own DLC dumps. No file = none owned (as before). */
+static int g_aoc[2048], g_aoc_n = -1;
+static void aoc_load(void) {
+    char exe[MAX_PATH], path[MAX_PATH + 32];
+    const char *e = getenv("SSBU_DLC_LIST");
+    if (e && e[0]) snprintf(path, sizeof path, "%s", e);
+    else {
+        GetModuleFileNameA(NULL, exe, MAX_PATH);
+        char *s = strrchr(exe, '\\');
+        if (s) *s = 0;
+        snprintf(path, sizeof path, "%s\\..\\config\\dlc.txt", exe);
+    }
+    int n = 0;
+    FILE *fp = fopen(path, "r");
+    char ln[128];
+    while (fp && fgets(ln, sizeof ln, fp) && n < (int)(sizeof g_aoc / sizeof g_aoc[0])) {
+        char *p = ln, *end;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p == '#' || *p == '\r' || *p == '\n' || !*p) continue;
+        long v = strtol(p, &end, 0);
+        if (end != p && v > 0 && v < 0x1000) g_aoc[n++] = (int)v;
+    }
+    if (fp) fclose(fp);
+    printf("nn::aoc: %d add-on content(s) owned (%s)\n", n, fp ? path : "no config\\dlc.txt");
+    g_aoc_n = n;
+}
+static void aoc_CountAddOnContent(Ctx *c) { if (g_aoc_n < 0) aoc_load(); RET(g_aoc_n); }
+static void aoc_ListAddOnContent(Ctx *c) {                 /* (int *out, int offset, int count) -> number written */
+    if (g_aoc_n < 0) aoc_load();
+    uint64_t out = A0;
+    int off = (int)A1, cnt = (int)A2, w = 0;
+    for (int i = off; out && i >= 0 && i < g_aoc_n && w < cnt; i++, w++) wr32(out + (uint64_t)w * 4, (uint32_t)g_aoc[i]);
+    RET(w);
+}
 
 /* ---------------------------------------------------------------- nn::util */
 static HCRYPTPROV crypt_provider(void) {
@@ -734,7 +771,7 @@ static const ImportDef fill_imports[] = {
     {PR("3AddEPKcRKNS0_10Any64BitIdE"), ret0}, {PR("3AddEPKcl"), ret0}, {PR("3AddEPKcd"), ret0}, {PR("3AddEPKcS3_"), ret0},
     {PR("4SaveERKNS_7account3UidE"), ret0},
     /* nn::aoc, nn::pctl, nn::pdm */
-    {"_ZN2nn3aoc17CountAddOnContentEv", ret0}, {"_ZN2nn3aoc16ListAddOnContentEPiii", aoc_ListAddOnContent},
+    {"_ZN2nn3aoc17CountAddOnContentEv", aoc_CountAddOnContent}, {"_ZN2nn3aoc16ListAddOnContentEPiii", aoc_ListAddOnContent},
     /* close5: both return a BOOL, not a Result: [sdk 0x33a620] `cset w0, eq` on the service Result (slot +0x28), [sdk 0x33aef0] the
      * byte the service writes (slot +0x148). A console without parental controls: true (suyu pctl/parental_control_service.cpp
      * CheckFreeCommunicationPermissionImpl / ConfirmStereoVisionPermissionImpl: no PIN -> true). The old ret0 answered "refused". */

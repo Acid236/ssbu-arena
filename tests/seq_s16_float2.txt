@@ -1,0 +1,19 @@
+# S16 float case 2 (peach / daisy as player 1), after the owner's recipe. Menus as seq_s15_check.txt, then three variants one after the other
+# (each: jump, then 12 frames later keys HELD for 90 frames, then the side special rX held 25 frames, then 120 frames of rest):
+#  A: up + special held (uX)   B: jump held (C)   C: jump + stick DOWN held (dC; the float test in the status source needs jump on and the stick at or below squat_stick_y)
+@movie
+@draws:22-26/30
+@draws:36-44/30
+30:Z
+@draws:700-800/40 30:Z
+150:Z
+@draws:370-400/40 30:Z
+@draws:270-295/40 30:Z
+@draws:175-205/60
+30:u/30 20:l/18 30:Z
+60:r/50 20:d/8 30:Z
+@fight
+200
+60:C/4 12:uX/90 60:rX/25 120
+60:C/4 12:C/90 60:rX/25 120
+60:C/4 12:dC/90 60:rX/25 120

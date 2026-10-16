@@ -100,7 +100,10 @@ Battlefield (ui_stage 0x1d163699ac4b, stage id 0x50). Limits / not verified:
 * `items=on` writes 2 to the rule's item-appear field after the header is filled: whether items then spawn was NOT checked
   (the item switches of the rule were not looked at); `hazards=` writes the byte `0x7105309985` that the stage call takes
   as a flag: its meaning is a guess, NOT verified (final destination and omega forms have no hazards anyway);
-* `time=` is parsed and ignored; colour is not settable; only players 1 and 2;
+* `time=` is parsed and ignored; colour is not settable; players 1 and 2, and since 2026-10-13 (track V session 14)
+  `p3=<fighter>,p4=<fighter>` = two more CPU players (an empty panel takes player 2's panel state as its template, own
+  colour, same level and stock; `SSBU_DEBUG_P34=2` copies only the known fields). Proof: records 2 and 3 get the kinds
+  asked for, type 1. A four-player match does not end when player 1 walks off: a list run plays one fight;
 * `stock=1` verified by effect (match over after one KO, 245-259 fight frames); a line printed at ready-go still shows
   `stocks in the fighters' records 3 / 3`: that record field (+0xd8) is not the stock count either;
 * route B (no screens at all) was not attempted: the caller at `0x71023119xx` is a scene step that is not a function in

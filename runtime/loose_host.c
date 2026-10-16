@@ -17,23 +17,34 @@ int hook_install(uint64_t addr, HookFn repl, void *user, ImportFn *orig);      /
 
 #include "loose_files.c"
 
-static void loose_host_log(const char *s) { printf("%s\n", s); trace_printf("%s\n", s); }
+static void loose_host_log(const char *s) { printf("%s\n", s); fflush(stdout); trace_printf("%s\n", s); }
 
 static DWORD WINAPI loose_host_wait(LPVOID arg) {
     (void)arg;
     /* the hook table answers "not the entry of a lifted function" until the game's function table is set up */
     if (!loose_files_scan(loose_host_log)) return 0;    /* no folder / no files: nothing to wait for */
-    for (int i = 0; i < 3000; i++) {
-        if (loose_files_install(hook_install, 1)) return 0;
-        Sleep(10);
+    /* N7: the same thread polls every millisecond for the game's tables and grows them as soon as they are published
+     * (loose_files_early), before the first file request when it wins; SSBU_LOOSE_EARLY=0: only the first decompress */
+    const char *ee = getenv("SSBU_LOOSE_EARLY");
+    int hooked = 0, early = !(ee && ee[0] == '0');
+    for (int i = 0; i < 120000; i++) {
+        if (!hooked && i % 10 == 0) hooked = loose_files_install(hook_install, 1);
+        if (early && loose_files_early()) early = 0;
+        if (hooked && !early) return 0;
+        if (!hooked && i == 3000) loose_host_log("[loose] the hook could not be installed in 30 s: the layer is OFF");
+        Sleep(1);
     }
-    loose_host_log("[loose] the hook could not be installed in 30 s: the layer is OFF");
     return 0;
 }
 
+extern int (*g_nm_stage2_has)(uint64_t path_hash);      /* fighter_sdk\newmodule_host.c: the registry's path fallback asks stage 2 */
+
 __attribute__((constructor)) static void loose_host_start(void) {
-    const char *e = getenv("SSBU_LOOSE_FILES");
-    if (!e || e[0] == '0' || !e[0]) return;
+    const char *e = getenv("SSBU_LOOSE_FILES"), *ch = getenv("SSBU_CHARACTERS");
+    /* N6: the fighter registry (SSBU_CHARACTERS) switches the layer on too, unless SSBU_LOOSE_FILES=0 */
+    if (e && e[0] == '0') return;
+    if (!(e && e[0]) && !(ch && ch[0])) return;
+    g_nm_stage2_has = loose_files_has;
     HANDLE h = CreateThread(NULL, 0, loose_host_wait, NULL, 0, NULL);
     if (h) CloseHandle(h);
 }

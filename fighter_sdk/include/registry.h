@@ -32,6 +32,23 @@ typedef struct SsbuRegistry {
     // every script it registers are addresses of lua2cpp_<name>. name == NULL: `agent` is an ordinary fighter's
     // (an address that belonged to a new fighter's agent earlier is forgotten).
     void (*agent_end)(const char *name, uint64_t agent);
+    // version 2 (N8; check size before use): the new fighter `name` is being set up on this thread (its fighter init
+    // runs), NULL = no longer. While it is set, a file path the engine builds with the DONOR's name (the paths of the
+    // article models come from the donor's article list) is answered with the same path under the fighter's own name
+    // when the fighter's folder has a row for it.
+    void (*owner_set)(const char *name);
+    // version 3 (N12; check size before use): as agent_begin, for an agent of an ARTICLE (weapon) of the new fighter
+    // `name`. The fighter's own script names (registered by name for its fighter agents) are not given to these.
+    void (*agent_begin_weapon)(const char *name);
+    // version 4 (N13; check size before use): THE ARTICLE'S OWN AGENT. The engine wants agent `category` (0 status
+    // script, 1 game, 2 effect, 3 sound: the four weapon agent dispatchers in that order) for a weapon of the new
+    // fighter `name`'s own article `article`. ctx is the game thread's register context with the factory arguments
+    // (x1 battle object, x2 module accessor, x3 lua state). When the fighter's DLL has the function
+    // `<article>__install` the runtime makes the agent itself from the engine's base class (no other fighter's module
+    // is involved): the status agent's install is that function, the animation-command agents get the DLL's scripts
+    // `<article>__<game_|effect_|sound_|expression_><name>` under the hash of `<prefix><name>`. Returns 1 with the
+    // agent in x0, or 0 (the DLL has nothing for this article: the caller keeps the template's agent).
+    int (*article_agent)(void *ctx, const char *name, const char *article, int category);
 } SsbuRegistry;
 
 #ifdef _WIN32

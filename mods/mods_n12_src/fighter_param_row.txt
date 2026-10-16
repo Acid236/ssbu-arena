@@ -1,0 +1,43 @@
+# N12: the general fighter parameter row (0x628 bytes per fighter kind): parameter name -> type, byte offset.
+# Read by the kind component (n12_kind.dll, from its own folder) to apply fighter.json "parameter_row": {"set": {...}}
+# and by fighter_sdk\tools\new_fighter.py --check-row. Offsets measured by track Z1 (plan\phases\Z1_own_moves.md 9.3:
+# each offset is the only one where the row's word equals the parameter file's value for all 94 fighters).
+# name                        type  offset
+walk_accel_mul                f32   0x008
+walk_accel_add                f32   0x00c
+walk_speed_max                f32   0x010
+ground_brake                  f32   0x020
+dash_speed                    f32   0x024
+run_accel_mul                 f32   0x028
+run_accel_add                 f32   0x02c
+run_speed_max                 f32   0x030
+jump_squat_frame              i32   0x034
+jump_speed_x                  f32   0x038
+jump_speed_x_mul              f32   0x03c
+jump_speed_x_max              f32   0x040
+jump_y                        f32   0x04c
+mini_jump_y                   f32   0x050
+jump_aerial_y                 f32   0x054
+air_accel_x_mul               f32   0x058
+air_accel_x_add               f32   0x05c
+air_speed_x_stable            f32   0x060
+air_brake_x                   f32   0x064
+air_accel_y                   f32   0x068
+air_speed_y_stable            f32   0x06c
+air_brake_y                   f32   0x078
+dive_speed_y                  f32   0x07c
+weight                        f32   0x080
+landing_attack_air_frame_n    f32   0x088
+landing_attack_air_frame_f    f32   0x08c
+landing_attack_air_frame_b    f32   0x090
+landing_attack_air_frame_hi   f32   0x094
+landing_attack_air_frame_lw   f32   0x098
+landing_frame_light           f32   0x09c
+landing_frame                 f32   0x0a0
+scale                         f32   0x0a8
+attack_combo_max              i32   0x0cc
+jump_count_max                i32   0x12c
+# W1 (2026-10-15): measured with N4_ROW_FIND on a copy of Terry's row (run w1jd1: 14.85 found at +0x48 only)
+jump_initial_y                f32   0x048
+# W1: 0.8 (Terry's value) found at +0x44 (+0x45c, +0x474 are other fields) in run w1mv1 with jump_speed_x already 0.87
+jump_aerial_speed_x_mul       f32   0x044

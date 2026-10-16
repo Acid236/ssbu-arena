@@ -32,6 +32,7 @@ BINARY = {'operator_rm': '%', 'operator_an': '&', 'operator_or': '|', 'operator_
 
 class MExec(D.FExec):
     """a named member function: this in x0, result buffer in x8, L2CValue arguments by pointer"""
+    lua_vec = True                                       # S20: a script call's vector result is lua_vec(...) (acmd_decomp.lane_move)
 
     def __init__(self, mod, off):
         D.FExec.__init__(self, mod, off, 'macro')
@@ -44,6 +45,35 @@ class MExec(D.FExec):
             for k in range(2, 8):
                 self.entry_reg['x%d' % k] = ('arg', k - 2)
             self.entry_reg['x8'] = A.UNDEF
+        if off in getattr(mod, 'plain_fns', ()):
+            # S18: a helper that takes no agent at all: x0 = result buffer, x1.. = L2CValue arguments (found at the
+            # call sites, see call_local). Nothing in it is the agent, so it executes only if it never needs one.
+            self.entry_reg['x0'] = A.RET
+            for k in range(1, 8):
+                self.entry_reg['x%d' % k] = ('arg', k - 1)
+            self.entry_reg['x8'] = A.UNDEF
+
+    def load_s20(self, a, size, is_float):
+        # S20: a helper that is not a member (x0 = result, x1 = agent): its arguments start at x2, so the first one on
+        # the caller's stack is argument 6, not 7 (acmd_decomp.Exec.load counts from x1)
+        if (a[0] == 'stk' and a[1] >= 0 and a[1] not in self.mem and self.off in getattr(self.m, 'static_fns', ())
+                and self.off not in getattr(self.m, 'plain_fns', ())):
+            return ('arg', 6 + a[1] // 8)
+        return D.FExec.load(self, a, size, is_float)
+
+    # S21: lua2cpp::L2CAgentBase::coroutine_yield() called as the game's code calls it: through the agent's vtable
+    # (`ldr x8, [x20]; ldr x8, [x8, #0x10]; mov x0, x20; blr x8`; slot 2 of every item class reads
+    # _ZN7lua2cpp12L2CAgentBase15coroutine_yieldEv). The vtable is ('vtab', 0), the slot ('vfn', 0x10); only that one
+    # slot is taken (see step: blr), printed fs_coroutine_yield(agent) (status_local.h: through the same vtable entry)
+    def add(self, base, off):
+        if base == ('agentfield', 0):
+            return ('vtab', off)
+        return D.FExec.add(self, base, off)
+
+    def load(self, a, size, is_float):
+        if a[0] == 'vtab' and size == 8 and not is_float:
+            return ('vfn', a[1])
+        return self.load_s20(a, size, is_float)
 
     @staticmethod
     def unstable(v):
@@ -54,16 +84,54 @@ class MExec(D.FExec):
             return True
         return any(MExec.unstable(x) for x in v[1:])
 
+    @staticmethod
+    def has_elem(v):
+        if not isinstance(v, tuple):
+            return False
+        if v and v[0] in ('elem', 'elemptr'):
+            return True
+        return any(MExec.has_elem(x) for x in v[1:])
+
     def stable(self, v):
+        # S18: the ADDRESS of a table element (what operator[] returned, kept in a register across a branch) is the
+        # same element later, as the game's own code assumes, when the table it was taken from is named by something
+        # that cannot change in between: the agent's own member table, a value held in a result variable, an
+        # argument; and the key is a constant or such a value. An element of an element (table[a][b]) is NOT taken:
+        # table[a] could be given another table in between and the address would still point into the old one.
+        if v and v[0] == 'elemptr' and not D.has_var(v) and not self.has_elem(v[1]) and not self.unstable(v[2]):
+            return True
         return not D.has_var(v) and not self.unstable(v)
 
     def lvalue(self, v, what):
         if v[0] == 'off' and v[1] == A.AGENT:
-            if v[2] not in D.MEMBERS:
+            # S19: an L2CValue member of the agent at another place than global_table (item agents keep several; no
+            # public source names them): the game's own code passes its address where an L2CValue is expected, which
+            # is what makes it one. Printed agent_value(agent, 0x...) (status_local.h). Only 16-byte aligned places
+            # after the agent's base part (0x10 and on).
+            if v[2] not in D.MEMBERS and (v[2] < 0x10 or v[2] % 8):
                 self.fail('member of the agent +0x%x' % v[2])
             return ('member', v[2])
         if v[0] == 'elemptr':
             return ('elem', v[1], v[2])
+        if v == A.RET and 'ret' in self.lv:
+            # S20: the function reads back its own result after writing it (`result = x; ... if (result < y)`): the
+            # value it wrote, like any slot of its own frame
+            return self.lv['ret']
+        if v[0] == 'sym' and mangle.gvalue_name(v[1]):
+            # S20: a constant L2CValue of the game's script runtime (lib::L2CAgent::math_pi, math_FLT_MAX): read in place,
+            # fs_gvalue(S_gvalue_<name>) (slot made by gen_sdk.py, helper in status_local.h)
+            return ('gval', v[1])
+        if (v[0] == 'off' and v[1][0] == 'arg' and v[2] in (0x10, 0x20, 0x30)
+                and (self.off in getattr(self.m, 'static_fns', ()) or self.off in getattr(self.m, 'plain_fns', ()))):
+            # S18: an argument that is a ROW of L2CValues on the caller's frame (three in a row = the x, y, z a helper
+            # hands to Vector3__create): `add x1, x21, #0x10; bl L2CValue(const L2CValue &)`. Element k of argument i is
+            # ('argel', i, k), printed a<i>[k]; the parameter is then `const L2CValue *` and the caller writes
+            # row(x, y, z) (fighter_status.run_module checks that the caller really built that many values there).
+            # Only in helpers called as plain C++ (not in a function the game calls through its address).
+            if not hasattr(self, 'agg'):
+                self.agg = {}
+            self.agg[v[1][1]] = max(self.agg.get(v[1][1], 0), v[2] // 0x10)
+            return ('argel', v[1][1], v[2] // 0x10)
         return D.FExec.lvalue(self, v, what)
 
     def setslot(self, where, e):
@@ -112,6 +180,30 @@ class MExec(D.FExec):
                     self.setslot(x0, self.snapshot(self.lvalue(self.get('x1'), 'copy')))
                     self.reg['x0'] = A.UNDEF
                     return
+                if t == ('ptr', ('const', 'c')):
+                    # S21: lib::L2CValue::L2CValue(char const*) (main 0x71037341c0): type 8, the value OWNS a std::string
+                    # the constructor allocates (game allocator, 0x18 bytes); ~L2CValue frees it, the copy constructor
+                    # makes another one. Only a text of the module's read-only data (the item scripts' status names
+                    # "INITIALIZE", "LOST" ...). ('str', offset): printed L2CString("TEXT") (fighter_sdk.h), a temporary
+                    # built and destroyed by the game's own functions; l2c_decomp.Printer2 refuses it where it would
+                    # outlive its statement (a variable, a returned value).
+                    a = self.get('x1')
+                    n = self.n
+                    if a[0] != 'img' or not (n.ro_off <= a[1] < n.ro_off + n.ro_size):
+                        self.fail('L2CValue constructor from a text that is not a constant')
+                    try:
+                        n.cstr(a[1]).encode('ascii')
+                    except (UnicodeError, ValueError):
+                        self.fail('L2CValue constructor from a text that is not plain ASCII')
+                    self.setslot(x0, ('str', a[1]))
+                    self.reg['x0'] = A.UNDEF
+                    return
+            if fn == 'length' and not params:
+                # S21: lib::L2CValue::length() const -> unsigned 64-bit in x0 (fs_lv_length, fighter_sdk.h). A node of its
+                # own at this point (the value may change later); its x0 an integer value like a script call's (luax)
+                i = self.node(kind='lvlen', args=[self.lvalue(x0, fn)])
+                self.reg['x0'] = ('luax', ('ref', i))
+                return
             if fn == 'operator_ng':
                 self.setslot(self.get('x8'), ('lvneg', self.lvalue(x0, fn)))
                 return
@@ -162,26 +254,64 @@ class MExec(D.FExec):
         x0 = the agent, x1.. = pointers to L2CValue arguments, x8 = result buffer. How many of the candidate
         arguments are real is decided by the driver from what the callee reads (truncated before printing)."""
         x0 = self.get('x0')
-        static = False
+        static = plain = False
+        if x0[0] == 'stk' and D.is_synth(x0[1]):         # S18: never a result buffer
+            self.fail('local function called with a chosen pointer in x0')
+
+        def is_value(a):
+            return (a[0] == 'stk' and a[1] in self.lv) or a[0] == 'arg' or (a[0] == 'sym' and a[1] == '_ZN3lib8L2CValue3NILE')
+
         if x0 != A.AGENT:
             if self.reg['x1'] == A.AGENT and (x0 == A.RET or x0[0] == 'stk') and hasattr(self.m, 'static_fns'):
+                if target in getattr(self.m, 'plain_fns', ()):
+                    self.fail('local function called in two ways')
                 static = True                            # result buffer in x0, agent in x1, arguments from x2
                 self.m.static_fns.add(target)
+            elif (x0 == A.RET or x0[0] == 'stk') and is_value(self.reg['x1']) and hasattr(self.m, 'plain_fns'):
+                # S18: result buffer in x0, L2CValue arguments from x1, no agent (a helper that only computes on
+                # values). The callee is then executed with exactly that: it stays refused if it needs an agent.
+                # Nothing is recorded here: the driver (fighter_status.run_module) takes the plain callees from the
+                # functions that executed, and refuses a caller whose call does not match what the callee became.
+                plain = True
             else:
                 self.fail('local function called on something else than the agent')
-        elif target in getattr(self.m, 'static_fns', ()):
+        elif target in getattr(self.m, 'static_fns', ()) or target in getattr(self.m, 'plain_fns', ()):
             self.fail('local function called in two ways')
         if self.lua:
             self.fail('local function called with values on the Lua stack')
         args = []
+        rows = {}
         for k in range(2 if static else 1, 8):
             a = self.reg['x%d' % k]
-            if (a[0] == 'stk' and a[1] in self.lv) or a[0] == 'arg' or (a[0] == 'sym' and a[1] == '_ZN3lib8L2CValue3NILE'):
+            if is_value(a):
+                if a[0] == 'stk':                        # S18: the values that stand right after it on the frame (a row argument, see lvalue)
+                    more = []
+                    while len(more) < 3 and a[1] + 0x10 * (len(more) + 1) in self.lv:
+                        more.append(self.lv[a[1] + 0x10 * (len(more) + 1)])
+                    rows[len(args)] = more
                 args.append(self.lvalue(a, 'local call'))
             else:
                 break
-        x8 = x0 if static else self.reg['x8']
-        i = self.node(kind='local', target=target, args=args, static=static)
+        else:
+            # S20: every argument register holds a value: the eighth and later arguments are the pointers stored in
+            # 8-byte cells at the stack pointer (as many as are values; the driver keeps as many as the callee reads)
+            sp = self.reg['sp']
+            for j in range(10):
+                a = self.mem.get(sp[1] + 8 * j, A.UNDEF) if sp[0] == 'stk' else A.UNDEF
+                if not is_value(a) or (a[0] == 'stk' and D.is_synth(a[1])):
+                    break
+                args.append(self.lvalue(a, 'local call'))
+        x8 = x0 if static or plain else self.reg['x8']
+        # S20: where each argument came from (a slot of this frame, or not); a callee that writes its argument k
+        # (fighter_status.run_module: mod.arg_written) changes that slot: its value here is forgotten after the call
+        first = 2 if static else 1
+        src = [self.reg['x%d' % (first + k)] if first + k < 8 else self.mem.get(self.reg['sp'][1] + 8 * (first + k - 8), A.UNDEF)
+               for k in range(len(args))]
+        i = self.node(kind='local', target=target, args=args, static=static or plain, plain=plain, rows=rows,
+                      argsrc=[s[0] == 'stk' for s in src])
+        for k in getattr(self.m, 'arg_written', {}).get(target, ()):
+            if k < len(src) and src[k][0] == 'stk':
+                self.lv.pop(src[k][1], None)
         if x8 == A.RET:
             self.ret_value = ('ref', i)
         elif x8[0] == 'stk':
@@ -195,12 +325,24 @@ class MExec(D.FExec):
             if len(ops) == 3 and ops[2] != '#1' and ops[1] not in ('wzr', 'xzr'):
                 a = self.get(ops[1])
                 b = ('int', A.imm(ops[2])) if ops[2].startswith('#') else self.get(ops[2])
-                if a[0] in ('int', 'luaconst', 'ref', 'conv', 'ibin', 'var') and b[0] in ('int', 'luaconst', 'ref', 'conv', 'ibin', 'var'):
+                ok = ('int', 'luaconst', 'ref', 'conv', 'ibin', 'var', 'luax')      # (S21: luax, an integer a script call left in x0)
+                if a[0] in ok and b[0] in ok:
                     if a[0] == 'int' and b[0] == 'int':
                         self.put(ops[0], ('int', a[1] | b[1] if ins.mnemonic == 'orr' else a[1] & b[1]))
                     else:
                         self.put(ops[0], ('ibin', '|' if ins.mnemonic == 'orr' else '&', a, b))
                     return None
+        if ins.mnemonic == 'blr' and self.get(ins.op_str.strip()) == ('vfn', 0x10):
+            if self.get('x0') != A.AGENT or self.lua:
+                self.fail('coroutine_yield on something else than the agent')
+            self.node(kind='yield', args=[])             # S21: see add
+            self.allnodes[self.counter - 1]['void'] = True
+            for r in range(0, 18):
+                self.reg['x%d' % r] = A.UNDEF
+            for r in range(0, 8):
+                self.reg['v%d' % r] = A.UNDEF
+            self.flags = None
+            return None
         if ins.mnemonic == 'blr':
             v = self.get(ins.op_str.strip())
             if v[0] != 'conv' or v[1] != 'as_pointer' or self.get('x0') != A.AGENT:
@@ -208,7 +350,7 @@ class MExec(D.FExec):
             args = []
             for k in range(1, 8):
                 a = self.reg['x%d' % k]
-                if a[0] != 'stk' or a[1] not in self.lv:
+                if a[0] != 'stk' or a[1] not in self.lv or D.is_synth(a[1]):      # (S18: a chosen pointer is not counted as an argument here)
                     break
                 args.append(self.lv[a[1]])
             i = self.node(kind='callptr', args=[v[2]] + args)

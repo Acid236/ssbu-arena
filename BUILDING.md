@@ -18,7 +18,7 @@ One command, eleven resumable steps. When it ends it prints how to start the gam
 |---|---|---|
 | Windows 10/11 x64 | 11 | |
 | Python | 3.14 (3.10 or newer should do) | https://www.python.org/downloads/ |
-| Python packages | numpy, lz4, zstandard, Pillow, unicorn | `pip install numpy lz4 zstandard Pillow unicorn` (the build needs only these; the fighter tools and `tools/lifter/patches/kinds_scan.py` also use `capstone`) |
+| Python packages | numpy, lz4, zstandard, Pillow, unicorn, capstone | `pip install numpy lz4 zstandard Pillow unicorn capstone` (the build needs only these; `capstone` is for the differential test in step `check`, and the fighter tools and `tools/lifter/patches/kinds_scan.py` use it too) |
 | LLVM/clang | **9.0.0** (8.0.0 also works) | https://github.com/llvm/llvm-project/releases/tag/llvmorg-9.0.0 (Windows installer, 64-bit) |
 | MSVC Build Tools, with the "C++ x64/x86 build tools" and a Windows 10/11 SDK | 2026 (v18) / SDK 10.0.26100 | https://visualstudio.microsoft.com/downloads/ ("Build Tools"). clang finds it by itself; `build_glslang.bat` finds it with `vswhere` |
 | SDL3, development package for Visual C++ (`SDL3-devel-<ver>-VC.zip`) | 3.4.18 | https://github.com/libsdl-org/SDL/releases |

@@ -79,16 +79,62 @@ static void err_Variant_assign(Ctx *c) { wr32(A0, rd32(A1)); }      /* returns *
 static void ldn_MakeIpv4Address(Ctx *c) { RET(((A0 & 0xff) << 24) | ((A1 & 0xff) << 16) | ((A2 & 0xff) << 8) | (A3 & 0xff)); }
 
 /* ---- nn::os: virtual memory, used by the game's own allocator (jemalloc) */
-void cxxrt_guest_region(uint64_t base, uint64_t size); void cxxrt_mem_changed(void);      /* nncxxrt.c (P3) */
+/* cxxrt_guest_region, cxxrt_mem_changed: nncxxrt.c (P3) */      // PR #2 (jfb112697): prototypes now in hostrt.h (cxxrt_mem_changed takes the range)
 static void os_AllocateAddressRegion(Ctx *c) {
     void *p = VirtualAlloc(NULL, (SIZE_T)A1, MEM_RESERVE | MEM_WRITE_WATCH, PAGE_NOACCESS);      /* write watch: nvn_gl.c asks the OS which texture pages were written (P3) */
     if (p) cxxrt_guest_region((uint64_t)(uintptr_t)p, A1);      /* nncxxrt.c: readable checks inside this region are remembered (P3) */
     wr64(A0, (uint64_t)p);
     RET(p ? 0 : 0x1015);                                 /* any non-zero nn::Result means failure */
 }
-static void os_AllocateMemoryPages(Ctx *c) { RET(VirtualAlloc(P(0), (SIZE_T)A1, MEM_COMMIT, PAGE_READWRITE) ? 0 : 0x1015); }
-static void os_FreeMemoryPages(Ctx *c) { cxxrt_mem_changed(); VirtualFree(P(0), (SIZE_T)A1, MEM_DECOMMIT); cxxrt_mem_changed(); RET(0); }
-static void os_FreeAddressRegion(Ctx *c) { cxxrt_mem_changed(); VirtualFree(P(0), 0, MEM_RELEASE); cxxrt_mem_changed(); RET(0); }
+/* Track V session 14 (the stalls at a match end: thousands of page faults in the game's allocator): what these two calls
+ * cost is COUNTED (SSBU_MEMSTAT=1: a line every 2,000 calls: calls, megabytes, milliseconds inside the two handlers).
+ * SSBU_MEM_KEEP=1 (OFF by default, not proven): FreeMemoryPages leaves the pages committed and clears them (the game's
+ * allocator takes pages it commits again as zero-filled), so nothing is decommitted, no page comes back through a fault
+ * and no other CPU is interrupted for the unmapping; the price is that freed memory stays in the working set. */
+static volatile LONG64 g_mp_calls[2], g_mp_bytes[2], g_mp_ticks[2];
+static int g_mp_keep = -1, g_mp_stat;
+static void mp_note(int i, uint64_t bytes, LARGE_INTEGER t0) {
+    LARGE_INTEGER t1, fq;
+    QueryPerformanceCounter(&t1);
+    InterlockedExchangeAdd64(&g_mp_bytes[i], (LONG64)bytes); InterlockedExchangeAdd64(&g_mp_ticks[i], t1.QuadPart - t0.QuadPart);
+    LONG64 n = InterlockedIncrement64(&g_mp_calls[i]) + g_mp_calls[1 - i];
+    if (g_mp_stat && n % 2000 == 0) {
+        QueryPerformanceFrequency(&fq);
+        printf("memstat: pages committed %lld calls, %lld MB, %.1f ms | pages freed%s %lld calls, %lld MB, %.1f ms\n", (long long)g_mp_calls[0], (long long)(g_mp_bytes[0] >> 20), (double)g_mp_ticks[0] * 1000.0 / (double)fq.QuadPart,
+               g_mp_keep ? " (kept committed, cleared)" : " (decommitted)", (long long)g_mp_calls[1], (long long)(g_mp_bytes[1] >> 20), (double)g_mp_ticks[1] * 1000.0 / (double)fq.QuadPart);
+    }
+}
+static void mp_init(void) { const char *e = getenv("SSBU_MEM_KEEP"), *s = getenv("SSBU_MEMSTAT"); g_mp_stat = s && atoi(s); g_mp_keep = e && atoi(e); }
+static void os_AllocateMemoryPages(Ctx *c) {
+    LARGE_INTEGER t0;
+    if (g_mp_keep < 0) mp_init();
+    QueryPerformanceCounter(&t0);
+    uint64_t n = A1;
+    int ok = VirtualAlloc(P(0), (SIZE_T)A1, MEM_COMMIT, PAGE_READWRITE) != NULL;
+    { void r1_on_commit(void *, size_t); r1_on_commit(P(0), (size_t)A1); }      /* R1 (r1_state.c): nothing without SSBU_R1_MARK */
+    mp_note(0, n, t0);
+    RET(ok ? 0 : 0x1015);
+}
+static void os_FreeMemoryPages(Ctx *c) {
+    LARGE_INTEGER t0;
+    if (g_mp_keep < 0) mp_init();
+    QueryPerformanceCounter(&t0);
+    uint64_t n = A1;
+    if (g_mp_keep) {
+        MEMORY_BASIC_INFORMATION mi;
+        uint8_t *p = P(0), *end = p + n;
+        while (p < end && VirtualQuery(p, &mi, sizeof mi)) {      /* only what is committed is cleared (a range may hold pages never committed) */
+            uint8_t *re = (uint8_t *)mi.BaseAddress + mi.RegionSize;
+            if (re > end) re = end;
+            if (mi.State == MEM_COMMIT && (mi.Protect & PAGE_READWRITE)) memset(p, 0, (size_t)(re - p));
+            p = re;
+        }
+    } else { void r1_on_decommit(void *, size_t); r1_on_decommit(P(0), (size_t)A1);      /* R1 (r1_state.c): marks the pages (nothing without SSBU_R1_MARK) */
+             cxxrt_mem_changed(A0, A1); VirtualFree(P(0), (SIZE_T)A1, MEM_DECOMMIT); cxxrt_mem_changed(A0, A1); }      // PR #2 (jfb112697): report the decommitted range, before and after
+    mp_note(1, n, t0);
+    RET(0);
+}
+static void os_FreeAddressRegion(Ctx *c) { cxxrt_mem_changed(A0, 0); VirtualFree(P(0), 0, MEM_RELEASE); cxxrt_mem_changed(A0, 0); RET(0); }      // PR #2 (jfb112697): size 0 = the whole region at A0
 
 /* ---- more libc */
 static void c_strtol(Ctx *c) {

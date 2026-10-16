@@ -58,8 +58,9 @@ static void scan_copies(uint64_t rec) {
  * records; each write prints the guest functions on the stack of the writer (finds the code that fills the record). */
 #include <tlhelp32.h>
 /* SSBU_DEBUG_MATCH="p1=<fighter>,p2=<fighter>,stage=<name>,form=omega,cpu=<level>,items=off|on,time=<min>|stock=<n>" */
-static struct { int p[2]; char stage[48]; int omega, cpu, items, time, stock; char text[256]; } g_dm = {{-1, -1}, "", 0, -1, -1, -1, -1, ""};
-static char g_dm_name[2][32];
+static struct { int p[4]; char stage[48]; int omega, cpu, items, time, stock; char text[256]; } g_dm = {{-1, -1, -1, -1}, "", 0, -1, -1, -1, -1, ""};
+static char g_dm_name[4][32];                          /* track V session 14: p3 / p4 (CPU players added to the panel states the screens left empty) */
+static uint8_t g_dm_state1[0x230]; static int g_dm_state1_ok;      /* player 2's panel state as the game's function saw it: the template for p3 / p4 */
 static int g_dm_p2type = -1, g_dm_applied, g_dm_fight, g_dm_form = -1, g_dm_hazards = -1;
 static FILE *g_dm_list;
 static uint64_t fighter_info_record(int id);
@@ -123,6 +124,7 @@ static void parse_match(const char *s) {
         if (!strcmp(k, "p1")) { g_dm.p[0] = fighter_kind_by_name(v); snprintf(g_dm_name[0], sizeof g_dm_name[0], "%s", v); }
         else if (!strcmp(k, "p2") && (!strcmp(v, "cpu") || !strcmp(v, "human"))) g_dm_p2type = !strcmp(v, "cpu");
         else if (!strcmp(k, "p2")) { g_dm.p[1] = fighter_kind_by_name(v); snprintf(g_dm_name[1], sizeof g_dm_name[1], "%s", v); }
+        else if (!strcmp(k, "p3") || !strcmp(k, "p4")) { int i = k[1] - '1'; g_dm.p[i] = fighter_kind_by_name(v); snprintf(g_dm_name[i], sizeof g_dm_name[i], "%s", v); }
         else if (!strcmp(k, "stage")) snprintf(g_dm.stage, sizeof g_dm.stage, "%s", v);
         else if (!strcmp(k, "form")) { g_dm.omega = !strcmp(v, "omega"); g_dm_form = !strcmp(v, "omega") ? 2 : !strcmp(v, "battlefield") ? 1 : 0; }
         else if (!strcmp(k, "hazards")) g_dm_hazards = !strcmp(v, "on");
@@ -236,7 +238,26 @@ static void match_player_hook(Ctx *c, void *user) {
         if (fgets(line, sizeof line, g_dm_list)) { line[strcspn(line, "\r\n")] = 0; if (line[0]) { g_dm_fight++; parse_match(line); } }
     }
     if (g_dm.stock > 0 && type_was != 3 && rd8(st + 5) == 1) wr8(st + 0xa, (uint8_t)g_dm.stock);   /* state + 5: rule kind (1 = stock), + 0xa: stocks -> record + 0x18 */
-    if (idx >= 0 && idx < 2 && g_dm_name[idx][0] && type_was != 3) {
+    if ((idx == 2 || idx == 3) && g_dm_name[idx][0] && g_dm_state1_ok) {      /* session 14: p3 / p4 = CPU players. An empty panel (type 3) takes player 2's state as the template */
+        static int mode = -1;
+        if (mode < 0) mode = getenv("SSBU_DEBUG_P34") ? atoi(getenv("SSBU_DEBUG_P34")) : 1;      /* 1 copy the whole state of player 2 (default), 2 only the fields known */
+        if (type_was == 3 || rd32(st + 0x78) != 1) {
+            if (mode == 1) for (int k = 0; k < (int)sizeof g_dm_state1; k++) wr8(st + (uint64_t)k, g_dm_state1[k]);
+            else { wr8(st + 5, g_dm_state1[5]); wr8(st + 0xa, g_dm_state1[0xa]); }
+            wr32(st + 0x78, 1);
+        }
+        char nm[64]; snprintf(nm, sizeof nm, "ui_chara_%s", g_dm_name[idx]);
+        wr64(st + 0x88, 0xc100000000000000ull | hash40(nm));
+        wr8(st + 0x90, (uint8_t)idx);                      /* colour: one per player */
+        if (g_dm.stock > 0 && rd8(st + 5) == 1) wr8(st + 0xa, (uint8_t)g_dm.stock);
+        if (g_dm.cpu > 0) { wr8(st + 0x91, (uint8_t)g_dm.cpu); wr32(st + 0x224, 0xffffffffu); }
+        g_dm_applied |= 1 << idx;
+        type_was = 1;
+    }
+    if (getenv("SSBU_DEBUG_STATEDUMP") && idx >= 0 && idx < 2) {       /* S20t: the panel state as the screens left it (find the Mii fields) */
+        char tag[48]; snprintf(tag, sizeof tag, "debug state: p%d ", idx); hex_lines(tag, st, 0x480); fflush(stdout);
+    }
+    if (idx >= 0 && idx < 2 && g_dm_name[idx][0] && type_was != 3 && !(getenv("SSBU_DEBUG_KEEP") && (atoi(getenv("SSBU_DEBUG_KEEP")) >> idx & 1))) {   /* SSBU_DEBUG_KEEP=<mask>: keep the screens' own choice for these players (S20t) */
         char nm[64]; snprintf(nm, sizeof nm, "ui_chara_%s", g_dm_name[idx]);
         wr64(st + 0x88, 0xc100000000000000ull | hash40(nm));
         if (idx == 1 && g_dm_p2type >= 0) wr32(st + 0x78, (uint32_t)g_dm_p2type);
@@ -260,6 +281,7 @@ static void match_player_hook(Ctx *c, void *user) {
         if (g_dm_hazards >= 0) wr8(0x7105309985ull, (uint8_t)g_dm_hazards);
         if (g_dm.items >= 0) wr32(MELEE_INFO + 0x54, g_dm.items ? 2u : 0u);
     }
+    if (idx == 1) g_dm_state1_ok = safe_read(st, g_dm_state1, sizeof g_dm_state1);
     g_orig_player_record(c);
     printf("debug match: player %d: screen choice %llx type %u level %u -> record %llx: ui_chara %llx, fighter kind %d, type %d, colour %d, cpu level %d\n", idx,
            (unsigned long long)was, type_was, rd32(st + 0x224), (unsigned long long)rec, (unsigned long long)rd64(rec), (int)(int8_t)rd8(rec + 8), rd8(rec + 0xa), rd8(rec + 0x19), rd8(rec + 0x79));

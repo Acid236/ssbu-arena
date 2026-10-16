@@ -201,7 +201,7 @@ def main():
         return job[0], r.returncode, (r.stdout + r.stderr)[-6000:]
 
     failed = 0
-    with concurrent.futures.ThreadPoolExecutor(8) as pool:
+    with concurrent.futures.ThreadPoolExecutor(int(os.environ.get('SSBU_BUILD_JOBS') or 8)) as pool:      # S18: SSBU_BUILD_JOBS=<n> compiles of one fighter at a time (default 8, as before)
         for s, code, err in pool.map(compile_one, jobs):
             if code or err.strip():
                 print('%s %s\n%s' % ('FAILED' if code else 'warnings in', os.path.relpath(s, STUDY), err))

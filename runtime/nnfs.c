@@ -530,6 +530,7 @@ extern int g_hitch_ms; void hitch_note(const char *s);      /* hitch.c: SSBU_HIT
 static uint64_t read_at(HANDLE h, int64_t offset, void *buf, uint64_t size) {
     uint64_t total = 0;
     if (g_hitch_ms) { char note[80]; snprintf(note, sizeof note, "read of %llu KB", (unsigned long long)(size >> 10)); hitch_note(note); }
+    { void r1_wrote(uint64_t, uint64_t); r1_wrote((uint64_t)(uintptr_t)buf, size); }   /* R1 (r1_state.c): the kernel's write into guest memory is marked (nothing without SSBU_R1_MARK) */
     while (total < size) {
         OVERLAPPED ov = {0};
         uint64_t pos = (uint64_t)offset + total;

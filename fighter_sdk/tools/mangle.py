@@ -6,6 +6,8 @@
                   'i' 'j' 'l' 'm' 'b' 'c' 'h' 's' 't' 'x' 'y' 'f' 'd'      built-in
                   ('ptr', T) ('ref', T) ('const', T) ('class', 'a::b::C')
 """
+import re
+
 BUILTIN = set('ijlmbchstxyfdvaw')
 
 
@@ -132,10 +134,21 @@ def is_member(path):
     return len(path) >= 3 and (path[0] == 'lua2cpp' or (path[0] == 'lib' and path[1] in ('L2CAgent', 'L2CValue', 'L2CTable')))
 
 
+def gvalue_name(sym):
+    """S20: 'math_pi' for the DATA symbol lib::L2CAgent::math_pi (a constant L2CValue of main), else None. Exactly
+    _ZN3lib8L2CAgent<n><name>E with nothing after: a function (math_abs(const L2CValue &)) has its parameters there."""
+    m = re.fullmatch(r'_ZN3lib8L2CAgent(\d+)(\w+)E', sym)
+    if not m or len(m.group(2)) != int(m.group(1)) or not m.group(2).startswith('math_'):
+        return None
+    return m.group(2)
+
+
 def is_static_value(path):
     """S3: static functions of the script classes that return an L2CValue through x8 and take NO `this`: at every
     call site in lua2cpp_common x0 is the first L2CValue argument (lib::L2CAgent::math_abs(const L2CValue &) ...)."""
     path = list(path)
+    if path[0] == 'app' and len(path) == 3 and path[2] == 'new_l2c_table':
+        return True                                      # S20: app::LinkEvent::new_l2c_table() etc.: a fresh table through x8
     return (path[:2] == ['lib', 'L2CAgent'] and len(path) == 3 and path[2].startswith('math_'))   # S9: lerp is NOT here: it is a member (x0 = this, unused; a, b, t in x1..x3)
 
 

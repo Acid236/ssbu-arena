@@ -18,12 +18,17 @@ BASE = os.path.join(STUDY, 'fighters_bin')
 DBG = os.path.join(STUDY, 'tests', 's13_final_dbg.txt')
 
 
-def run_game(tag, binname, seq, match, extra=(), frames='2300', secs='420'):
-    env = dict(os.environ, S11_SECS=secs)
+def run_game(tag, binname, seq, match, extra=(), frames='2300', secs='200'):
+    env = dict(os.environ, S11_SECS=secs, S11_RESULTS_MOD=match.split(',')[0].split('=')[1])
     args = [sys.executable, os.path.join(STUDY, 'tests', 's11_run.py'), tag, binname, seq, '0', 'SSBU_DEBUG_MATCH=' + match, 'SSBU_DETERMINISTIC=1',
             'SSBU_VK_PREP=0', 'SSBU_DEBUG_END=' + frames] + list(extra)
-    r = subprocess.run(args, capture_output=True, text=True, cwd=STUDY, env=env)
-    return (r.stdout.strip().splitlines() or ['?'])[-1]
+    for attempt in range(2):         # a game that never reaches the fight (menu sequence lost, 'hash lines 0') is run once more
+        r = subprocess.run(args, capture_output=True, text=True, cwd=STUDY, env=env)
+        line = (r.stdout.strip().splitlines() or ['?'])[-1]
+        if 'hash lines 0 ' not in line and 'TIMEOUT' not in line:
+            break
+        line += ' [RERUN]'
+    return line
 
 
 def status_names(f):
@@ -136,7 +141,7 @@ def orig(f):
 
 
 def normal(a, b, k):
-    env = dict(os.environ, S11_SECS='480')
+    env = dict(os.environ, S11_SECS='480', S11_RESULTS_MOD=a)
     tag = 'n13_%d_%s_%s' % (k, a, b)
     args = [sys.executable, os.path.join(STUDY, 'tests', 's11_run.py'), tag, '-', 'seq_battle_play.txt', '0',
             'SSBU_DEBUG_MATCH=p1=%s,p2=%s,stage=end,cpu=9,stock=1' % (a, b), 'SSBU_SPEED=1', 'SSBU_SKIP_MOVIES=(unset)', 'SSBU_AUDIO_MUTE=(unset)', 'SSBU_FIXED_SEED=(unset)']

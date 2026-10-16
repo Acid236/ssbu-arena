@@ -666,6 +666,9 @@ static uint64_t ww_newest(const uint8_t *p, size_t n) {
     for (uint64_t pg = first; pg <= last; pg++) { uint64_t *s = ww_slot(pg, 0); if (s && *s > newest) newest = *s; }
     return newest;
 }
+/* Round 16 (nvn_vk_draw.c, SSBU_VK_CBKEEP): the same question for any guest range: has the CPU written a page of it since
+ * the stamp the caller remembers? 0 = the memory is not write-watched. Render thread only. */
+uint64_t nvn_front_mem_newest(const void *p, size_t n) { return ww_newest(p, n); }
 
 static void tex_upload_memory(Tex *t, const Fmt *f) {
     static uint8_t *tmp;
@@ -1990,9 +1993,52 @@ static List *g_lists;
 static int g_list_count, g_list_cap, *g_list_free, g_list_free_n;
 static SRWLOCK g_list_lock = SRWLOCK_INIT;
 
+/* Track R1 round 5 (run-ahead, r1_state.c): every command buffer's host record is listed, so that a restore of the game's
+ * state can put the recordings in progress back as they were at the save (the commands recorded so far are host data:
+ * without this a speculative pass's commands would stay in the buffer and be submitted again by the real pass, or the
+ * commands recorded before the save would be gone after the speculative pass ended the buffer). */
+static CmdBuf *g_all_cb[512]; static int g_all_cb_n; static SRWLOCK g_all_cb_lock = SRWLOCK_INIT;
+static CmdBuf *cb_new(uint64_t g) {
+    CmdBuf *cb = hnew(g, K_CMD, sizeof(CmdBuf));
+    AcquireSRWLockExclusive(&g_all_cb_lock);
+    int i; for (i = 0; i < g_all_cb_n && g_all_cb[i]; i++) {}
+    if (i < 512) { g_all_cb[i] = cb; if (i == g_all_cb_n) g_all_cb_n++; }
+    ReleaseSRWLockExclusive(&g_all_cb_lock);
+    return cb;
+}
+static void cb_forget(CmdBuf *cb) { AcquireSRWLockExclusive(&g_all_cb_lock); for (int i = 0; i < g_all_cb_n; i++) if (g_all_cb[i] == cb) g_all_cb[i] = NULL; ReleaseSRWLockExclusive(&g_all_cb_lock); }
+typedef struct { CmdBuf *cb, copy; uint8_t *data; size_t cap; } CbSave;
+static CbSave g_cbs[512]; static int g_ncbs;
+size_t nvn_r1_cb_save(void) {                      /* the guest threads are held */
+    size_t bytes = 0;
+    AcquireSRWLockShared(&g_all_cb_lock);
+    g_ncbs = g_all_cb_n;
+    for (int i = 0; i < g_ncbs; i++) {
+        CbSave *s = &g_cbs[i]; CmdBuf *cb = g_all_cb[i];
+        s->cb = cb;
+        if (!cb) continue;
+        s->copy = *cb;
+        if (cb->len) { if (s->cap < cb->len) { s->cap = cb->len + 65536; s->data = realloc(s->data, s->cap); } memcpy(s->data, cb->data, cb->len); bytes += cb->len; }
+    }
+    ReleaseSRWLockShared(&g_all_cb_lock);
+    return bytes;
+}
+void nvn_r1_cb_restore(void) {
+    AcquireSRWLockShared(&g_all_cb_lock);
+    for (int i = 0; i < g_ncbs; i++) {
+        CbSave *s = &g_cbs[i]; CmdBuf *cb = s->cb;
+        if (!cb || g_all_cb[i] != cb) continue;           /* finalized meanwhile */
+        uint8_t *d = cb->data; size_t cap = cb->cap;       /* (the saved record's buffer may belong to a list now: never reused) */
+        *cb = s->copy;
+        if (s->copy.len && cap < s->copy.len) { cap = s->copy.len + 65536; d = realloc(d, cap); }
+        if (s->copy.len) memcpy(d, s->data, s->copy.len);
+        cb->data = d; cb->cap = cap;
+    }
+    ReleaseSRWLockShared(&g_all_cb_lock);
+}
 static CmdBuf *cb_get(uint64_t g) {
     CmdBuf *cb = hobj(g, K_CMD);
-    return cb ? cb : hnew(g, K_CMD, sizeof(CmdBuf));
+    return cb ? cb : cb_new(g);
 }
 /* Appends a command with x1..x7 as its arguments and room for `blob` more bytes; returns it (valid until the next append). */
 static Cmd *rec(Ctx *c, uint32_t op, size_t blob) {
@@ -2777,13 +2823,25 @@ static void blit_tex(Tex *src, const View *sv, const int *sr, Tex *dst, const Vi
 
 static void replay(uint64_t handle, int depth);
 static void save_bmp(const char *path, Tex *t);
+/* Round 17, TEST ONLY (nvn_dt.h): SSBU_DRAWTAG=1 with SSBU_SHOT_FIGHT: the submissions the game queues between the pad poll
+ * that reached a wanted fight frame and the present that is saved are "tagged": g_draw_tag = that fight frame while the
+ * render thread replays them (set by a job queued before the submission, cleared by the back end at the present). */
+#include "nvn_dt.h"
+static int g_draw_tag, g_dt_idx;                 /* render thread */
+volatile LONG g_drawtag_next;                    /* game thread: the fight frame the next submission belongs to, 0 = not tagged */
+static void *dt_host(uint64_t a) { return P(a); }
+static int drawtag_env(void) { static int on = -1; if (on < 0) on = getenv("SSBU_DRAWTAG") != NULL; return on; }
+static void job_drawtag(void *arg) { int n = *(int *)arg; if (g_draw_tag != n) { g_draw_tag = n; g_dt_idx = 0; printf("DT begin: the commands of fight frame %d (%s)\n", n, g_vk ? "Vulkan" : "OpenGL"); } }
+int nvn_front_draw_tag(void) { return g_draw_tag; }
+int nvn_front_draw_tag_next(void) { return g_dt_idx++; }
+void nvn_front_draw_tag_clear(void) { if (g_draw_tag) { printf("DT end: fight frame %d, %d draw commands\n", g_draw_tag, g_dt_idx); g_draw_tag = 0; } }
 /* Debug aid SSBU_DRAWSHOT=<frame>: the colour target after every draw of that frame, as draw_<n>.bmp. */
 static void draw_shot(void) {
     static int want = -2;
     Tex fake;
     char path[64];
     if (want == -2) want = getenv("SSBU_DRAWSHOT") ? atoi(getenv("SSBU_DRAWSHOT")) : -1;
-    if (g_st.frames != want || !S.fbo_w) return;
+    if ((g_st.frames != want && !(g_draw_tag && getenv("SSBU_DRAWSHOT_BOX"))) || !S.fbo_w) return;      /* round 17: with SSBU_DRAWTAG the box aid follows the tagged fight frame */
     {   /* SSBU_DRAWSHOT_BOX=x,y,w,h (in 1920x1080 picture coordinates): no files; one line per draw that CHANGED the mean
          * colour of that box of its colour target (finds the draws that paint a given place of the screen) */
         static int box[4] = {-1, 0, 0, 0};
@@ -2801,7 +2859,7 @@ static void draw_shot(void) {
             for (int k = 0; k < 4; k++) m[k] /= (double)(w * h);
             free(px);
             if (last_fbo != S.fbo || m[0] != last[0] || m[1] != last[1] || m[2] != last[2] || m[3] != last[3])
-                printf("  BOX: draw %d fbo %u (%dx%d): mean RGBA of the box %.2f %.2f %.2f %.2f%s\n", g_frame_draw_index - 1, S.fbo, S.fbo_w, S.fbo_h, m[0], m[1], m[2], m[3], last_fbo != S.fbo ? "  (first draw seen on this target)" : "  CHANGED");
+                printf("  BOX: draw %d (DT %d) fbo %u (%dx%d): mean RGBA of the box %.2f %.2f %.2f %.2f%s\n", g_frame_draw_index - 1, g_dt_idx - 1, S.fbo, S.fbo_w, S.fbo_h, m[0], m[1], m[2], m[3], last_fbo != S.fbo ? "  (first draw seen on this target)" : "  CHANGED");
             last_fbo = S.fbo; memcpy(last, m, sizeof last);
             return;
         }
@@ -3046,6 +3104,7 @@ static void exec(const Cmd *m, int depth) {
         int ok;
         { HS_IN("draw state (pipeline, bindings)", 0); ok = draw_prepare(); HS_OUT(); }
         pf_add(PF_PREP, pf0);
+        if (g_draw_tag) dt_line("gl", g_draw_tag, g_dt_idx++, ok, (unsigned)a[0], -1, (int)a[2], 0, (long long)a[1], (unsigned)a[3], (unsigned)a[4], S.prog, S.nattr, S.vattr, S.vbuf, (const uint32_t *)S.vstream, S.ubo, S.ssbo, dt_host);
         if (!ok) { g_st.draws_skipped++; g_frame_skipped++; break; }
         if (drawlog_now()) printf("  DrawArrays mode %d first %d count %d base instance %d instances %d%c", (int)a[0], (int)a[1], (int)a[2], (int)a[3], (int)a[4], 10);
         drawlog_begin();
@@ -3067,6 +3126,7 @@ static void exec(const Cmd *m, int depth) {
         LONG64 pf0 = pf_now();
         int ok;
         { HS_IN("draw state (pipeline, bindings)", 0); ok = count > 0 && a[3] && draw_prepare(); HS_OUT(); }
+        if (g_draw_tag) dt_line("gl", g_draw_tag, g_dt_idx++, ok, (unsigned)a[0], (int)t, count, a[3], (long long)(int32_t)a[4], (unsigned)a[5], (unsigned)a[6], S.prog, S.nattr, S.vattr, S.vbuf, (const uint32_t *)S.vstream, S.ubo, S.ssbo, dt_host);
         if (!ok) { pf_add(PF_PREP, pf0); g_st.draws_skipped++; g_frame_skipped++; break; }
         size_t off = arena_put(a[3], (uint64_t)count << t);
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER_, g_arena);
@@ -3085,7 +3145,8 @@ static void exec(const Cmd *m, int depth) {
         g_st.draws++; g_frame_draws++; count_dummy_samples();
         break;
     }
-    case OP_COPY_BUF_TEX: {                    /* a0 buffer address, a1 texture, a4 flags, a5 row stride; blob: view, region */
+    case OP_COPY_BUF_TEX: {                    /* a0 buffer address, a1 texture, a4 flags, a5 / a6 row / image stride of its command buffer; blob: view, region */
+        /* PR #14 (xtlg511): replay with the strides recorded in the command (a5/a6), not the running S.row_stride/S.image_stride */
         Tex *t = P(a[1]);
         View v;
         Fmt f;
@@ -3107,11 +3168,12 @@ static void exec(const Cmd *m, int depth) {
                 seen[nseen].fmt = t->b.format; seen[nseen].w = t->b.width; seen[nseen++].h = t->b.height;
                 printf("nvn_gl: CopyBufferToTexture into %dx%dx%d format 0x%x target %d levels %d flags 0x%x swizzle %d%d%d%d: region %d,%d,%d %dx%dx%d level %d layer %d, row stride %lld, %zu of %zu source bytes non-zero\n",
                        t->b.width, t->b.height, t->b.depth, t->b.format, t->b.target, t->b.levels, t->b.flags, t->b.swz[0], t->b.swz[1], t->b.swz[2], t->b.swz[3],
-                       r[0], r[1], r[2], r[3], r[4], r[5], level, layer, (long long)S.row_stride, nz, bytes);
+                       r[0], r[1], r[2], r[3], r[4], r[5], level, layer, (long long)a[5], nz, bytes);     /* PR #14 (xtlg511): the command's own row stride */
             }
         }
-        if (S.row_stride && f.kind != 4) glPixelStorei(GL_UNPACK_ROW_LENGTH_, (GLint)(S.row_stride / f.bpb));      /* nvnCommandBufferSetCopyRowStride */
-        if (S.image_stride && S.row_stride && f.kind != 4) glPixelStorei(0x806E /* UNPACK_IMAGE_HEIGHT */, (GLint)(S.image_stride / S.row_stride));   /* SetCopyImageStride */
+        /* PR #14 (xtlg511): the strides of the command buffer that recorded this copy (a5 / a6), not the running S state */
+        if (a[5] && f.kind != 4) glPixelStorei(GL_UNPACK_ROW_LENGTH_, (GLint)((int64_t)a[5] / f.bpb));      /* nvnCommandBufferSetCopyRowStride */
+        if (a[6] && a[5] && f.kind != 4) glPixelStorei(0x806E /* UNPACK_IMAGE_HEIGHT */, (GLint)((int64_t)a[6] / (int64_t)a[5]));   /* SetCopyImageStride */
         if (t->b.target != 2 && t->b.target != 4 && t->b.target != 9 && t->b.target != 8) layer = 0;
         else if (t->b.target != 2) layer += r[2];
         tex_put(t, &f, level, layer, r[0], r[1], r[2], r[3], r[4], r[5] > 0 ? r[5] : 1, P(a[0]));
@@ -3139,7 +3201,7 @@ static void exec(const Cmd *m, int depth) {
         blit_tex(s, NULL, sr, d, NULL, dr, 0);
         break;
     }
-    case OP_COPY_TEX_BUF: {                    /* a0 texture, a3 buffer address; blob: view, region */
+    case OP_COPY_TEX_BUF: {                    /* a0 texture, a3 buffer address, a5 / a6 row / image stride of its command buffer; blob: view, region */
         Tex *t = P(a[0]);
         View v;
         Fmt f;
@@ -3152,8 +3214,9 @@ static void exec(const Cmd *m, int depth) {
         size_t bytes = ((size_t)(r[3] + f.bw - 1) / f.bw) * ((size_t)(r[4] + f.bh - 1) / f.bh) * f.bpb * (size_t)d;
         glPixelStorei(GL_PACK_ALIGNMENT, 1);
         compute_flush();
-        if (S.row_stride && f.kind != 4) { glPixelStorei(0x0D02 /* PACK_ROW_LENGTH */, (GLint)(S.row_stride / f.bpb)); bytes = (size_t)S.row_stride * (size_t)r[4] * (size_t)d; }
-        if (S.image_stride && S.row_stride && f.kind != 4) { glPixelStorei(0x806C /* PACK_IMAGE_HEIGHT */, (GLint)(S.image_stride / S.row_stride)); bytes = (size_t)S.image_stride * (size_t)d; }
+        /* PR #14 (xtlg511): the strides of the command buffer that recorded this copy (a5 / a6), not the running S state */
+        if (a[5] && f.kind != 4) { glPixelStorei(0x0D02 /* PACK_ROW_LENGTH */, (GLint)((int64_t)a[5] / f.bpb)); bytes = (size_t)a[5] * (size_t)r[4] * (size_t)d; }
+        if (a[6] && a[5] && f.kind != 4) { glPixelStorei(0x806C /* PACK_IMAGE_HEIGHT */, (GLint)((int64_t)a[6] / (int64_t)a[5])); bytes = (size_t)a[6] * (size_t)d; }
         if (f.kind == 4) glGetCompressedTextureSubImage(t->o.gl, level, r[0], r[1], z, r[3], r[4], d, (GLsizei)bytes, P(a[3]));
         else glGetTextureSubImage(t->o.gl, level, r[0], r[1], z, r[3], r[4], d, f.format, f.type, (GLsizei)bytes, P(a[3]));
         glPixelStorei(0x0D02, 0); glPixelStorei(0x806C, 0);
@@ -3164,7 +3227,7 @@ static void exec(const Cmd *m, int depth) {
     case OP_COPY_BUF_BUF: if (a[0] && a[1]) memmove(P(a[1]), P(a[0]), (size_t)a[2]); g_arena_gen++; break;
     case OP_UPDATE_UBO: if (a[0]) memcpy((uint8_t *)P(a[0]) + a[2], blob, (size_t)a[3]); g_arena_gen++; break;
     case OP_CLEAR_BUF: if (a[0]) { uint32_t v = (uint32_t)a[2]; for (uint64_t i = 0; i + 4 <= a[1]; i += 4) memcpy((uint8_t *)P(a[0]) + i, &v, 4); } g_arena_gen++; break;
-    case OP_ROWSTRIDE: S.row_stride = (int64_t)a[0]; break;
+    case OP_ROWSTRIDE: S.row_stride = (int64_t)a[0]; break;      /* PR #14 (xtlg511): no longer read by the copies (they carry their own strides); kept as state */
     case OP_IMAGESTRIDE: S.image_stride = (int64_t)a[0]; break;
     case OP_DEPTHBOUNDS: {                     /* depth bounds test: fragments pass when the depth already in the buffer is inside [near, far] */
         float v[2];
@@ -3502,6 +3565,8 @@ static void job_present(void *arg) {
         glBlitFramebuffer(sr[0], sr[1], sr[0] + sr[2], sr[1] + sr[3], 0, r.bottom, r.right, 0, GL_COLOR_BUFFER_BIT, GL_LINEAR);
         if (g_drawlog_frame >= 0 && frame == g_drawlog_frame + 1) save_bmp("frame_drawlog.bmp", t);      /* the frame the draw log describes */
         { int step = nvn_front_take_step_shot(); if (step) { char path[300]; const char *dir = getenv("SSBU_SHOT_DIR"); snprintf(path, sizeof path, "%s%sstep_%03d.bmp", dir ? dir : "", dir ? "/" : "", step - 1); save_bmp(path, t); } }
+        nvn_front_draw_tag_clear();
+        if (j->shot_fight) { char path[300]; const char *dir = getenv("SSBU_SHOT_DIR"); snprintf(path, sizeof path, "%s%sfight_%05d.bmp", dir ? dir : "", dir ? "/" : "", j->shot_fight); save_bmp(path, t); printf("shot: fight frame %d saved at presented frame %lld (OpenGL)\n", j->shot_fight, (long long)frame); }
         if (frame == shot || (every > 0 && frame >= shot_from && frame % every == 0)) {
             char path[300];
             const char *dir = getenv("SSBU_SHOT_DIR");                /* default: the current directory */
@@ -3610,6 +3675,12 @@ static DWORD WINAPI render_thread(LPVOID arg) {
     g_joblog_frame = getenv("SSBU_JOBLOG") ? atoi(getenv("SSBU_JOBLOG")) : 0;
     PIXELFORMATDESCRIPTOR pfd;
     g_render_tid = GetCurrentThreadId();
+    {   /* Round 17, MEASUREMENT: SSBU_RENDER_PRIO=1 above normal, 2 highest (default: normal, as before). The game's own
+         * threads run above normal when the game asked for a priority under 16 (os_threads.c host_priority). */
+        const char *e = getenv("SSBU_RENDER_PRIO");
+        int p = e ? atoi(e) : 0;
+        if (p > 0) { SetThreadPriority(GetCurrentThread(), p >= 2 ? THREAD_PRIORITY_HIGHEST : THREAD_PRIORITY_ABOVE_NORMAL); printf("nvn: render thread priority %s (SSBU_RENDER_PRIO)\n", p >= 2 ? "highest" : "above normal"); }
+    }
     if (g_vk) {                                 /* V1 step S0: no OpenGL context, no shader workers; the jobs go to nvn_vk.c (vk_route) */
         nvn_vk_init(g_hwnd);
         hitch_set_render();
@@ -3707,6 +3778,7 @@ void nvn_gl_start(void *hwnd) {
     InitializeCriticalSection(&g_dead_lock);
     g_job_event = CreateEventA(NULL, FALSE, FALSE, NULL);
     g_ready_event = CreateEventA(NULL, TRUE, FALSE, NULL);
+    { const char *e = getenv("SSBU_STACKS_AT"); void nvn_vk_stacks_at(int seconds); if (e && atoi(e) > 0) nvn_vk_stacks_at(atoi(e)); }      /* session 13, TEST: every thread's call stack once, that many seconds from here, with either renderer (nvn_vk_wd.c) */
     CreateThread(NULL, 16 << 20, render_thread, NULL, 0, NULL);
     WaitForSingleObject(g_ready_event, INFINITE);
 }
@@ -4202,18 +4274,23 @@ static void vstream_stride(Ctx *c) { wr32(A0, (uint32_t)A1); }
 static void vstream_divisor(Ctx *c) { wr32(A0 + 4, (uint32_t)A1); }
 
 /* ---- command buffers: recording */
-static void cmd_initialize(Ctx *c) { hnew(A0, K_CMD, sizeof(CmdBuf)); RET(1); }
-static void cmd_finalize(Ctx *c) { CmdBuf *cb = hobj(A0, K_CMD); if (cb) { free(cb->data); free(cb); wr32(A0 + 8, 0); } }
+static void cmd_initialize(Ctx *c) { cb_new(A0); RET(1); }
+static void cmd_finalize(Ctx *c) { CmdBuf *cb = hobj(A0, K_CMD); if (cb) { cb_forget(cb); free(cb->data); free(cb); wr32(A0 + 8, 0); } }
 static void cmd_add_command_memory(Ctx *c) { CmdBuf *cb = cb_get(A0); cb->cmd_size = A3; cb->cmd_used = 0; }       /* (cmdbuf, pool, offset, size): a new block replaces the current one */
 static void cmd_add_control_memory(Ctx *c) { CmdBuf *cb = cb_get(A0); cb->ctrl_size = A2; cb->ctrl_used = 0; }     /* (cmdbuf, memory, size) */
 static void cmd_get_command_size(Ctx *c) { RET(cb_get(A0)->cmd_size); }
 static void cmd_get_control_size(Ctx *c) { RET(cb_get(A0)->ctrl_size); }
 static void cmd_is_recording(Ctx *c) { RET(cb_get(A0)->recording); }
-static void cmd_begin(Ctx *c) { CmdBuf *cb = cb_get(A0); cb->len = 0; cb->recording = 1; cb->rec_cmd = cb->rec_ctrl = 0; cb->dispatches = 0; }
+/* L1 round 2, TEST ONLY (SSBU_L1_TRACE=1 with SSBU_L1=1): for the 5 presents after the first press, every command-buffer
+ * recording, submission, fence, sync wait, window acquire and present, with the guest thread name and the guest return address. */
+int display_l1_trace(void); double display_l1_ms(void); const char *guest_thread_name_of(unsigned long tid);
+#define L1T(...) do { if (display_l1_trace()) { char l1b_[240]; snprintf(l1b_, sizeof l1b_, __VA_ARGS__); printf("l1-trace: %+8.2f %-26s lr %09llx %s%c", display_l1_ms(), guest_thread_name_of(GetCurrentThreadId()) ? guest_thread_name_of(GetCurrentThreadId()) : "?", (unsigned long long)c->x[30], l1b_, 10); } } while (0)
+static void cmd_begin(Ctx *c) { L1T("begin recording cb %llx", (unsigned long long)A0); CmdBuf *cb = cb_get(A0); cb->len = 0; cb->recording = 1; cb->rec_cmd = cb->rec_ctrl = 0; cb->dispatches = 0; }
 static void cmd_end(Ctx *c) {
     CmdBuf *cb = cb_get(A0);
     cb->ctrl_used += 32; cb->rec_ctrl += 32;
     uint64_t h = list_register(cb->data, cb->len, (uint32_t)cb->rec_cmd, (uint32_t)cb->rec_ctrl, (uint32_t)cb->dispatches);
+    L1T("end recording cb %llx -> list %llx (%u bytes, %u dispatches)", (unsigned long long)A0, (unsigned long long)h, (unsigned)cb->len, (unsigned)cb->dispatches);
     cb->data = NULL; cb->len = cb->cap = 0; cb->recording = 0;
     RET(h);
 }
@@ -4310,7 +4387,11 @@ static void cmd_copy_buf_tex(Ctx *c) {                  /* (cmdbuf, buffer, text
     uint64_t view = A3, region = A4;
     Tex *t = hobj(A2, K_TEX);
     Cmd *m = rec(c, OP_COPY_BUF_TEX, 48);
-    m->a[1] = (uint64_t)(uintptr_t)t; m->a[5] = 0;
+    CmdBuf *cb = cb_get(A0);
+    /* PR #14 (xtlg511): the copy takes the strides this command buffer has now (SetCopyRowStride / SetCopyImageStride), as
+     * NVN does: at replay the running stride state may come from another command buffer's copies (a 320x320 upload read with
+     * the 832-texel rows of a stage preview read past its buffer: the crash after a random stage choice) */
+    m->a[1] = (uint64_t)(uintptr_t)t; m->a[5] = (uint64_t)cb->row_stride; m->a[6] = (uint64_t)cb->image_stride;
     memset(BLOB(m), 0, 48);
     if (view) memcpy(BLOB(m), P(view), sizeof(View));
     if (region) memcpy(BLOB(m) + 24, P(region), 24);
@@ -4330,7 +4411,8 @@ static void cmd_copy_tex_buf(Ctx *c) {                  /* (cmdbuf, texture, vie
     uint64_t view = A2, region = A3;
     Tex *t = hobj(A1, K_TEX);
     Cmd *m = rec(c, OP_COPY_TEX_BUF, 48);
-    m->a[0] = (uint64_t)(uintptr_t)t; m->a[3] = c->x[4];
+    CmdBuf *cb = cb_get(A0);
+    m->a[0] = (uint64_t)(uintptr_t)t; m->a[3] = c->x[4]; m->a[5] = (uint64_t)cb->row_stride; m->a[6] = (uint64_t)cb->image_stride;   /* PR #14 (xtlg511): as cmd_copy_buf_tex */
     memset(BLOB(m), 0, 48);
     if (view) memcpy(BLOB(m), P(view), sizeof(View));
     if (region) memcpy(BLOB(m) + 24, P(region), 24);
@@ -4354,9 +4436,117 @@ static void cmd_images(Ctx *c) {                        /* (cmdbuf, stage, first
     if (src) memcpy(BLOB(m), P(src), (size_t)n * 8); else memset(BLOB(m), 0, (size_t)n * 8);
 }
 
+/* Round 18, TEST ONLY (SSBU_RACECHK=1): does guest memory that submitted commands NAME (uniform / storage / vertex
+ * ranges) change between nvnQueueSubmitCommands on the game's thread and the replay on the render thread? The submit
+ * walks the lists and keeps a hash of every range (and the first 512 bytes of a uniform range); the back end calls
+ * nvn_front_racechk at the start (phase 1) and at the end (phase 2) of the replay of the same batch, which walks them
+ * again and compares. Lines "racechk:". Nothing runs without the variable. */
+typedef struct RaceRec { struct RaceRec *next; int n, cap, ncs, capcs; LONG64 frame; uint64_t *h; uint8_t *copy; Range *cs; } RaceRec;      /* cs: every storage range of the batch (what a dispatch may write) */
+static int race_is_storage(const RaceRec *r, const Range *g) { for (int i = 0; i < r->ncs; i++) if (g->addr < r->cs[i].addr + r->cs[i].size && r->cs[i].addr < g->addr + g->size) return 1; return 0; }
+static RaceRec *g_race_head, *g_race_tail;
+static SRWLOCK g_race_lock = SRWLOCK_INIT;
+static LONG64 g_race_stat[3][3], g_race_batches, g_race_bad_batches[3];      /* [uniform, storage, vertex][ranges seen, changed before the replay, changed during it] */
+static int racechk_env(void) { static int on = -1; if (on < 0) on = getenv("SSBU_RACECHK") != NULL; return on; }
+static uint64_t race_fnv(const uint8_t *b, size_t n) { uint64_t h = 0xcbf29ce484222325ULL; for (size_t i = 0; i < n; i++) h = (h ^ b[i]) * 0x100000001B3ULL; return h; }
+static void race_walk(uint64_t handle, int depth, RaceRec *r, int phase, int *pos, int *bad) {
+    size_t len = 0;
+    uint8_t *data = list_lookup(handle, &len);
+    if (!data) return;
+    for (size_t off = 0; off + sizeof(Cmd) <= len;) {
+        const Cmd *m = (const Cmd *)(data + off);
+        if (m->size < sizeof(Cmd)) break;
+        off += m->size;
+        if (m->op == OP_CALL) { for (int i = 0; i < (int)m->a[0]; i++) { uint64_t h; memcpy(&h, BLOB(m) + i * 8, 8); if (depth < 8) race_walk(h, depth + 1, r, phase, pos, bad); } continue; }
+        if (m->op != OP_UBO && m->op != OP_SSBO && m->op != OP_VBUF) continue;
+        int kind = m->op == OP_UBO ? 0 : m->op == OP_SSBO ? 1 : 2, count = m->op == OP_VBUF ? (int)m->a[1] : (int)m->a[2];
+        size_t cap = kind == 0 ? 65536 : kind == 1 ? 16384 : 4096;
+        for (int i = 0; i < count; i++) {
+            Range g;
+            memcpy(&g, BLOB(m) + i * 16, 16);
+            if (!g.addr || !g.size || g.addr < 0x1000) continue;
+            size_t n = g.size > cap ? cap : (size_t)g.size, nc = n > 512 ? 512 : n;
+            const uint8_t *p = P(g.addr);
+            uint64_t h = race_fnv(p, n);
+            if (phase == 0) {
+                if (r->n == r->cap) { r->cap = r->cap ? r->cap * 2 : 1024; r->h = realloc(r->h, (size_t)r->cap * 8); r->copy = realloc(r->copy, (size_t)r->cap * 512); }
+                r->h[r->n] = h;
+                if (kind == 0) memcpy(r->copy + (size_t)r->n * 512, p, nc);
+                r->n++;
+                if (kind == 1) { if (r->ncs == r->capcs) { r->capcs = r->capcs ? r->capcs * 2 : 256; r->cs = realloc(r->cs, (size_t)r->capcs * sizeof(Range)); } r->cs[r->ncs++] = g; }
+                continue;
+            }
+            int k = (*pos)++;
+            if (k >= r->n) continue;
+            if (phase == 1) g_race_stat[kind][0]++;
+            if (r->h[k] == h) continue;
+            r->h[k] = h;                                 /* phase 2 then reports only what changed during the replay */
+            g_race_stat[kind][phase]++; bad[kind]++;
+            static int shown, shown_cs;
+            static LONG64 plain[3];
+            int is_cs = kind != 0 && race_is_storage(r, &g);      /* a storage range of this batch: a dispatch's target, written by our own copy-back */
+            if (kind == 2 && !is_cs) { plain[phase]++; if (plain[phase] % 200 == 1) printf("racechk: vertex ranges that are NOT a storage range of their batch and changed: %lld before the replay, %lld during it (so far)\n", (long long)plain[1], (long long)plain[2]); }
+            if (is_cs ? shown_cs++ < 12 : shown < 400) {
+                if (!is_cs) shown++;
+                if (is_cs) printf("racechk: (a storage range of this batch) ");
+                printf("racechk: frame %lld %s range %d of the batch (%s, stage/first %d, slot %d) guest %llx+%llu CHANGED %s", (long long)g_st.frames, kind == 0 ? "UNIFORM" : kind == 1 ? "storage" : "vertex", k,
+                       k_op_name[m->op], (int)m->a[0], (int)(m->op == OP_VBUF ? m->a[0] : m->a[1]) + i, (unsigned long long)g.addr, (unsigned long long)g.size, phase == 1 ? "between the submit and the start of its replay" : "DURING its replay");
+                if (kind == 0) {
+                    const uint8_t *o = r->copy + (size_t)k * 512;
+                    size_t d = 0;
+                    while (d < nc && o[d] == p[d]) d++;
+                    if (d < nc) { d &= ~(size_t)3; printf("; first difference at +%llu: at submit %08x %08x %08x %08x, now %08x %08x %08x %08x", (unsigned long long)d, *(const uint32_t *)(o + d), d + 8 <= nc ? *(const uint32_t *)(o + d + 4) : 0, d + 12 <= nc ? *(const uint32_t *)(o + d + 8) : 0, d + 16 <= nc ? *(const uint32_t *)(o + d + 12) : 0,
+                                                       *(const uint32_t *)(p + d), d + 8 <= nc ? *(const uint32_t *)(p + d + 4) : 0, d + 12 <= nc ? *(const uint32_t *)(p + d + 8) : 0, d + 16 <= nc ? *(const uint32_t *)(p + d + 12) : 0); }
+                    else printf("; the difference is after the first 512 bytes");
+                    memcpy(r->copy + (size_t)k * 512, p, nc);
+                }
+                printf("\n");
+            }
+        }
+    }
+}
+static void racechk_submit(const uint64_t *handles, int count) {      /* the game's thread */
+    RaceRec *r = calloc(1, sizeof *r);
+    int pos = 0, bad[3] = {0, 0, 0};
+    r->frame = g_st.frames;
+    for (int i = 0; i < count; i++) race_walk(handles[i], 0, r, 0, &pos, bad);
+    AcquireSRWLockExclusive(&g_race_lock);
+    if (g_race_tail) g_race_tail->next = r; else g_race_head = r;
+    g_race_tail = r;
+    ReleaseSRWLockExclusive(&g_race_lock);
+}
+void nvn_front_racechk(const uint64_t *handles, int count, int phase) {      /* render thread: 1 = before the replay of the oldest recorded batch, 2 = after it */
+    if (!racechk_env()) return;
+    AcquireSRWLockExclusive(&g_race_lock);
+    RaceRec *r = g_race_head;
+    if (r && phase == 2) { g_race_head = r->next; if (!g_race_head) g_race_tail = NULL; }
+    ReleaseSRWLockExclusive(&g_race_lock);
+    if (!r) return;
+    int pos = 0, bad[3] = {0, 0, 0};
+    for (int i = 0; i < count; i++) race_walk(handles[i], 0, r, phase, &pos, bad);
+    for (int k = 0; k < 3; k++) if (bad[k]) g_race_bad_batches[k]++;
+    if (phase == 1) g_race_batches++;
+    if (phase == 2) {
+        static LONG64 last;
+        if (g_st.frames - last >= 300) {
+            last = g_st.frames;
+            printf("racechk: totals at frame %lld: %lld batches | uniform ranges %lld, changed before the replay %lld, during %lld | storage %lld / %lld / %lld | vertex (first 4 KB) %lld / %lld / %lld | batches with a changed uniform / storage / vertex range: %lld / %lld / %lld\n",
+                   (long long)g_st.frames, (long long)g_race_batches, (long long)g_race_stat[0][0], (long long)g_race_stat[0][1], (long long)g_race_stat[0][2], (long long)g_race_stat[1][0], (long long)g_race_stat[1][1], (long long)g_race_stat[1][2],
+                   (long long)g_race_stat[2][0], (long long)g_race_stat[2][1], (long long)g_race_stat[2][2], (long long)g_race_bad_batches[0], (long long)g_race_bad_batches[1], (long long)g_race_bad_batches[2]);
+        }
+        free(r->h); free(r->copy); free(r->cs); free(r);
+    }
+}
+
 /* ---- queue and window */
+static void l1_pipe_after_submit(void); static int l1_pipe_wait(void);
 static void queue_submit(Ctx *c) {                      /* (queue, count, handles) */
     SubmitJob j = {(int)A1, P(A2)};
+    L1T("SUBMIT %d lists: %llx %llx %llx %llx", (int)A1, A2 && A1 > 0 ? (unsigned long long)rd64(A2) : 0ull, A2 && A1 > 1 ? (unsigned long long)rd64(A2 + 8) : 0ull, A2 && A1 > 2 ? (unsigned long long)rd64(A2 + 16) : 0ull, A2 && A1 > 3 ? (unsigned long long)rd64(A2 + 24) : 0ull);
+    { void display_l1_submit(void); display_l1_submit(); }      /* L1: submits between the game's wait for the window texture and its present */
+    if (j.count > 0 && A2 && racechk_env()) racechk_submit(j.handles, j.count);
+    { int r1_ra_phase(void), r1_on(void); int ph = r1_ra_phase();      /* R1 round 5 (diagnosis): a submitted handle the host no longer knows, by run-ahead phase */
+      if (r1_on()) { static LONG64 bad[3], ok[3]; size_t ln; for (int i = 0; i < j.count; i++) { if (list_lookup(j.handles[i], &ln)) ok[ph]++; else { bad[ph]++; if (bad[ph] <= 5 || !(bad[ph] & (bad[ph] - 1))) { uint32_t si = (uint32_t)j.handles[i] - 1; int have = si < (uint32_t)g_list_count; printf("r1-ra: submitted handle %llx unknown (phase %d: %lld bad / %lld good so far; slot gen %u data %d finalized %d created frame %lld used %lld, frame now %lld)\n", (unsigned long long)j.handles[i], ph, (long long)bad[ph], (long long)ok[ph],
+                have ? g_lists[si].gen : 0, have && g_lists[si].data != NULL, have ? g_lists[si].finalized : -1, have ? (long long)g_lists[si].created : -1, have ? (long long)g_lists[si].used : -1, (long long)g_st.frames); } } } } }
     QueueObj *q = hobj(A0, K_QUEUE);
     if (q && A2) {                              /* what the submitted commands took of the queue's memory (model: see rec; a dispatch's launch descriptor is 0x100 bytes) */
         AcquireSRWLockShared(&g_list_lock);
@@ -4367,7 +4557,18 @@ static void queue_submit(Ctx *c) {                      /* (queue, count, handle
         }
         ReleaseSRWLockShared(&g_list_lock);
     }
-    if (j.count > 0 && A2) {
+    if (j.count > 0 && A2 && drawtag_env()) {      /* round 17, TEST (SSBU_DRAWTAG): the frame SSBU_SHOT_FIGHT will save: its commands are tagged */
+        /* the game polls the pad for frame n AFTER it has submitted the commands whose picture is saved as fight_<n>
+         * (submit, next frame's logic and poll, present): the tag is armed by the present that saved fight_<n-1>, so
+         * SSBU_SHOT_FIGHT must name n-1 as well (e.g. 699,700 tags the commands of 700). First form (the pending
+         * shot at the submit) tagged nothing: run p17_zvk. */
+        extern volatile LONG g_drawtag_next;
+        int n = (int)InterlockedExchange(&g_drawtag_next, 0);
+        if (n) { if (gl_async_on()) gl_post(job_drawtag, &n, sizeof n); else gl_run(job_drawtag, &n); }
+    }
+    int r1_ra_quiet(void);
+    if (j.count > 0 && A2 && r1_ra_quiet()) { static LONG64 n; n++; }      /* R1 round 5, run-ahead: the real pass's submission = the lists the speculative pass already ran on the GPU: not run again */
+    else if (j.count > 0 && A2) {
         if (gl_async_on() && j.count <= 4096) {
             size_t size = sizeof j + (size_t)j.count * 8;
             SubmitJob *copy = malloc(size);
@@ -4376,6 +4577,7 @@ static void queue_submit(Ctx *c) {                      /* (queue, count, handle
             gl_post(g_rb->submit_async, copy, size);
             free(copy);
         } else gl_run(g_rb->submit, &j);
+        l1_pipe_after_submit();      /* L1 round 2 (SSBU_L1_PIPE=1): the picture is complete after this submission: present it now, hold the game here */
     }
 }
 static void wb_set_textures(Ctx *c) {                   /* (builder, count, textures[]): kept in the builder (0x40 bytes) */
@@ -4402,8 +4604,10 @@ static void win_initialize(Ctx *c) {                    /* (window, builder) */
 static void win_acquire(Ctx *c) {                       /* (window, sync, int *textureIndex) -> 0 = success */
     static volatile LONG next;
     Window *w = hobj(A0, K_WIN);
+    L1T("window acquire (index %d)", (int)((next + 1) % 3));
     if (A2) wr32(A2, (uint32_t)(InterlockedIncrement(&next) % (w && w->count ? (w->nactive ? w->nactive : w->count) : 2)));
     InterlockedExchangePointer(&g_window_sync, A1 ? hobj(A1, K_SYNC) : NULL);        /* P3 round 3: nvnSyncWait on it = wait for the refresh that frees the texture */
+    if (w && A2 && A1) { extern Window *g_l1_acq_win; extern volatile LONG g_l1_acq_idx, g_l1_acq_new; g_l1_acq_win = w; g_l1_acq_idx = (LONG)rd32(A2); InterlockedExchange(&g_l1_acq_new, 1); }      /* L1: early present */
     display_clock_sample(A2);
     RET(0);
 }
@@ -4430,11 +4634,101 @@ static void job_present_movie(void *arg) {
     free(px);
     glBindFramebuffer(GL_FRAMEBUFFER_, S.have_fbo ? S.fbo : 0);
 }
+/* Session 13, TEST ONLY: SSBU_SHOT_FIGHT=<n>[,<n>...] (nnhid.c counts the fight frames at the pad poll): the present the game
+ * queues next after the poll that reached fight frame n is saved as fight_<n>.bmp in SSBU_SHOT_DIR by whichever back end runs. */
+static volatile LONG g_fight_shot;
+void nvn_front_shot_fight(int n) { InterlockedExchange(&g_fight_shot, n); }
+int nvn_front_shot_pending(void) { return (int)g_fight_shot; }      /* round 17 (SSBU_DRAWTAG): the fight frame the next queued present will be saved as, 0 = none */
+unsigned long nvn_front_present_tid(void) { return g_pf_main_tid; }      /* the game thread that queues the presents (the stall log of nvn_vk_wd.c) */
+/* Session 14 (display.c, the vsync thread at a tick): the present the Vulkan back end kept for this tick, as a job of the
+ * render thread (in order with the other jobs; nobody waits for it). */
+void nvn_vk_present_flush_job(void *arg);              /* nvn_vk_draw.c */
+void nvn_front_post_present_flush(void) { if (g_vk) gl_post(nvn_vk_present_flush_job, NULL, 0); }
+/* ---- Track L1 (input latency), early present. The game submits the commands of a frame's picture BEFORE it waits for the
+ * window texture (nvnSyncWait on the acquire sync = display_wait_refresh), then reads the pad, runs that frame's logic and
+ * only then calls nvnQueuePresentTexture for the picture it had finished before the wait (measured: tests\logs\vk13_l1t_*,
+ * `l1-submit:` 0 submits between the wait and the present in every fight frame). With SSBU_L1_EARLY=1 (graphics.ini
+ * latency = early | lowest) that picture is handed to the window when the wait BEGINS, for the tick the game waits for (the
+ * hold of session 14 keeps it until then), instead of one tick later; the game's own present of the same texture then only
+ * does the pacing bookkeeping. If the game does not present that texture next, the early present is counted as a miss. */
+Window *g_l1_acq_win;
+volatile LONG g_l1_acq_idx, g_l1_acq_new;
+static Window *volatile g_l1_early_win;
+static volatile LONG g_l1_early_idx;
+static LONG64 g_l1_early_n, g_l1_early_miss;
+static void l1_early_present(void) {
+    int display_l1_early(void);
+    if (!g_vk || !display_l1_early() || !InterlockedExchange(&g_l1_acq_new, 0)) return;
+    Window *w = g_l1_acq_win;
+    if (!w || (w->native && w->native == album_movie_native_window())) return;
+    if (g_l1_early_win) { g_l1_early_win = NULL; g_l1_early_miss++; }
+    PresentJob j = {w, (int)g_l1_acq_idx};
+    /* the picture of THIS acquire is the one rendered since the last present: the index the game acquired at the end of its
+     * previous frame was the target of the commands it submitted since; present it */
+    g_l1_early_win = w; g_l1_early_idx = j.index;
+    g_l1_early_n++;
+    gl_post(g_rb->present, &j, sizeof j);
+}
+/* L1 round 2, PIPE (SSBU_L1_PIPE=1): measured (SSBU_L1_TRACE, tests\logs\vk13_l1t_tr1.log): after its present the game
+ * acquires the next window texture, waits for it (nvnSyncWait on the acquire sync, 0x710386fce0) and for the previous
+ * frame's fence (0x710386fcf0), then ends the command buffers its "render dispatch" thread recorded during the previous
+ * frame plus one of its own and submits them in ONE call (0x71037f0b40, list of 6), then runs the next frame (task workers,
+ * pad poll, logic) and only then presents that picture (0x710386fc84). The picture is complete after that submission
+ * (l1-submit: no other submission before the present). Pipe: the window wait returns at once; right after that submission
+ * the picture goes to the render thread for the next tick and the GAME is held there until that tick (display_wait_refresh),
+ * i.e. before its next pad poll as before; the game's later present of the same texture only does the bookkeeping.
+ * Saves one whole frame of the game's two. */
+static int g_l1_pipe = -1;
+static volatile LONG g_l1_pipe_pending;
+static int l1_pipe_on(void) { if (g_l1_pipe < 0) { const char *e = getenv("SSBU_L1_PIPE"); int display_l1_pipe_default(void); g_l1_pipe = e ? atoi(e) != 0 : display_l1_pipe_default(); printf("nvn: pipe (picture presented right after the game's frame submission, game held there) %s%c", g_l1_pipe ? "ON" : "off", 10); } return g_l1_pipe && g_vk; }
+static volatile LONG g_l1_sh_pending;
+static int l1_pipe_wait(void) {
+    InterlockedExchange(&g_l1_sh_pending, 1);
+    if (!l1_pipe_on() || !g_l1_acq_win) return 0;
+    InterlockedExchange(&g_l1_pipe_pending, 1);
+    return 1;
+}
+static void l1_nop_job(void *arg) { (void)arg; }
+static void l1_pipe_after_submit(void) {
+    { static int sh = -1; if (sh < 0) sh = getenv("SSBU_L1_SUBMIT_HOLD") && atoi(getenv("SSBU_L1_SUBMIT_HOLD")); if (sh && !g_l1_pipe && InterlockedExchange(&g_l1_sh_pending, 0)) gl_run(l1_nop_job, NULL); }      /* TEST: old path, but the game waits until the render thread has replayed this submission (is the old picture a race with the game's next frame?) */
+    if (!InterlockedExchange(&g_l1_pipe_pending, 0)) return;
+    { int r1_ra_quiet(void); if (r1_ra_quiet()) return; }      /* R1 round 5, run-ahead: the real pass's submission repeats the picture the speculative pass presented: not presented, the game not held */
+    Window *w = g_l1_acq_win;
+    if (!w || (w->native && w->native == album_movie_native_window())) { display_wait_refresh(); return; }
+    if (g_l1_early_win) { g_l1_early_win = NULL; g_l1_early_miss++; }
+    PresentJob j = {w, (int)g_l1_acq_idx};
+    g_l1_early_win = w; g_l1_early_idx = j.index;
+    g_l1_early_n++;
+    { void display_present_plan(int vulkan); display_present_plan(g_vk); }
+    gl_post(g_rb->present, &j, sizeof j);
+    display_wait_refresh();
+}
+void nvn_l1_report(FILE *out) { if (g_l1_early_n || g_l1_early_miss) fprintf(out, "l1: early presents %lld, game presents that did not match an early present %lld%c", (long long)g_l1_early_n, (long long)g_l1_early_miss, 10); }
 static void queue_present(Ctx *c) {                     /* (queue, window, textureIndex) */
     PresentJob j = {hobj(A1, K_WIN), (int)A2};
+    L1T("PRESENT texture %d", (int)A2);
     if (j.win && j.win->native && j.win->native == album_movie_native_window()) { gl_run(g_rb->present_movie, &j); return; }
     g_pf_main_tid = GetCurrentThreadId();
+    int ra_mode; { int r1_ra_present_mode(void); ra_mode = g_l1_pipe > 0 ? r1_ra_present_mode() : 0; }      /* R1 round 5, run-ahead: 2 = the real pass's present (nothing), 1 = presented at the speculative submission already */
+    if (ra_mode == 2) return;
+    if (ra_mode == 1 && g_l1_early_win == j.win) j.index = (int)g_l1_early_idx;      /* (the restore rolled the game's texture index back, the host's acquire count is not: the texture presented is the host's) */
+    if (g_l1_early_win && g_l1_early_win == j.win && g_l1_early_idx == j.index) {      /* L1: this picture was presented at the game's wait already: only the pacing bookkeeping */
+        g_l1_early_win = NULL;
+        if (g_l1_pipe) {      /* round 2: planned and held at the submission already; a picture wanted by SSBU_SHOT_FIGHT is saved by presenting the same texture again (test only) */
+            if (g_fight_shot) { void nvn_vk_shot_job(void *arg); j.shot_fight = (int)InterlockedExchange(&g_fight_shot, 0); gl_run(nvn_vk_shot_job, &j); }
+        } else {
+        display_before_present();
+        { void display_present_plan(int vulkan); display_present_plan(g_vk); }
+        }
+        { void display_l1_early_skip(void); display_l1_early_skip(); }
+        display_pace();
+        return;
+    }
+    if (g_l1_early_win) { g_l1_early_win = NULL; g_l1_early_miss++; }
+    if (g_fight_shot) j.shot_fight = (int)InterlockedExchange(&g_fight_shot, 0);      /* session 13 (test, SSBU_SHOT_FIGHT): bound here, on the game's thread, so that both renderers save the same game frame */
+    if (j.shot_fight && drawtag_env()) InterlockedExchange(&g_drawtag_next, j.shot_fight + 1);      /* round 17 (SSBU_DRAWTAG): the next submission is the next fight frame's */
     display_before_present();
+    { void display_present_plan(int vulkan); display_present_plan(g_vk); }      /* session 14: the tick this frame is shown at, decided before the present (display.c) */
     gl_run(g_rb->present, &j);
     display_pace();
 }
@@ -4524,6 +4818,7 @@ static void fence_now(SyncObj *o, int flags) {
 }
 static void job_fence(void *arg) { SyncJob *j = arg; fence_now(j->o, j->flags); }
 static void queue_fence_sync(Ctx *c) {                  /* (queue, sync, condition, flags) */
+    L1T("fence sync %llx", (unsigned long long)A1);
     SyncObj *o = hobj(A1, K_SYNC);
     SyncJob j = {o, (int)A3, 0, 0};
     if (o) { if (gl_async_on()) gl_post(g_rb->fence, &j, sizeof j); else gl_run(g_rb->fence, &j); }
@@ -4535,11 +4830,15 @@ static void job_sync_wait(void *arg) {
     j->result = r == 0x911A ? 0 : r == 0x911C ? 1 : r == 0x911B ? 2 : 3;       /* already signaled, condition satisfied, timeout expired, failed */
 }
 static void sync_wait(Ctx *c) {                         /* (sync, timeoutNs) -> NVNsyncWaitResult */
+    L1T("sync wait %llx%s", (unsigned long long)A0, hobj(A0, K_SYNC) == g_window_sync ? " (WINDOW texture)" : "");
     SyncObj *o = hobj(A0, K_SYNC);
     SyncJob j = {o, 0, A1, 3};
     if (o) gl_run(g_rb->sync_wait, &j);
     if (o && o == g_window_sync && A1 && j.result == 3) {      /* P3 round 3: the window texture's sync (never fenced by us): it is free at the refresh that shows the queued frame (display.c) */
+        if (l1_pipe_wait()) j.result = 1; else {      /* L1 round 2: pipe mode does not hold here */
+        l1_early_present();                                    /* L1 (latency = early / SSBU_L1_EARLY=1): the picture the game finished before this wait goes to the window now (at its tick) */
         if (display_wait_refresh()) j.result = 1;             /* NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED; otherwise as before */
+        }
     }
     RET(j.result);
 }
@@ -4989,7 +5288,8 @@ static void job_finalize_handle(void *arg) {
 }
 static void dev_finalize_command_handle(Ctx *c) {       /* (device, handle): the recorded commands of that handle are released (by the render thread, at the next present) */
     uint64_t h = A1;
-    if (gl_async_on() && g_async_pending) gl_post(job_finalize_handle, &h, sizeof h);      /* after the submits already queued, which may still use it */
+    { int r1_ra_phase(void); if (r1_ra_phase() == 1) return; }      /* R1 round 5, run-ahead: a speculative pass's release is undone by the restore (the real pass asks again); its own lists expire unused */
+    if (gl_async_on() && g_async_pending) gl_post(job_finalize_handle, &h, sizeof h);     /* after the submits already queued, which may still use it */
     else job_finalize_handle(&h);
 }
 /* ================================================================ V1 step S0: the render thread's jobs in Vulkan mode
@@ -5194,7 +5494,16 @@ static void vk_shutdown_at_exit(void) {
     g_job_tail = &j;
     LeaveCriticalSection(&g_job_lock);
     SetEvent(g_job_event);
-    if (WaitForSingleObject(j.done, 3000) != WAIT_OBJECT_0) { printf("nvn_vk: shutdown NOT run: the render thread did not take the job within 3 s\n"); fflush(stdout); }
+    /* Session 13: the event is set when the job has FINISHED, not when it is taken, and the job writes the pipeline cache
+     * (0.3-0.7 s read-out + 1-2 s file for 0.9 GB, more on a busy PC): 3 s was too short and the old line ("did not take
+     * the job") was printed while the shutdown was running; the process then left with the cache half written. Now: 60 s. */
+    if (WaitForSingleObject(j.done, 3000) != WAIT_OBJECT_0) {
+        LONG64 t0 = GetTickCount64();
+        printf("nvn_vk: shutdown still running after 3 s (the pipeline cache is being written); waiting for it, at most 60 s\n"); fflush(stdout);
+        if (WaitForSingleObject(j.done, 60000) != WAIT_OBJECT_0) printf("nvn_vk: shutdown NOT finished after 63 s: the render thread is held or never took the job\n");
+        else printf("nvn_vk: shutdown finished %.1f s after the first 3 s\n", (double)(GetTickCount64() - t0) / 1000.0);
+        fflush(stdout);
+    }
 }
 
 /* nvnBufferFlushMappedRange / nvnMemoryPoolFlushMappedRange (nvn_stub.c): the CPU wrote this memory. Textures stored there are read again. */

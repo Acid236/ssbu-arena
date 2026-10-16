@@ -219,13 +219,24 @@ static const char *attr_in(Mx *e, unsigned a, int vertex_reg_ok) {
     fail(e, "attribute read", "read of attribute 0x%x in stage %u", a, st);
     return "0u";
 }
+/* Round 17 (track V session 17): clip distances in the Vulkan text. OpenGL clips by gl_ClipDistance[i] only when
+ * GL_CLIP_DISTANCEi is enabled, and nvn_gl.c never enables one; Vulkan clips by every element the vertex stage DECLARES,
+ * and an element the code did not write on the path taken is undefined (the array is sized by the highest index written).
+ * SSBU_VK_CLIP: 0 = as before (declared, not initialised); 1 = every element starts at 0.0 (on the plane = kept) and is
+ * clipped only by what the code writes; 2 = the writes go to a plain array and nothing is clipped, as in OpenGL. */
+#define MX_VK_CLIP_DEFAULT 0
+static int mx_vk_clip(const MxIn *in) {
+    static int m = -1;
+    if (m < 0) { const char *s = getenv("SSBU_VK_CLIP"); m = s && s[0] ? atoi(s) : MX_VK_CLIP_DEFAULT; }
+    return in->target == 1 ? m : 0;
+}
 static void attr_out(Mx *e, unsigned a, const char *v) {
     unsigned c = (a >> 2) & 3;
     if (e->in->stage != MX_VERTEX) { fail(e, "attribute store", "attribute store in stage %d", e->in->stage); return; }
     if (a >= 0x70 && a < 0x80) emit(e, " gl_Position[%u] = F(%s);", c, v);
     else if (a >= 0x80 && a < 0x280) { e->out_attr |= 1u << ((a - 0x80) >> 4); emit(e, " out_attr%u[%u] = F(%s);", (a - 0x80) >> 4, c, v); }
     else if (a == 0x6c) { e->uses_psize = 1; emit(e, e->in->target == 1 ? " mx_psize = F(%s);" : " gl_PointSize = F(%s);", v); }
-    else if (a >= 0x2c0 && a < 0x2e0) { e->clip_out |= 1u << ((a - 0x2c0) >> 2); emit(e, " gl_ClipDistance[%u] = F(%s);", (a - 0x2c0) >> 2, v); }
+    else if (a >= 0x2c0 && a < 0x2e0) { e->clip_out |= 1u << ((a - 0x2c0) >> 2); emit(e, mx_vk_clip(e->in) == 2 ? " mx_clip[%u] = F(%s);" : " gl_ClipDistance[%u] = F(%s);", (a - 0x2c0) >> 2, v); }
     else if (a == 0x64) { e->uses_layer_out = 1; emit(e, " gl_Layer = int(%s);", v); }
     else if (a == 0x68) { e->uses_vp_out = 1; emit(e, " gl_ViewportIndex = int(%s);", v); }
     else if ((a >= 0x280 && a < 0x2c0) || (a >= 0x300 && a < 0x3a0) || a == 0x2e8) emit(e, " /* legacy output 0x%x ignored */", a);
@@ -1550,8 +1561,18 @@ int mx_translate(const MxIn *in, MxOut *out) {
             int nclip = 0;
             for (int k = 0; k < 8; k++) if (e->clip_out >> k & 1) nclip = k + 1;
             emit(&h, "out gl_PerVertex { vec4 gl_Position; float gl_PointSize;");
-            if (nclip) emit(&h, " float gl_ClipDistance[%d];", nclip);
+            if (nclip && mx_vk_clip(in) != 2) emit(&h, " float gl_ClipDistance[%d];", nclip);
             emit(&h, " };\n");
+            if (nclip && mx_vk_clip(in) == 2) emit(&h, "float mx_clip[8];\n");      /* round 17: see mx_vk_clip */
+            {   /* Track V session 13, EXPERIMENT behind SSBU_VK_INVARIANT=1 (Vulkan text only): the position is declared
+                 * invariant (and precise with =2), so that two different programs that draw the same mesh (a depth pass and
+                 * a colour pass with a depth test for equality) give bit-equal depths. Found on zelda_temple, NVIDIA only:
+                 * large triangles of static stage meshes missing. Making it the rule needs a new MX_VK_VERSION. */
+                static int inv = -1;
+                if (inv < 0) inv = getenv("SSBU_VK_INVARIANT") ? atoi(getenv("SSBU_VK_INVARIANT")) : 0;
+                if (vk && inv) emit(&h, "invariant gl_Position;\n");
+                if (vk && inv >= 2) emit(&h, "precise gl_Position;\n");
+            }
             for (unsigned n = 0; n < 32; n++)
                 if (e->in_attr >> n & 1) emit(&h, "layout(location = %u) in %s in_attr%u;\n", n, in->int_attrs >> n & 1 ? (in->sint_attrs >> n & 1 ? "ivec4" : "uvec4") : "vec4", n);
             for (unsigned n = 0; n < 32; n++) if (e->out_attr >> n & 1) emit(&h, "layout(location = %u) out vec4 out_attr%u;\n", n, n);
@@ -1601,6 +1622,7 @@ int mx_translate(const MxIn *in, MxOut *out) {
         if (in->stage == MX_VERTEX) {
             emit(&h, " gl_Position = vec4(0.0, 0.0, 0.0, 1.0);\n");
             if (vk) emit(&h, " gl_PointSize = mx_point_size;\n");
+            if (vk && mx_vk_clip(in) == 1) for (int k = 0; k < 8; k++) if (e->clip_out >> k & 1 || (e->clip_out >> k) > 1) emit(&h, " gl_ClipDistance[%d] = 0.0;\n", k);      /* round 17: every declared element */
             for (unsigned n = 0; n < 32; n++) if (e->out_attr >> n & 1) emit(&h, " out_attr%u = vec4(0.0, 0.0, 0.0, 1.0);\n", n);
         }
         int any = 0;

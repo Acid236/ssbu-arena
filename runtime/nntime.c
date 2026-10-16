@@ -161,12 +161,15 @@ static const RegTzi *winzone_year(const WinZone *z, int year) {             /* a
     int y = year < z->first ? z->first : year > z->last ? z->last : year;
     return z->have[y - z->first] ? &z->dyn[y - z->first] : &z->base;
 }
+static int winzone_yearstart(const SYSTEMTIME *st) {                       /* Windows' form of "at the start of the year": 1 January 00:00:00.000, any weekday */
+    return !st->wYear && st->wMonth == 1 && st->wDay == 1 && !st->wHour && !st->wMinute && !st->wSecond && !st->wMilliseconds;
+}
 static int winzone_date(const SYSTEMTIME *st, int year, int64_t *local) {  /* local wall-clock second of a TZI transition date */
     static const int mdays[12] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
     int d;
     if (st->wMonth < 1 || st->wMonth > 12) return 0;
     if (st->wYear) { if (st->wYear != year) return 0; d = st->wDay; }      /* absolute date */
-    else if (st->wMonth == 1 && st->wDay == 1 && !st->wHour && !st->wMinute && !st->wSecond && !st->wMilliseconds) d = 1;   /* Windows' form of "at the start of the year" (measured: Central Brazilian Standard Time before 2004) */
+    else if (winzone_yearstart(st)) d = 1;                                  /* (measured: Central Brazilian Standard Time before 2004) */
     else {                                                                  /* wDay-th wDayOfWeek of the month, 5 = last */
         int len = mdays[st->wMonth - 1] + (st->wMonth == 2 && ((year % 4 == 0 && year % 100 != 0) || year % 400 == 0));
         int64_t first = days_from_civil(year, st->wMonth, 1);
@@ -293,6 +296,9 @@ static void winrule_build(TzRule *w, const WinZone *z, int fixed, LONG fixed_bia
         int std_type = tzrule_type(w, std_off, 0), dst_type = both ? tzrule_type(w, dst_off, 1) : std_type;
         to_dst -= std_off; to_std -= dst_off;                               /* the dates are in the wall clock before the change */
         int start = both && to_std < to_dst ? dst_type : std_type;          /* southern pattern: the year begins in daylight time */
+        if (cur >= 0 && both && winzone_yearstart(&t->StandardDate)) start = cur;   /* not for "standard time from 1 January 00:00": the year begins as the last one ended
+                                                                               and that date is a change at 00:00 local time (Windows' conversion, measured: Alberta 2026 stays in standard
+                                                                               time, Central Brazilian 1971..2003 keeps daylight time until 00:00 local) */
         if (cur < 0) { w->defaulttype = cur = start; }
         else if (cur != start) tzrule_at(w, days_from_civil(year, 1, 1) * 86400, start, &cur);       /* Windows changes the year's entry at 00:00 UTC (measured) */
         if (!both) continue;
@@ -638,7 +644,7 @@ int nntime_selftest(Ctx *c) {
         diff_now += dn; diff_other += dother;
         if ((dn || dother) && zones_now + zones_other <= 12) printf("  time zone: %ls: %lld differences in %d, %lld in 1990..2037 (first at posix %lld); %d transitions\n", d.TimeZoneKeyName, dn, this_year, dother, (long long)first_bad, r.timecnt);
     }
-    printf("  time zone: %d Windows zones, %lld conversions compared with SystemTimeToTzSpecificLocalTimeEx: %lld different in %d (%d zones), %lld different in 1990..2037 (%d zones), plus %lld within one day of a 1 January where the registry entry changes (not failures: Windows picks the year's entry differently there, and the tz database has the real instants)\n",
+    printf("  time zone: %d Windows zones, %lld conversions compared with SystemTimeToTzSpecificLocalTimeEx: %lld different in %d (%d zones), %lld different in 1990..2037 (%d zones), plus %lld in 1990..2037 within one day of a 1 January (not counted: around a change of the registry entry, Windows and this rule can apply different years' entries for a few hours; the tz database agrees with either side, depending on the zone)\n",
            zones, cases, diff_now, this_year, zones_now, diff_other, zones_other, edge);
     bad += zones_now + zones_other;
     #define TCHECK(cond, text) do { if (!(cond)) { bad++; printf("  FAIL time zone: %s\n", text); } } while (0)

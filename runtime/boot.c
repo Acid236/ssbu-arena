@@ -193,6 +193,9 @@ static DWORD WINAPI profiler(LPVOID arg) {
     return 0;
 }
 
+#include "prof15.c"       /* SSBU_PROF15: sampling profiler of every busy thread (test only). Included here, like nvn_vk.c includes its parts, so that
+                           * every link that has boot.c has it (build.py's source list is not changed): do NOT name prof15.c as a source of its own. */
+
 static size_t main_stack_size_from_npdm(void) {
     const char *ov = getenv("SSBU_MAIN_STACK");
     if (ov && strtoull(ov, NULL, 0) >= 0x10000) return (size_t)(strtoull(ov, NULL, 0) + 0xfff) & ~(size_t)0xfff;
@@ -322,6 +325,7 @@ int main(int argc, char **argv) {
     /* the lifted code uses the host stack for every guest call: give it plenty */
     HANDLE t = CreateThread(NULL, (SIZE_T)1 << 30, guest_main, NULL, STACK_SIZE_PARAM_IS_A_RESERVATION, NULL);
     if (getenv("SSBU_PROF")) { g_prof_target = t; CloseHandle(CreateThread(NULL, 0, profiler, NULL, 0, NULL)); }
+    { void prof15_start(void); prof15_start(); }         /* prof15.c: SSBU_PROF15, every busy thread (test only; nothing without the variable) */
     DWORD wr = WaitForSingleObject(t, seconds > 0 ? (DWORD)seconds * 1000 : INFINITE);
     {   unsigned nvn_gl_held_ms(void);                   /* nvn_gl.c: time the presents were held for shader preparation is not run time */
         for (unsigned done = 0, h; wr == WAIT_TIMEOUT && (h = nvn_gl_held_ms()) > done + 50; done = h) wr = WaitForSingleObject(t, h - done);

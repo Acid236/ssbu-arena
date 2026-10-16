@@ -34,6 +34,16 @@ extern "C" __declspec(dllexport) void fighter_bind(const FsHost *host, FsTable *
     t->ovr_count = (int)(sizeof fs_overrides / sizeof fs_overrides[0]) - 1;
 }
 
+// N13 (plan\phases\N13_own_articles.md): the host-side components (the kind component's own articles) find a fighter's
+// own functions by name: i-th function's name and offset in the module (-1 past the end). The guest ADDRESS of an
+// offset comes from fs_module_address, which a fighter source with status_local.h exports (FS_EXPORT_MODULE_ADDRESS).
+extern "C" __declspec(dllexport) const char *fs_function_at(int i, int64_t *off) {
+    int n = (int)(sizeof fs_overrides / sizeof fs_overrides[0]) - 1;
+    if (i < 0 || i >= n) return nullptr;
+    if (off) *off = fs_overrides[i].off;
+    return fs_overrides[i].name;
+}
+
 #ifdef FS_SCRIBBLE
 // S6: see fighter_sdk.h. 4 KB below the caller's frame: where the frames of the argument helpers were.
 __attribute__((noinline)) void fs_scribble() {

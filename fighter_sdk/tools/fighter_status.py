@@ -120,6 +120,126 @@ def agent_classes(mod):
     return out
 
 
+# S21: names of the item scripts by item. create_agent_item_status_script builds, per item class, the object (vtable
+# stored at +0), one TABLE per status at a member (+0x3f8, +0x408 ...) and puts each status function into its table
+# under a key (hash40 "setting", "init", "update", "coroutine", "exit", ...): `operator[](member, key) =
+# L2CValue(function)`. The class's install (vtable slot 9) registers each member under a status kind and a NAME
+# ("INITIALIZE", "FALL" ...): `item_sub_8fcf50(agent, kind, "NAME", agent->member)`. Both are read here by a linear
+# scan of the two functions (registers, their spills to the frame, constants); a function found so is named
+# <item>_<name>_<key> (darzpierce_initialize_init), its file is the item's. Anything not matched keeps its old name.
+ITEM_KEYS = {0x79f74b898: 'setting', 0x4c674e474: 'init', 0x698253578: 'update', 0x95cb61c70: 'coroutine', 0x49409840e: 'exit'}
+
+
+def item_names(mod):
+    n = mod.nro
+    r = mod.r
+    classes = agent_classes(mod)
+    vt_name = {v: nm for nm, v in classes}
+    helper_install = {}
+    for nm, v in classes:
+        t = n.rel_ptr.get(v + 8 * 9)
+        if t is not None:
+            helper_install[v] = t
+    lv_ctor_fn = set(a for a, s in n.plt.items() if s in ('_ZN3lib8L2CValueC1EPv', '_ZN3lib8L2CValueC1EPKv'))
+    ix = set(a for a, s in n.plt.items() if s == '_ZN3lib8L2CValueixEN3phx6Hash40E' or s == '_ZNK3lib8L2CValueixEN3phx6Hash40E')
+    def scan(off, on_ins):
+        st = {'reg': {}, 'const': {}, 'page': {}, 'spill': {}}
+        for i in n.disasm(off, n.func_size(off)):
+            ops = A.split_ops(i.op_str)
+            reg, const, page, spill = st['reg'], st['const'], st['page'], st['spill']
+            mn = i.mnemonic
+            if mn == 'mov' and len(ops) == 2 and ops[1].startswith('#'):
+                const[A.XREG.get(ops[0])] = A.imm(ops[1]) & (0xffffffff if ops[0][0] == 'w' else 0xffffffffffffffff)
+                reg.pop(A.XREG.get(ops[0]), None)
+            elif mn == 'movk' and A.XREG.get(ops[0]) in const:
+                sh = A.imm(ops[2].split()[1]) if len(ops) > 2 else 0
+                k = A.XREG[ops[0]]
+                const[k] = (const[k] & ~(0xffff << sh)) | (A.imm(ops[1]) << sh)
+            elif mn == 'adrp':
+                page[A.XREG.get(ops[0])] = A.imm(ops[1])
+                reg.pop(A.XREG.get(ops[0]), None)
+            elif mn == 'add' and len(ops) == 3 and ops[2].startswith('#') and A.XREG.get(ops[1]) in page and ops[0] == ops[1]:
+                k = A.XREG[ops[0]]
+                const[k] = page.pop(k) + A.imm(ops[2])
+                reg.pop(k, None)
+            elif mn == 'add' and len(ops) == 3 and ops[2].startswith('#') and A.XREG.get(ops[1]) == st.get('obj'):
+                reg[A.XREG[ops[0]]] = A.imm(ops[2])
+                const.pop(A.XREG[ops[0]], None)
+            elif mn == 'mov' and len(ops) == 2 and ops[1] in A.XREG and A.XREG[ops[1]]:
+                k, s = A.XREG[ops[0]], A.XREG[ops[1]]
+                for d in (reg, const):
+                    if s in d:
+                        d[k] = d[s]
+                    else:
+                        d.pop(k, None)
+                if s == st.get('obj'):
+                    reg[k] = 0
+            elif mn in ('str', 'stur') and len(ops) == 2 and A.XREG.get(ops[0]) in reg:
+                spill[ops[1]] = reg[A.XREG[ops[0]]]
+            elif mn in ('ldr', 'ldur') and len(ops) == 2 and ops[1] in spill:
+                reg[A.XREG.get(ops[0])] = spill[ops[1]]
+            on_ins(i, ops, st)
+            if mn == 'bl':
+                for x in range(0, 18):
+                    reg.pop('x%d' % x, None)
+                    const.pop('x%d' % x, None)
+        return st
+
+    # 1. create_agent_item_status_script: function -> (class, member, key)
+    found = {}
+    create = [o for o, s in n.exports.items() if 'status_script' in s and n.func_size(o)]
+
+    def on_create(i, ops, st):
+        if i.mnemonic == 'add' and ops[0] in A.XREG and st['const'].get(A.XREG[ops[0]]) in vt_name:
+            st['cls'] = vt_name[st['const'][A.XREG[ops[0]]]]
+            st['clsv'] = st['const'][A.XREG[ops[0]]]
+        if i.mnemonic == 'str' and len(ops) == 2 and ops[1].endswith(']') and st.get('clsv') is not None \
+                and st['const'].get(A.XREG.get(ops[0])) == st['clsv'] and ',' not in ops[1]:
+            st['obj'] = A.XREG.get(ops[1].strip('[]'))      # `str x8, [x19]`: x19 is the new object
+        if i.mnemonic == 'bl' and A.imm(ops[0]) in ix:
+            st['pend'] = (st['reg'].get('x0'), st['const'].get('x1'))
+        if i.mnemonic == 'bl' and A.imm(ops[0]) in lv_ctor_fn:
+            fn = st['const'].get('x1')
+            p = st.pop('pend', None)
+            if fn in r['idx'] and p and p[0] is not None and p[1] is not None and st.get('cls'):
+                found.setdefault(fn, set()).add((st['cls'], p[0], p[1]))
+
+    for off in create:
+        scan(off, on_create)
+    # 2. each class's install: member -> status name
+    names_of = {}
+    for v, inst in helper_install.items():
+        cls = vt_name[v]
+        mem = {}
+
+        # the NAME's value is built first (`adrp x1; add x1; bl L2CValue(char const*)`), then the member's copy
+        # (`add x1, x19, #0x3f8; bl L2CValue(const L2CValue &)`): the member gets the last text
+        def on_inst2(i, ops, st, mem=mem):
+            if i.mnemonic == 'bl' and A.imm(ops[0]) in n.plt and n.plt[A.imm(ops[0])] == '_ZN3lib8L2CValueC1EPKc':
+                t = st['const'].get('x1')
+                st['lasttext'] = n.cstr(t) if t is not None and n.ro_off <= t < n.ro_off + n.ro_size else None
+            if i.mnemonic == 'add' and len(ops) == 3 and ops[0] == 'x1' and ops[2].startswith('#') and ops[1] in ('x19', 'x20', 'x21', 'x22') \
+                    and st.get('lasttext'):
+                mem.setdefault(A.imm(ops[2]), st['lasttext'])
+                st['lasttext'] = None
+        scan(inst, on_inst2)
+        names_of[cls] = mem
+    out = {}
+    used = collections.Counter()
+    for fn in sorted(found):
+        if len(found[fn]) != 1:
+            continue                                     # the same function in two places: no single name
+        cls, m, key = next(iter(found[fn]))
+        st = names_of.get(cls, {}).get(m)
+        if not st:
+            continue
+        k = ITEM_KEYS.get(key, 'k%x' % key)
+        ident = re.sub(r'\W', '_', '%s_%s_%s' % (cls, st.lower(), k))
+        out[fn] = (ident, cls, st, k)
+        used[ident] += 1
+    return {fn: v for fn, v in out.items() if used[v[0]] == 1}
+
+
 def closure(mod, roots):
     """functions reached from `roots` by direct calls and by addresses formed in their code (not ACMD, not macros)"""
     r = mod.r
@@ -139,7 +259,10 @@ def closure(mod, roots):
         if f in done or f not in r['idx']:
             continue
         k = r['kind'].get(f, '')
-        if k.startswith('acmd') or k == 'macro' or f in mod.macros:
+        # S20: a function census calls a macro (one script call between Lua-stack plumbing) that the macro model
+        # refused (mod.macro_fail) is an ordinary helper: it was left out, and every call to it was refused as
+        # "call to local function"
+        if k.startswith('acmd') or (k == 'macro' and f not in getattr(mod, 'macro_fail', {})) or f in mod.macros:
             continue
         done.add(f)
         seen.append(f)
@@ -219,6 +342,13 @@ def analyse(mod):
             continue
         try:
             ex = SD.execute(mod, ag['install'])
+            # S18: an install function that registers in a loop (the three Mii fighters) executes since the counted
+            # loops are understood, but its status kinds are a variable, not constants: there is no name to take from
+            # them. It is named as before (<agent>_status_<offset>): the names are what the exclude files, the
+            # bindings and every earlier tree use, they must not move.
+            for nd in ex.allnodes.values():
+                if nd['kind'] == 'call' and nd.get('sym') == census.SET_STATUS and cname(nd['args'][1], 'STATUS_KIND_')[0] == '?':
+                    raise NotMechanical('status kind that is not a constant')
         except (NotMechanical, RecursionError) as x:
             ag['why'] = str(x) or 'too deeply nested'
             # the registered functions are still found (the pointer formed before each call), their kinds are not
@@ -269,13 +399,22 @@ def analyse(mod):
         # in create_agent_item_status_script; the install function binds them by status kind and a NAME STRING through
         # a helper. They are found here as the addresses formed in that function; which item each belongs to is not
         # worked out yet (names item_status_<offset>).
+        # S21: by item where the class's tables and install say so (item_names; SSBU_ITEM_NAMES=0: the old names)
+        by_item = item_names(mod) if os.environ.get('SSBU_ITEM_NAMES', '1') != '0' else {}
+        ag_by = {ag['name']: ag for ag in agents}
         for off, sym in sorted(n.exports.items()):
             if 'status_script' in sym and n.func_size(off):
                 lo, hi = off, off + n.func_size(off)
                 for pc in sorted(p for p in r['code_ptr'] if lo <= p < hi):
                     fn = r['code_ptr'][pc][0]
                     if fn not in names:
-                        claim(fn, '%s_status_%x' % (short, fn), 'registered', '%s_%02x' % (short, fn >> 16))
+                        if fn in by_item:
+                            ident, cls, stname, key = by_item[fn]
+                            claim(fn, ident, 'registered', cls)
+                            if cls in ag_by:
+                                ag_by[cls]['entries'].append(('status "%s"' % stname, 'table key %s' % key, fn))
+                        else:
+                            claim(fn, '%s_status_%x' % (short, fn), 'registered', '%s_%02x' % (short, fn >> 16))
                         roots.append(fn)
     fns, taken_by = closure(mod, roots)
     called = set(t for x in fns for pc, t in r['calls'].get(r['idx'][x], []))
@@ -381,6 +520,9 @@ def tree_args(v, out):
         if v and v[0] == 'arg' and len(v) == 2 and isinstance(v[1], int):
             out.add(v[1])
             return
+        if v and v[0] == 'argel':                        # S18: an element of a row argument
+            out.add(v[1])
+            return
         for x in v[1:]:
             tree_args(x, out)
 
@@ -424,7 +566,12 @@ def run_module(name, collect_only=False):
     if mod.glob:
         mod.autopop = set(s for s, st in mod.glob.items() if st['autopop'])
     execs = {}
+    old_functions = None                                 # S18: the functions whose text must stay as it is (see the res loop)
+    op = os.path.join(OUT, '_old_functions.json')
+    if os.path.exists(op) and not os.environ.get('FS_NO_COMPOUND'):
+        old_functions = set(json.load(open(op)).get(short, []))
     mod.static_fns = set()
+    mod.plain_fns = set()                                # S18, see settle_plain below
 
     def run_one(off):
         try:
@@ -446,11 +593,34 @@ def run_module(name, collect_only=False):
                     run_one(off)
 
     settle()
+    # S18: helpers called as (result, L2CValue arguments...) with no agent (status_decomp.call_local marks the call
+    # `plain`). A callee becomes plain when a function that executed calls it so, nothing that executed calls it any
+    # other way, and it does not execute as a member; it is then executed as plain, and kept so even if that fails
+    # (its callers are then refused through the cascade, as before).
+    def settle_plain():
+        while True:
+            sites = collections.defaultdict(set)
+            for ex in execs.values():
+                if not isinstance(ex, str):
+                    for nd in ex.allnodes.values():
+                        if nd['kind'] == 'local':
+                            sites[nd['target']].add('plain' if nd.get('plain') else 'agent')
+            new = sorted(t for t, how in sites.items() if how == {'plain'} and t in execs and isinstance(execs[t], str)
+                         and t not in mod.static_fns and t not in mod.plain_fns and info['role'][t] in ('helper', 'loop'))
+            if not new:
+                return
+            for off in new:
+                mod.plain_fns.add(off)
+                run_one(off)
+
+    settle_plain()
     # a function that does not execute as a member and that nothing calls as a member: try the plain convention. It is
     # kept only if it then executes. Such a function is never bound: it runs only when a source caller calls it.
     member_called = set(nd['target'] for ex in execs.values() if not isinstance(ex, str) for nd in ex.allnodes.values()
                         if nd['kind'] == 'local' and not nd.get('static'))
     for off in info['order']:
+        if off in mod.plain_fns:
+            continue
         if isinstance(execs[off], str) and off not in mod.static_fns and off not in member_called and info['role'][off] in ('helper', 'loop'):
             old = execs[off]
             mod.static_fns.add(off)
@@ -461,6 +631,22 @@ def run_module(name, collect_only=False):
                 execs[off] = old
             else:
                 settle()
+                settle_plain()
+    # S20: helpers that WRITE one of their L2CValue arguments (`operator=` through x1..: the caller's value changes,
+    # printed const_cast<L2CValue &>(a2) = ...). Their callers are run again knowing it (status_decomp.call_local
+    # forgets the written slot after the call); a caller that passes something else than a slot of its own is refused.
+    def writes(ex):
+        return set(nd['args'][0][1] for nd in ex.allnodes.values() if nd['kind'] == 'store' and nd['args'][0][0] == 'arg')
+
+    mod.arg_written = {}
+    for rounds in range(4):
+        w = {off: writes(ex) for off, ex in execs.items() if not isinstance(ex, str) and writes(ex)}
+        if w == mod.arg_written:
+            break
+        mod.arg_written = w
+        for off, ex in list(execs.items()):
+            if not isinstance(ex, str) and any(nd['kind'] == 'local' and nd['target'] in w for nd in ex.allnodes.values()):
+                run_one(off)
     if collect_only:
         known = load_glob()
         extra = {}
@@ -501,31 +687,76 @@ def run_module(name, collect_only=False):
                 raise NotMechanical(exclude[ident])
             if isinstance(ex, str):
                 raise NotMechanical(ex)
-            if arity[off] > MAX_ARGS:
+            # S21: lua2cpp_item's registration helper (+0x8fd140: kind, then six functions; it calls sv_set_status_func, so
+            # analyse lists it as an install of its own) is called by the other functions of the module, never by the
+            # game through a class: a helper like the others (not bound, see 'unbound')
+            helper_like = info['role'][off] == 'helper' or (info['role'][off] == 'install' and off in member_called
+                                                            and not any(a['install'] == off and a['vtable'] for a in info['agents']))
+            if arity[off] > MAX_ARGS and (arity[off] > 16 or not (off in mod.static_fns or off in mod.plain_fns or helper_like)):
+                # S20: a helper (plain C++, or of the member convention and not bound, see write_module) may take more
                 raise NotMechanical('more than 6 arguments')
             calls = set()
             for nd in ex.allnodes.values():
                 if nd['kind'] == 'local':
+                    if bool(nd.get('plain')) != (nd['target'] in mod.plain_fns):      # S18: the call and the callee must agree on who is in x0 / x1
+                        raise NotMechanical('local function called in two ways')
                     want = arity.get(nd['target'], 0)
                     if len(nd['args']) < want:
                         raise NotMechanical('local call with fewer arguments than the function reads')
                     nd['args'] = nd['args'][:want]
+                    for k in mod.arg_written.get(nd['target'], ()):      # S20: see arg_written above
+                        if k < want and not nd.get('argsrc', [])[k:k + 1] == [True]:
+                            raise NotMechanical('the callee writes an argument that is not a value of this frame')
+                    # S18: a callee that reads an argument as a row of values: the caller must have built that many
+                    # values in a row there, none of them a variable of its own (those are not followed for a row)
+                    tex = execs.get(nd['target'])
+                    for ai, nrow in sorted(getattr(tex, 'agg', {}).items()) if not isinstance(tex, str) else ():
+                        if ai >= len(nd['args']):
+                            continue
+                        if nd['args'][ai][0] == 'row':
+                            continue                     # (this node was completed on an earlier pass)
+                        more = nd.get('rows', {}).get(ai, [])[:nrow]
+                        if len(more) < nrow or any(D.has_var(x) for x in more):
+                            raise NotMechanical('row argument that is not built here')
+                        nd['args'][ai] = ('row', nd['args'][ai]) + tuple(more)
                     calls.add(nd['target'])
                 if nd['kind'] == 'lua' and mod.glob.get(nd['sym'], {}).get('protos', 1) != 1:
-                    raise NotMechanical('script call made in more than one way')
+                    # S21: such a call is written lua_ret(...) with THIS call's own conversions (l2c_decomp.Printer2), not
+                    # through the SDK wrapper that one way made (only typed calls: an untyped one has no conversions)
+                    if not nd['proto']:
+                        raise NotMechanical('script call made in more than one way')
+                    nd['own_proto'] = True
+            if old_functions is not None and ident not in old_functions:
+                # S18: readable structure (compound conditions) for functions that are NOT in the list of already-covered
+                # ones (<tree>\tools_out\status\_old_functions.json; without that file nothing changes for anyone)
+                st = D.Structurer(ex, compound=True)
+                ex.stmts = st.tree(ex.off, None, [])
+                ex.labels, ex.gotos = st.labels, st.gotos
+                ex.folded = st.folded
             p = D.Printer2(ex, consts, D.var_names(ex.variables))
             rets = [b.ret for b in ex.B.values() if b.term[0] in ('ret', 'tail')]
             p.void_fn = all(x is None or x == ('tail',) for x in rets)
             lines = p.function_text(ex.stmts, ex.labels, 'fn', ex.variables)
             for nd in ex.allnodes.values():
-                if nd['kind'] == 'lua' and nd['sym'] in mod.autopop and p.uses[nd['id']]:
+                if (nd['kind'] == 'lua' and nd['sym'] in mod.autopop and p.uses[nd['id']] and (nd['proto'] or nd.get('fret'))
+                        and not nd.get('vret')):         # (S20: a vector result is lua_vec(...), not the wrapper)
+                    # (S18: without typed parameters it is written lua_result(...), see l2c_decomp.Printer2.call_text)
                     raise NotMechanical('uses the result of a script call the SDK declares without one')
                 if nd['kind'] == 'lua' and nd['sym'] not in mod.glob:
                     raise NotMechanical('script call no ACMD script uses')
-            static = off in mod.static_fns
+            plain = off in mod.plain_fns
+            static = off in mod.static_fns or plain
             if static and p.void_fn:
                 raise NotMechanical('static helper without a result')
+            if getattr(ex, 'agg', None) and not static:
+                raise NotMechanical('row argument of a function the game calls')
             e.update(ok=True, lines=lines, used=sorted(p.used_syms), gotos=ex.gotos, void=p.void_fn, arity=arity[off], calls=sorted(calls), static=static)
+            if plain:
+                e['plain'] = True
+            if not static and arity[off] > MAX_ARGS:
+                e['unbound'] = True                      # S20: see write_module (FS_L2C_N with stack arguments)
+            if getattr(ex, 'agg', None):
+                e['agg'] = sorted(ex.agg)                # S18: arguments that are rows of values (const L2CValue *)
         except NotMechanical as x:
             e.update(ok=False, why=str(x))
         except RecursionError:
@@ -571,11 +802,21 @@ template <class... A> inline L2CValue fs_local_source(void (*fn)(Ctx *), L2CAgen
     L2CValue out;
     Ctx *c = fs_ctx();
     c->x[0] = (uint64_t)(uintptr_t)agent;
-    for (int i = 0; i < (int)sizeof...(a); i++) c->x[1 + i] = (uint64_t)(uintptr_t)&args[i];
+    for (int i = 0; i < (int)sizeof...(a) && i < 7; i++) c->x[1 + i] = (uint64_t)(uintptr_t)&args[i];
     c->x[8] = (uint64_t)(uintptr_t)&out;
+    if (sizeof...(a) <= 7) { fn(c); return out; }
+    // S20: the eighth and later arguments are pointers in 8-byte cells at the stack pointer (AArch64), see FS_SARG
+    uint64_t sp = c->x[31];
+    int more = (int)sizeof...(a) - 7;
+    uint64_t *cell = (uint64_t *)(uintptr_t)(sp - 8 * (uint64_t)((more + 1) & ~1));
+    for (int i = 0; i < more; i++) cell[i] = (uint64_t)(uintptr_t)&args[7 + i];
+    c->x[31] = (uint64_t)(uintptr_t)cell;
     fn(c);
+    c->x[31] = sp;
     return out;
 }
+// S20: argument 7 + j of a function the game calls (x0 = agent): the pointer in the j-th cell at the stack pointer
+#define FS_SARG(c, j) (*(const L2CValue *)(uintptr_t)*(const uint64_t *)(uintptr_t)((c)->x[31] + 8 * (j)))
 // a helper that is not a member function (result buffer in x0, agent in x1, arguments from x2): the game's original
 template <class... A> inline L2CValue fs_local_static(uint32_t off, L2CAgent *agent, const A &... a) {
     L2CValue args[sizeof...(a) + 1] = {L2CValue(a)...};
@@ -587,6 +828,70 @@ template <class... A> inline L2CValue fs_local_static(uint32_t off, L2CAgent *ag
     fs_host.call_addr(c, (uint64_t)(uintptr_t)fs_module_function(off));
     return out;
 }
+// S18: a value read through a pointer a game function returned, `off` bytes in:
+// field<float>(PostureModule::pos(boma), 4) is the y of the position (the game's code reads it in place, too)
+template <class T> inline T field(uint64_t pointer, uint32_t off) { return *(const T *)((uintptr_t)pointer + off); }
+// S19: an L2CValue member of the agent other than global_table (item agents keep several), by its place in the agent
+inline L2CValue &agent_value(L2CAgent *agent, uint32_t off) { return *(L2CValue *)((char *)agent + off); }
+// S18: a script call whose result is used here although the SDK wrapper of that call drops it: call, then take the result
+template <class... A> inline L2CValue lua_result(L2CAgent *agent, int sym, A... v) {
+    L2CValue args[sizeof...(v) + 1] = {L2CValue(v)...};
+    return fs_lua_call(agent, sym, args, (int)sizeof...(v)).pop();
+}
+// S20: a constant L2CValue of the game's script runtime (lib::L2CAgent::math_pi ...), read where it is
+inline const L2CValue &fs_gvalue(int slot) { return *(const L2CValue *)(uintptr_t)fs_addr[slot]; }
+// S20: a script call that returns a vector in v0 (sv_kinetic_energy::get_speed: the game's code reads lane 1 too)
+template <class... A> inline Vector4f lua_vec(L2CAgent *agent, int sym, A... v) {
+    L2CValue args[sizeof...(v) + 1] = {L2CValue(v)...};
+    fs_lua_clear(agent);
+    for (int i = 0; i < (int)sizeof...(v); i++) fs_lua_push(agent, args[i]);
+    return gcall<Vector4f>(sym, agent->lua_state);
+}
+// S21: lua2cpp::L2CAgentBase::coroutine_yield() through the agent's vtable (slot 2), as the game's code calls it
+inline void fs_coroutine_yield(L2CAgent *agent) {
+    Ctx *c = fs_ctx();
+    c->x[0] = (uint64_t)(uintptr_t)agent;
+    c->x[8] = 0;
+    fs_host.call_addr(c, ((const uint64_t *)agent->vtable)[2]);
+}
+// S21: a script call written with its conversions spelt out, one letter per parameter after the lua_State: i as_integer,
+// f as_number, b as_bool, h as_hash of the next pushed value; 2 / 3 = a phx::Vector2f / 3f made of the next 2 / 3 pushed
+// values (as_number), passed by address (kinetic_energy_control::set_speed); I / F = an integer / float CONSTANT the
+// game's code passes itself (not pushed), given after the pushed values (target::search(L, kind, 0.0, 0.0)). "" = the
+// function takes the lua_State only. R = what the game function leaves in x0 (void: nothing of it is used).
+template <class R, class... A> inline R lua_ret(L2CAgent *agent, int sym, const char *conv, A... v) {
+    L2CValue args[sizeof...(v) + 1] = {L2CValue(v)...};
+    int npush = (int)sizeof...(v);
+    for (int p = 0; conv[p]; p++) if (conv[p] == 'I' || conv[p] == 'F') npush--;
+    fs_lua_clear(agent);
+    for (int i = 0; i < npush; i++) fs_lua_push(agent, args[i]);
+    uint64_t w[8] = {0}; float fl[8] = {0}; Vector4f vec[4] = {}; char kind[8] = {0};
+    int a = 0, b = npush, n = 0, nv = 0;
+    for (int p = 0; conv[p] && n < 8; p++, n++) {          // the conversions first: they may call the game themselves
+        char c = conv[p]; kind[n] = c;
+        if (c == 'i') w[n] = (uint64_t)args[a++].as_integer();
+        else if (c == 'f') fl[n] = args[a++].as_number();
+        else if (c == 'b') w[n] = args[a++].as_bool() ? 1 : 0;
+        else if (c == 'h') w[n] = args[a++].as_hash().v;
+        else if (c == 'I') w[n] = (uint64_t)args[b++].as_integer();
+        else if (c == 'F') fl[n] = args[b++].as_number();
+        else { int lanes = c - '0'; for (int l = 0; l < lanes; l++) vec[nv].v[l] = args[a++].as_number(); w[n] = (uint64_t)(uintptr_t)&vec[nv++]; }
+    }
+    GCall g;
+    g.put((uint64_t)(uintptr_t)agent->lua_state);
+    for (int k = 0; k < n; k++) { if (kind[k] == 'f' || kind[k] == 'F') g.put(fl[k]); else g.put(w[k]); }
+    FS_SCRIBBLE_NOW();
+    g.call(sym);
+    return GRet<R>::get(g.c);
+}
+// S18: values in a row, for a helper whose parameter is `const L2CValue *` (it reads a0[0], a0[1], a0[2]): local::f(agent, row(x, y, z))
+struct row {
+    L2CValue v[4];
+    row(const L2CValue &a, const L2CValue &b) { v[0] = a; v[1] = b; }
+    row(const L2CValue &a, const L2CValue &b, const L2CValue &c) { v[0] = a; v[1] = b; v[2] = c; }
+    row(const L2CValue &a, const L2CValue &b, const L2CValue &c, const L2CValue &d) { v[0] = a; v[1] = b; v[2] = c; v[3] = d; }
+    operator const L2CValue *() const { return v; }
+};
 
 enum : uint32_t {
 %(offsets)s
@@ -599,6 +904,11 @@ namespace local {
 %(wrappers)s
 }
 '''
+
+
+def params(e):
+    """the C++ parameters of a helper: an L2CValue each, or (S18) a row of them: `const L2CValue *a0`, read a0[0], a0[1] ..."""
+    return ['const L2CValue %sa%d' % ('*' if k in e.get('agg', ()) else '&', k) for k in range(e['arity'])]
 
 
 def write_module(mod, info, res):
@@ -614,8 +924,10 @@ def write_module(mod, info, res):
     offsets, externs, wrappers = [], [], []
     for e in res:
         offsets.append('    FS_OFF_%s = 0x%x,' % (e['ident'], e['off']))
-        if e['ok'] and e.get('static'):
-            wrappers.append('L2CValue %s(L2CAgent *agent%s);' % (e['ident'], ''.join(', const L2CValue &a%d' % k for k in range(e['arity']))))
+        if e['ok'] and e.get('plain'):                   # S18: a helper that takes no agent
+            wrappers.append('L2CValue %s(%s);' % (e['ident'], ', '.join(params(e))))
+        elif e['ok'] and e.get('static'):
+            wrappers.append('L2CValue %s(L2CAgent *agent%s);' % (e['ident'], ''.join(', ' + x for x in params(e))))
         elif e['off'] in mod.static_fns:
             wrappers.append('template <class... A> inline L2CValue %s(L2CAgent *agent, const A &... a) { return fs_local_static(FS_OFF_%s, agent, a...); }'
                             % (e['ident'], e['ident']))
@@ -652,9 +964,18 @@ def write_module(mod, info, res):
         for line in reg_of.get(e['off'], []):
             text.append('// registered for %s' % line)
         args = ''.join(', a%d' % k for k in range(e['arity']))
-        if e.get('static'):                              # a helper called as (agent, arguments...): plain C++, reached from its callers only
-            text.append('L2CValue local::%s(L2CAgent *agent%s) {' % (e['ident'], ''.join(', const L2CValue &a%d' % k for k in range(e['arity']))))
+        if e.get('plain'):                               # S18: a helper called as (arguments...): it has no agent, it computes on values only
+            text.append('L2CValue local::%s(%s) {' % (e['ident'], ', '.join(params(e))))
+        elif e.get('static'):                            # a helper called as (agent, arguments...): plain C++, reached from its callers only
+            text.append('L2CValue local::%s(L2CAgent *agent%s) {' % (e['ident'], ''.join(', ' + x for x in params(e))))
             text.append('    BattleObjectModuleAccessor *boma = agent->boma;')
+        elif e.get('unbound'):
+            # S20: a helper of the member convention with more than six arguments: the eighth and later come in stack
+            # cells (FS_SARG, status_local.h). Not bound: the game's own callers keep the original; source callers call
+            # it through local::name (fs_local_source puts the cells), so it is tested inside them
+            decl = ''.join(' FS_COMMA FS_V a%d' % k for k in range(e['arity']))
+            pas = ''.join(' FS_COMMA FS_ARG(c, %d)' % (k + 1) if k < 7 else ' FS_COMMA FS_SARG(c, %d)' % (k - 7) for k in range(e['arity']))
+            text.append('FS_L2C_%sN(%s,%s,%s) {' % ('VOID_' if e['void'] else '', e['ident'], decl, pas))
         else:
             text.append('L2C_%sFUNCTION%s(%s, %s%s) {' % ('VOID_' if e['void'] else '', str(e['arity']) if e['arity'] else '', short, e['ident'], args))
             binds.append((e['off'], e['ident']))
@@ -918,7 +1239,7 @@ def cmd_test(mods):
             continue
         r = res[name]
         sj = json.load(open(os.path.join(OUT, name + '_status.json')))
-        mine = set(e['ident'] for e in sj['functions'] if e['ok'] and not e.get('static'))      # bound = tested by themselves
+        mine = set(e['ident'] for e in sj['functions'] if e['ok'] and not e.get('static') and not e.get('unbound'))      # bound = tested by themselves
         bad = {k: v for k, v in r['bad'].items() if k in mine}
         for s in skip:
             if s in mine:

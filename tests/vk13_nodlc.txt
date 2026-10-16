@@ -1,0 +1,2 @@
+# track V session 13: no add-on content for the scripted test runs (a fresh save copy with add-on content shows
+# "joins the battle" notices after the title, which the menu sequences do not answer). SSBU_DLC_LIST points here.

@@ -1012,8 +1012,8 @@ static void fighter_offline(Ctx *c) {
  *                                   GroundModule::set_correct(GROUND_CORRECT_KIND_AIR)
  * Every executed command is one log line `[debug] frame F fighter K: ...` written BEFORE the calls are made (the
  * sweep driver tests\s10_sweep.py reads the last one after a trap). */
-enum { FD_STATUS, FD_STATUSREQ, FD_ITEM, FD_NOITEM, FD_FINAL, FD_FLAG, FD_DAMAGE, FD_POS, FD_AIR, FD_KINDS };
-static const char *const g_fd_names[FD_KINDS] = {"status", "statusreq", "item", "noitem", "final", "flag", "damage", "pos", "air"};
+enum { FD_STATUS, FD_STATUSREQ, FD_ITEM, FD_NOITEM, FD_FINAL, FD_FLAG, FD_DAMAGE, FD_POS, FD_AIR, FD_TERM, FD_KINDS };
+static const char *const g_fd_names[FD_KINDS] = {"status", "statusreq", "item", "noitem", "final", "flag", "damage", "pos", "air", "term"};
 typedef struct { int every, cmd, fighter, done, nargs; long long at; char arg[3][72]; } FsDbgCmd;
 static FsDbgCmd *g_fd_cmd;
 static int g_fd_count, g_fd_n;
@@ -1089,6 +1089,10 @@ static void fd_run(Ctx *c, FsDbgCmd *d, uint64_t boma, int k) {
         if (!fd_value("FIGHTER_INSTANCE_WORK_ID_FLAG_FINAL", &flag)) { printf("[debug]   FIGHTER_INSTANCE_WORK_ID_FLAG_FINAL not found\n"); break; }
         fd_call(c, FD_N("24WorkModule__on_flag_impl") "i", boma, (uint64_t)(int64_t)flag, 0, 0, 0, 0, 0, NULL);
         printf("[debug]   is_flag(FIGHTER_INSTANCE_WORK_ID_FLAG_FINAL) = %d\n", (int)(fd_call(c, FD_N("24WorkModule__is_flag_impl") "i", boma, (uint64_t)(int64_t)flag, 0, 0, 0, 0, 0, NULL) & 1));
+        break; }
+    case FD_TERM: {      /* S14: term <f> <transition term id> [1]: log WorkModule::is_enable_transition_term; with 1 first enable_transition_term */
+        if (d->nargs > 1 && a[1] != 0) fd_call(c, FD_N("39WorkModule__enable_transition_term_impl") "i", boma, (uint64_t)(int64_t)a[0], 0, 0, 0, 0, 0, NULL);
+        printf("[debug]   is_enable_transition_term(%s) = %d\n", d->arg[0], (int)(fd_call(c, FD_N("42WorkModule__is_enable_transition_term_impl") "i", boma, (uint64_t)(int64_t)a[0], 0, 0, 0, 0, 0, NULL) & 1));
         break; }
     case FD_FLAG: fd_call(c, d->nargs > 1 && a[1] == 0 ? FD_N("25WorkModule__off_flag_impl") "i" : FD_N("24WorkModule__on_flag_impl") "i", boma, (uint64_t)(int64_t)a[0], 0, 0, 0, 0, 0, NULL); break;
     case FD_DAMAGE: fd_call(c, FD_N("29DamageModule__add_damage_impl") "fi", boma, 0, 0, 0, 0, 0, (float)a[0], NULL); break;
@@ -1168,6 +1172,7 @@ static uint64_t fh_rng_base(void) {
 static void fh_hook(Ctx *c, void *user) {
     (void)user;
     uint64_t agent = c->x[0], boma = agent ? rd64(agent + 0x40) : 0;
+    { static int dn; if (agent && dn < 12 && g_fh_n) { uint64_t key[2] = {agent, boma}; static uint64_t seen[16][2]; int f = 0; for (int q = 0; q < dn; q++) if (seen[q][0] == key[0]) f = 1; if (!f) { seen[dn][0] = agent; seen[dn][1] = boma; dn++; printf("[fight] S20t: frame line, agent %llx boma %llx category word %x, first fighter frame %lld\n", (unsigned long long)agent, (unsigned long long)boma, boma ? rd32(boma + 8) : 0, g_fh_f[0].frame); fflush(stdout); } } }
     if (boma && (rd32(boma + 8) >> 28) == 0) {
         int k = 0;
         while (k < g_fh_n && g_fh_f[k].boma != boma) k++;
@@ -1176,6 +1181,7 @@ static void fh_hook(Ctx *c, void *user) {
             g_fh_f[k].boma = boma; g_fh_f[k].frame = 0; g_fh_f[k].entry = -1;
             if (fd_value("FIGHTER_INSTANCE_WORK_ID_INT_ENTRY_ID", &id)) g_fh_f[k].entry = (int)fd_call(c, FD_N("24WorkModule__get_int_impl") "i", boma, (uint64_t)(int64_t)id, 0, 0, 0, 0, 0, NULL);
             g_fh_n++;
+            if (k > 0 || g_fh_n > 1) { printf("[fight] S20t: fighter slot %d: boma %llx entry %d, category word %x, frame line call %lld\n", k, (unsigned long long)boma, g_fh_f[k].entry, rd32(boma + 8), g_fh_f[0].frame); fflush(stdout); }
             if (k == 0) {
                 uint64_t rb = fh_rng_base();
                 printf("[fight] first battle frame (fighter entry %d); input mark \"fight\" raised; script random generators at %llx\n", g_fh_f[k].entry, (unsigned long long)rb);
@@ -1221,8 +1227,14 @@ static void fh_hook(Ctx *c, void *user) {
             rec.f = f; rec.k = g_fh_f[k].entry; rec.st = st; rec.mot = mot; rec.mf = mf; rec.x = x; rec.y = y; rec.dmg = dmg; rec.rh = rh;
             g_fh_run = fh_fnv(g_fh_run, &rec, sizeof rec);
             uint32_t bx, by, bm, bd; memcpy(&bx, &x, 4); memcpy(&by, &y, 4); memcpy(&bm, &mf, 4); memcpy(&bd, &dmg, 4);
-            fprintf(g_fh_out, "F %lld e %d st %x mot %llx mf %08x x %08x y %08x dmg %08x rngcalls %u rng %08x H %016llx  (%.3f %.3f frame %.2f %.2f%%)\n",
-                    f, g_fh_f[k].entry, st, (unsigned long long)mot, bm, bx, by, bd, rc, (unsigned)(rh ^ (rh >> 32)), (unsigned long long)g_fh_run, (double)x, (double)y, (double)mf, (double)dmg);
+            /* N12: SSBU_FIGHT_HASH_WORK=<int work id, hex or constant name>: that int variable of each fighter at the end of
+             * the line ("w <value>"); not part of H (the hash stays comparable with runs without it) */
+            static int wk_on = -1; static double wk_id;
+            if (wk_on < 0) { const char *w = getenv("SSBU_FIGHT_HASH_WORK"); wk_on = w && w[0] && (fd_value(w, &wk_id) || ((wk_id = (double)strtoul(w, NULL, 16)), wk_id != 0)); }
+            char wtxt[32] = "";
+            if (wk_on) snprintf(wtxt, sizeof wtxt, " w %d", (int)fd_call(c, FD_N("24WorkModule__get_int_impl") "i", boma, (uint64_t)(int64_t)wk_id, 0, 0, 0, 0, 0, NULL));
+            fprintf(g_fh_out, "F %lld e %d st %x mot %llx mf %08x x %08x y %08x dmg %08x rngcalls %u rng %08x H %016llx  (%.3f %.3f frame %.2f %.2f%%)%s\n",
+                    f, g_fh_f[k].entry, st, (unsigned long long)mot, bm, bx, by, bd, rc, (unsigned)(rh ^ (rh >> 32)), (unsigned long long)g_fh_run, (double)x, (double)y, (double)mf, (double)dmg, wtxt);
             if ((f & 63) == 0) fflush(g_fh_out);
             if (k == 0 && f % 300 == 0 && rb) {            /* which generators are drawn from: the 9 call counters */
                 printf("[fight] frame %lld: generator calls", f);

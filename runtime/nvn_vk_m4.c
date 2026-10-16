@@ -370,6 +370,30 @@ typedef struct PairLib { VStage *vs, *fs; uint8_t samples, sshade; volatile LONG
 static PairLib *g_plib[1024];
 static CRITICAL_SECTION g_gpl_lock;
 static volatile LONG g_in_fight;
+/* Session 13: PIPELINE CREATION FEEDBACK (core in Vulkan 1.3): the driver's own answer to "was this compiled now or taken
+ * from the pipeline cache". Chained to every stage library and every link. [0] stage libraries, [1] links; hit = the
+ * driver set APPLICATION_PIPELINE_CACHE_HIT, miss = valid feedback without it, none = the driver gave no valid feedback.
+ * The same split for creations on the render thread in a fight frame ("f"), with the time of the misses. Line
+ * "nvn_vk_feedback:" at exit; with SSBU_VK_HOLDLOG=1 one line "nvn_vk_first:" per creation at a draw in a fight frame. */
+typedef struct { uint32_t flags; uint64_t duration; } FbRec;
+typedef struct { VkStructureType sType; const void *pNext; FbRec *pPipelineCreationFeedback; uint32_t pipelineStageCreationFeedbackCount; FbRec *pPipelineStageCreationFeedbacks; } FbInfo;
+static volatile LONG64 g_pc_dirty, g_pc_dirty_saved;      /* session 14: creations the driver's cache did not answer (stage libraries by feedback; whole pipelines by their time, over 3 ms), and the count at the last read-out */
+static void pc_dirty_time(LONG64 t0) { LARGE_INTEGER fq; QueryPerformanceFrequency(&fq); if ((tk() - t0) * 1000 > 3 * fq.QuadPart) InterlockedIncrement64(&g_pc_dirty); }
+static LONG64 g_fb_hit[2], g_fb_miss[2], g_fb_none[2], g_fb_fhit[2], g_fb_fmiss[2], g_fb_fmiss_tk[2], g_fb_fhit_tk[2], g_fb_miss_ns[2];
+static DWORD g_render_tid;
+static void fb_note(int kind, const FbRec *f, LONG64 ticks) {
+    int valid = f->flags & 1, hit = valid && (f->flags & 2);
+    InterlockedIncrement64(!valid ? &g_fb_none[kind] : hit ? &g_fb_hit[kind] : &g_fb_miss[kind]);
+    if (kind == 0 && !hit) InterlockedIncrement64(&g_pc_dirty);      /* session 14: a stage library the pipeline cache did not have: the file on disk is now older than the cache */
+    if (valid && !hit) InterlockedAdd64(&g_fb_miss_ns[kind], (LONG64)f->duration);
+    if (GetCurrentThreadId() == g_render_tid && g_in_fight) {
+        static int nl;
+        LARGE_INTEGER fq; QueryPerformanceFrequency(&fq);
+        if (hit) { g_fb_fhit[kind]++; g_fb_fhit_tk[kind] += ticks; } else { g_fb_fmiss[kind]++; g_fb_fmiss_tk[kind] += ticks; }
+        if (holdlog_on() && nl++ < 2000) printf("nvn_vk_first: frame %lld (fight): %s at a draw: %s, %.3f ms (the driver's own time %.3f ms)\n", (long long)nvn_front_frame_next(), kind ? "pipeline LINKED" : "stage LIBRARY made",
+                                                !valid ? "no feedback from the driver" : hit ? "pipeline cache HIT" : "COMPILED NOW (not in the pipeline cache)", (double)ticks * 1000.0 / (double)fq.QuadPart, (double)f->duration / 1e6);
+    }
+}
 static struct { PKey k; VkPipeline lib; } g_olib[128];
 static int g_nolib;
 static VkPipeline g_vilib[3];
@@ -590,9 +614,13 @@ static VkPipeline stagelib_ensure(VStage *v, int alone, int *how) {
     gi.pNext = &gl; gi.flags = VK_PIPELINE_CREATE_LIBRARY_BIT_KHR | (gpl_opt_on() ? VK_PIPELINE_CREATE_RETAIN_LINK_TIME_OPTIMIZATION_INFO_BIT_EXT : 0); gi.stageCount = 1; gi.pStages = &st; gi.pDynamicState = &dy; gi.layout = g_ulayout;
     if (!isfs) { gi.pViewportState = &vp; gi.pRasterizationState = &rs; }
     if (isfs || alone) gi.pDepthStencilState = &ds;
+    FbRec fb_all = {0, 0}, fb_st = {0, 0};
+    FbInfo fbi = {(VkStructureType)1000192000, NULL, &fb_all, 1, &fb_st};
+    ri.pNext = &fbi;
     VkResult r = vkCreateGraphicsPipelines(V.device, g_pcache, 1, &gi, NULL, lib);
     if (r != VK_SUCCESS) vkd_fail("vkCreateGraphicsPipelines, stage library (%s stage %u): %s", isfs ? "fragment" : "vertex", v->id, vk_result_name(r));
     LONG64 dt = tk() - t0;
+    fb_note(0, &fb_all, dt);
     EnterCriticalSection(&g_sh_lock);
     *state = 2;
     WakeAllConditionVariable(&g_sh_cv);
@@ -638,7 +666,9 @@ static void gpl_optimise(Pipe *p) {                /* a worker */
     pli.libraryCount = (uint32_t)n; pli.pLibraries = libs;
     VkGraphicsPipelineCreateInfo gi = {VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
     gi.pNext = &pli; gi.layout = g_ulayout; gi.flags = VK_PIPELINE_CREATE_LINK_TIME_OPTIMIZATION_BIT_EXT;
+    LONG64 t_dirty = tk();
     if (vkCreateGraphicsPipelines(V.device, g_pcache, 1, &gi, NULL, &opt) != VK_SUCCESS || !opt) return;
+    pc_dirty_time(t_dirty);
     p->p_fast = InterlockedExchangePointer((void *volatile *)&p->p, opt);
     InterlockedIncrement64(&g_gpl_opt_n); InterlockedAdd64(&g_gpl_opt_tk, tk() - t0);
 }
@@ -661,9 +691,13 @@ static double pipe_build(Pipe *p) {
         pli.libraryCount = (uint32_t)n; pli.pLibraries = libs;
         VkGraphicsPipelineCreateInfo gi = {VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
         gi.pNext = &pli; gi.layout = g_ulayout;
+        FbRec fb_all = {0, 0};
+        FbInfo fbi = {(VkStructureType)1000192000, NULL, &fb_all, 0, NULL};
+        pli.pNext = &fbi;
         VkResult r = vkCreateGraphicsPipelines(V.device, g_pcache, 1, &gi, NULL, &p->p);
         if (r != VK_SUCCESS) vkd_fail("vkCreateGraphicsPipelines, link of stage libraries (vertex stage %u, fragment stage %u, %d colour targets, depth format %d): %s", k->vs, k->fs, k->ncolor, k->dfmt, vk_result_name(r));
         LONG64 dt = tk() - t1;
+        fb_note(1, &fb_all, dt);
         p->layout = g_ulayout; p->dl[0] = g_udl[0]; p->dl[1] = g_udl[1]; p->nb[0] = 66; p->nb[1] = 128; p->push0 = 0; p->libbed = 1; p->lib_how = (uint8_t)how;
         InterlockedIncrement64(&R.pipelines);
         if (GetCurrentThreadId() == g_render_tid) { g_gpl_dlink++; g_gpl_dlink_tk += dt; if (dt > g_gpl_dlink_max) g_gpl_dlink_max = dt; if (g_in_fight) g_gpl_dlink_fight++; }
@@ -926,6 +960,7 @@ static Pipe *pipe_get(const PKey *k, VStage *vs, VStage *fs) {
         PairRec *pr0 = pair_get(vs, fs);
         pr0->drawn = 1;
         if (idx >= 0) { pr0->used |= 1ull << idx; cont_learn(pr0); }
+        if (i >= 0) g_fu_fr_newsig++;
         if (D.has_gpl && !gpl_sep() && fs && fs->fragonly) gpl_shared_vs(vs);
         if (i >= 0 && g_predict) for (PairRec *pr = g_pair_all; pr; pr = pr->all) predict_pair(pr, i);      /* a pass signature never seen: the pairs not yet drawn get it now, on the workers */
     }
@@ -951,6 +986,7 @@ static Pipe *pipe_get(const PKey *k, VStage *vs, VStage *fs) {
     }
     if (!p->used) {
         p->used = 1;
+        g_fu_fr_n++; if (mine) { if (D.has_gpl && p->lib_how == 0) g_fu_fr_linked++; else g_fu_fr_made++; g_fu_fr_tk += tk() - t0; } if (waited) g_fu_fr_made++;      /* round 16, SSBU_VK_FIRSTLOG: first draws of a pipeline (pair + pass signature) per frame */
         if (p->predicted && !mine) g_pred_used++;
         if (!p->recorded) { piperec_append(k, vs, fs, 0); p->recorded = 1; }
     }
@@ -1675,6 +1711,13 @@ static void m4_report(void) {
                (long long)g_gpl_made, (double)g_gpl_made_tk * q, (long long)g_gpl_cross, g_nfo, g_nshvs, (long long)g_gpl_draw, (double)g_gpl_draw_tk * q, (double)g_gpl_draw_max * q, (long long)g_gpl_wait, (double)g_gpl_wait_tk * q,
                (long long)g_gpl_dlink, (long long)g_gpl_dlink_fight, (double)g_gpl_dlink_tk * q, (double)g_gpl_dlink_max * q, (long long)g_gpl_link, (double)g_gpl_link_tk * q, g_nolib);
     }
+    if (D.has_gpl) {
+        double q2 = 1000.0 / (double)fq.QuadPart;
+        printf("nvn_vk_feedback: the driver's creation feedback: stage libraries: %lld pipeline-cache HITS, %lld COMPILED NOW (%.0f ms of driver time), %lld without feedback | links: %lld hits, %lld compiled now (%.0f ms), %lld without feedback | "
+               "on the render thread in FIGHT frames: libraries %lld hits (%.1f ms) / %lld compiled (%.1f ms); links %lld hits (%.1f ms) / %lld not hits (%.1f ms)\n",
+               (long long)g_fb_hit[0], (long long)g_fb_miss[0], (double)g_fb_miss_ns[0] / 1e6, (long long)g_fb_none[0], (long long)g_fb_hit[1], (long long)g_fb_miss[1], (double)g_fb_miss_ns[1] / 1e6, (long long)g_fb_none[1],
+               (long long)g_fb_fhit[0], (double)g_fb_fhit_tk[0] * q2, (long long)g_fb_fmiss[0], (double)g_fb_fmiss_tk[0] * q2, (long long)g_fb_fhit[1], (double)g_fb_fhit_tk[1] * q2, (long long)g_fb_fmiss[1], (double)g_fb_fmiss_tk[1] * q2);
+    }
     if (D.has_gpl) printf("nvn_vk_gpl: mode %s; pipelines linked again with optimisation by the workers: %lld of %lld queued, %.0f ms of worker time\n", gpl_sep() ? "2 (a library per stage)" : "1 (a library per stage pair)", (long long)g_gpl_opt_n, (long long)g_gpl_opt_q, (double)g_gpl_opt_tk * 1000.0 / (double)fq.QuadPart);
     printf("nvn_vk_skip: shader_wait = %s; draws left out because a stage or pipeline was not ready: %lld in %lld frames (stage not ready %lld, pipeline not ready %lld)\n", skip_on() ? "skip (near a fight)" : "hold (the default)", (long long)g_skip_n, (long long)g_skip_frames, (long long)g_skip_stage, (long long)g_skip_pipe);
     if (g_pix_ready) printf("nvn_vk_prep: containers announced whole from the index: %lld because a pool was laid over their code, %lld because one of their programs was handed over (%lld of all these while IN A FIGHT), %lld variations queued; pools looked up: %lld found in the index, %lld not; programs handed over whose variation several files hold (no container named): %lld; header searches not made near a fight: %lld\n",
@@ -1780,6 +1823,19 @@ static void pcache_save_at(int where, int marker) {
     void *data = NULL;
     int one = 0;
     if (!g_pcache) return;
+    if (where == 0) {       /* session 14: the exit path rewrote the whole file (0.9 GB: 5-11 s with the window still there) even when nothing was added */
+        const char *e = getenv("SSBU_VK_PCSAVE");
+        WIN32_FILE_ATTRIBUTE_DATA fa0;
+        LONG64 added = g_pc_dirty - g_pc_dirty_saved;
+        int have_file = GetFileAttributesExA(g_pcache_path, GetFileExInfoStandard, &fa0) && (fa0.nFileSizeLow || fa0.nFileSizeHigh);
+        if (have_file && !marker && added < 8 && !(e && !strcmp(e, "always"))) {      /* under 8 new entries: not worth 0.9 GB of writing (run s14prep1: 1 entry = 11 s of exit); they are made again next time, a few ms */
+            printf("nvn_vk: pipeline cache NOT rewritten at exit: %lld creations were added since %s (under 8: not worth rewriting the file; SSBU_VK_PCSAVE=always writes it anyway)\n", (long long)added, g_pc_dirty_saved ? "the last save of this run" : "it was read at start");
+            fflush(stdout);
+            return;
+        }
+        printf("nvn_vk: pipeline cache: %lld creations since %s were not in it%s: written at exit\n", (long long)added, g_pc_dirty_saved ? "the last save" : "the start", marker ? " and the preparation's marker is due" : !have_file ? " and there is no file yet" : "");
+    }
+    g_pc_dirty_saved = g_pc_dirty;
     if (g_pcw_thread) { WaitForSingleObject(g_pcw_thread, where ? 0 : 60000); if (where && WaitForSingleObject(g_pcw_thread, 0) != WAIT_OBJECT_0) return; CloseHandle(g_pcw_thread); g_pcw_thread = NULL; }
     HANDLE probe = NULL, ready = NULL;
     if (where == 2) { ready = CreateEventA(NULL, TRUE, FALSE, NULL); g_pcprobe_stop = 0; probe = CreateThread(NULL, 0, pcprobe_main, ready, 0, NULL); WaitForSingleObject(ready, 3000); }
@@ -2389,7 +2445,14 @@ static void prep_start(void) {
     g_prep_cap = g_pw_nthread > 1 ? g_pw_nthread / 2 : 1;
     if (getenv("SSBU_VK_PREP_WORKERS") && atoi(getenv("SSBU_VK_PREP_WORKERS")) > 0) g_prep_cap = atoi(getenv("SSBU_VK_PREP_WORKERS"));
     if (getenv("SSBU_VK_PREP_KEEP")) g_prep_keep = atoi(getenv("SSBU_VK_PREP_KEEP"));
-    snprintf(g_prep_marker, sizeof g_prep_marker, "%s/prepared_v%u_s%d_%s_%04x_%04x_%08x.txt", vkc_dir(), MX_VK_VERSION, RS_ON ? 1 : 0, D.has_gpl && gpl_sep() ? "lib" : "nolib" /* a pass without libraries (SSBU_VK_PREP=1, run s10n0) must not make a later run with libraries skip theirs */, (unsigned)V.props.vendorID, (unsigned)V.props.deviceID, (unsigned)V.props.driverVersion);
+    /* session 14: VK_KEYS_VERSION = the version of what feeds the driver's keys besides the shader text: the library layout
+     * (the one-layout sets: 66 buffers, 128 samplers) and the dynamic-state list. RAISE IT when either changes: every stage
+     * library then misses in the driver's cache, and without a new marker name the old marker would suppress the preparation.
+     * Version 1 keeps the marker name of sessions 10-13 (no "_k" part), so a PC prepared before today is not prepared again. */
+#define VK_KEYS_VERSION 1
+    char kv[16] = "";
+    if (VK_KEYS_VERSION > 1) snprintf(kv, sizeof kv, "_k%d", VK_KEYS_VERSION);
+    snprintf(g_prep_marker, sizeof g_prep_marker, "%s/prepared_v%u%s_s%d_%s_%04x_%04x_%08x.txt", vkc_dir(), MX_VK_VERSION, kv, RS_ON ? 1 : 0, D.has_gpl && gpl_sep() ? "lib" : "nolib" /* a pass without libraries (SSBU_VK_PREP=1, run s10n0) must not make a later run with libraries skip theirs */, (unsigned)V.props.vendorID, (unsigned)V.props.deviceID, (unsigned)V.props.driverVersion);
     if (on && GetFileAttributesA(g_prep_marker) != INVALID_FILE_ATTRIBUTES && !(e && atoi(e) == 2)) {
         printf("nvn_vk_prep: every container of the game's data was prepared for this GPU and driver by an earlier run (%s): only the %d container(s) kept in memory are made again, from their records (SSBU_VK_PREP=2 does everything again)\n", g_prep_marker, g_prep_keep > 0 ? g_prep_keep : 0);
         g_prep_marked = 1;

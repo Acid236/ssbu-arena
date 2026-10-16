@@ -129,7 +129,8 @@ static DWORD WINAPI watchdog(LPVOID arg) {
         Ctx *c = m->ctx;
         const char *imp = c->in_import;
         int blocked_scan = 0;
-        if (m->pacing) snprintf(key, sizeof key, "pace");
+        extern volatile LONG g_display_holding;      /* display.c, session 14: the finished frame is held for its tick on the render thread */
+        if (m->pacing || (m->wait_render && g_display_holding)) snprintf(key, sizeof key, "pace");
         else if (m->wait_render) {
             const char *s = (const char *)g_hitch_rt;
             uint64_t a = g_hitch_rt_arg;

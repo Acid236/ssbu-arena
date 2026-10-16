@@ -1,0 +1,14 @@
+# S15: put the dummy (fighter 1) in front of player 1 (fighter 0) again and again so that hits connect
+at 200 pos 0 -15 0.1
+at 200 pos 1 -9 0.1
+at 480 pos 0 -15 0.1
+at 480 pos 1 -9 0.1
+at 760 pos 0 -15 0.1
+at 760 pos 1 -9 0.1
+at 1040 pos 0 -15 0.1
+at 1040 pos 1 -9 0.1
+at 1620 pos 0 -15 0.1
+at 1620 pos 1 -9 0.1
+at 1625 final 0
+at 1626 term 0 FIGHTER_STATUS_TRANSITION_TERM_ID_FINAL 1
+at 1630 status 0 FIGHTER_STATUS_KIND_FINAL

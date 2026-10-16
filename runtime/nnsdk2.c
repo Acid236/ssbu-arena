@@ -421,11 +421,16 @@ static void os_FreeMemoryBlock(Ctx *c) { VirtualFree((void *)(uintptr_t)c->x[0],
 static void os_SetMemoryPermission(Ctx *c) {
     DWORD old, prot = (uint32_t)c->x[2] == 3 ? PAGE_READWRITE : (uint32_t)c->x[2] == 1 ? PAGE_READONLY : PAGE_NOACCESS;
     if ((uint32_t)c->x[2] != 0 && (uint32_t)c->x[2] != 1 && (uint32_t)c->x[2] != 3) guest_trap("nn::os::SetMemoryPermission: invalid permission", c->x[30] - 4);
-    { void cxxrt_mem_changed(void); cxxrt_mem_changed(); }      /* nncxxrt.c: remembered readable checks are forgotten (P3) */
+    cxxrt_mem_changed(c->x[0], c->x[1]);      /* nncxxrt.c: remembered readable checks of this range are forgotten (P3) */      // PR #2 (jfb112697): passes the range; prototype from hostrt.h (via sdklift.h)
     if (!VirtualProtect((void *)(uintptr_t)c->x[0], (SIZE_T)c->x[1], prot, &old)) guest_trap("nn::os::SetMemoryPermission: VirtualProtect failed", c->x[0]);
+    cxxrt_mem_changed(c->x[0], c->x[1]);      // PR #2 (jfb112697): and after it, as the frees do: a check that ran in between saw the old state
 }
 static void os_SetMemoryAttribute(Ctx *c) { (void)c; }
-static void os_FreeAddressRegion2(Ctx *c) { VirtualFree((void *)(uintptr_t)c->x[0], 0, MEM_RELEASE); c->x[0] = 0; }
+static void os_FreeAddressRegion2(Ctx *c) {      // PR #2 (review): report the release before and after, as os_FreeAddressRegion in nnsdk.c does
+    uint64_t base = c->x[0];
+    cxxrt_mem_changed(base, 0); VirtualFree((void *)(uintptr_t)base, 0, MEM_RELEASE); cxxrt_mem_changed(base, 0);
+    c->x[0] = 0;
+}
 static void os_IsVammEnabled(Ctx *c) { c->x[0] = 1; }
 static void install_mem_overrides(void) {
     sdk_host_override("pthread_once", pt_once);

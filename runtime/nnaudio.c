@@ -321,6 +321,19 @@ static void audio_AppendAudioOutBuffer(Ctx *c) {      /* (AudioOut *, AudioOutBu
         s->prepared = 0;
         if (g_tone_left > 0) { g_tone_left--; peak = add_tone(s->pcm, frames, peak); }
         if (peak && !g_heard) { g_heard = 1; printf("nn::audio: first buffer with sound (buffer %llu, peak %u)\n", g_total_appended, peak); }
+        {   /* TEST ONLY, SSBU_AUDIO_HASH=<file> (round "four players"): one line per buffer the game hands to the device:
+             * index, frames, peak, FNV-1a 64 of the game's own samples (before our stereo copy). Compares the mixer's output
+             * of two builds (tests\p15_pcm_compare.py). One getenv at the first buffer; nothing without the variable. */
+            static FILE *hf; static int tried;
+            if (!tried) { const char *hp = getenv("SSBU_AUDIO_HASH"); tried = 1; if (hp && *hp) hf = fopen(hp, "w"); }
+            if (hf) {
+                uint64_t h = 0xcbf29ce484222325ULL;
+                const uint8_t *pb = (const uint8_t *)(uintptr_t)data;
+                for (uint64_t i = 0; i < size; i++) { h ^= pb[i]; h *= 0x100000001b3ULL; }
+                fprintf(hf, "%llu %u %u %016llx\n", g_total_appended, frames, peak, (unsigned long long)h);
+                if ((g_total_appended & 63) == 0) fflush(hf);
+            }
+        }
         if (g_wav && g_wav_bytes < (unsigned long long)WAV_SECONDS * (unsigned)g_rate * 4) {
             fwrite(s->pcm, 4, frames, g_wav);
             g_wav_bytes += (unsigned long long)frames * 4;
@@ -586,6 +599,7 @@ static void opus_DecodeInterleaved(Ctx *c) {          /* (this, size_t *consumed
     void *st = (void *)(uintptr_t)rd64(self + OBJ_STATE);
     int frames;
     if (st) {
+        { void r1_nosim(uint64_t, uint64_t); r1_nosim((uint64_t)(uintptr_t)out, A4); r1_nosim((uint64_t)(uintptr_t)st, (uint64_t)p_opus_decoder_get_size(channels)); }   /* R1 (r1_state.c): decoded sound and the decoder's state (libopus writes it in the game's work buffer, round 5) are not simulation state (nothing without SSBU_R1_MARK) */
         frames = p_opus_decode(st, (const unsigned char *)(uintptr_t)(in + OPUS_HEADER), (int)len, out, room > OPUS_MAX_FRAMES ? OPUS_MAX_FRAMES : room, 0);
         if (frames < 0) {
             if (InterlockedIncrement64(&g_opus_errors) <= 5) printf("nn::codec: opus_decode error %d (packet of %u bytes, input %llu bytes)\n", frames, len, (unsigned long long)in_size);

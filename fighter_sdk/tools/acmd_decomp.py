@@ -168,7 +168,10 @@ class Exec:
             # (whatever the public bindings say); its plain uses are lane 0 (printed as .v[0])
             nodes = getattr(self, 'allnodes', None)
             nd = nodes[v[1]] if nodes is not None else self.nodes[v[1]]
-            if nd['kind'] != 'call':
+            # S20: a script call (lua_State) that returns a vector in v0 (sv_kinetic_energy::get_speed): only where
+            # the status sources' lua_vec() exists (status_local.h), only without typed parameters
+            lua_vec = nd['kind'] == 'lua' and getattr(self, 'lua_vec', False) and not nd.get('proto')
+            if nd['kind'] != 'call' and not lua_vec:
                 self.fail('lane %d of the result of a script call' % si)
             nd['vret'] = True
             lane = ('lane', v, si)
@@ -295,6 +298,12 @@ class Exec:
             core, order, pops = self.m.macros[target]
             if self.get('x0') != AGENT:
                 self.fail('macro called on something else than the agent')
+            pc_ = mangle.parse(core)
+            if pc_ and len(pc_[1]) > 1:
+                # S21 (found by the offline gate, item metroid_initialize_coroutine): a macro whose script call takes
+                # TYPED parameters (app::item::set_hit_as_capsule(L, int, Hash40, float, float): the macro converts
+                # some pushed values itself) was written as the untyped wrapper (lua_State only): wrong arguments
+                self.fail('macro whose script call takes typed parameters')
             sp = self.reg['sp'][1]
             args = []
             for k in order:
@@ -390,7 +399,7 @@ class Exec:
                 self.fail('%s without clear_lua_stack' % name)
             i = self.node(kind='lua', sym=sym, args=self.lua, popped=False, proto=())
             self.lua = None
-            self.reg['x0'] = UNDEF
+            self.reg['x0'] = ('luax', ('ref', i)) if self.mode != 'body' else UNDEF      # S21: see the typed case below
             # S8: such a function can return a float directly too (sv_kinetic_energy::get_speed_x). v0 used to keep
             # the value of an EARLIER call here, and a later read of s0 was printed as that earlier result (found by
             # the offline test on the fighters' status scripts; a wrong value, not a refusal).
@@ -402,8 +411,29 @@ class Exec:
             proto = []
             xi = 1
             fi = 0
-            for k, t in enumerate(params[1:]):
+            k = 0                                        # (S21: the pushed value a parameter takes, see the vector case)
+            consts = []                                  # (S21: constants passed by the game's code itself, see below)
+            for t in params[1:]:
                 c = mangle.reg_class(t)
+                st = mangle.strip(t)
+                vn = (isinstance(st, tuple) and st[0] == 'ref' and self.mode != 'body'
+                      and {('const', ('class', 'phx::Vector2f')): 2, ('const', ('class', 'phx::Vector3f')): 3}.get(st[1]))
+                if vn:
+                    # S21 (status sources only): a const phx::Vector2f / 3f made of the pushed values, lane i = pushed
+                    # value k + i as_number (kinetic_energy_control::set_speed: push x, push y, {x, y} by address). The
+                    # proto says it: 'as_number@<lanes>' for each of those values (l2c_decomp.Printer2: lua_ret)
+                    v = self.get('x%d' % xi)
+                    xi += 1
+                    built = self.mem.get(v[1], UNDEF) if v[0] == 'stk' else UNDEF
+                    if built[0] != 'vec':
+                        self.fail('%s: argument %d is not a conversion of the value pushed' % (name, k))
+                    for i in range(vn):
+                        lane = built[1 + i]
+                        if k + i >= len(self.lua) or lane[0] != 'conv' or lane[1] != 'as_number' or lane[2] != self.lua[k + i]:
+                            self.fail('%s: argument %d is not a conversion of the value pushed' % (name, k))
+                        proto.append('as_number@%d' % vn)
+                    k += vn
+                    continue
                 if c == 'f':
                     v = self.get('s%d' % fi)
                     fi += 1
@@ -412,14 +442,24 @@ class Exec:
                     xi += 1
                 else:
                     self.fail('%s: parameter type' % name)
+                if (self.mode != 'body' and (k >= len(self.lua) or v[0] != 'conv' or v[2] != self.lua[k])
+                        and ((c == 'f' and v[0] == 'f') or (c == 'x' and v[0] in ('int', 'luaconst')))):
+                    # S21 (status sources only): a constant the game's code passes itself, not a pushed value
+                    # (target::search(L, kind, 0.0, 0.0)): 'K:f' / 'K:i' in the proto, the value after the pushed ones
+                    proto.append('K:f' if c == 'f' else 'K:i')
+                    consts.append(v)
+                    continue
                 if k >= len(self.lua) or v[0] != 'conv' or v[2] != self.lua[k]:
                     self.fail('%s: argument %d is not a conversion of the value pushed' % (name, k))
                 proto.append(v[1])
-            if len(proto) != len(self.lua):
+                k += 1
+            if k != len(self.lua):                       # (S21: k = the pushed values taken; was len(proto), the same before)
                 self.fail('%s: more values pushed than passed' % name)
-            i = self.node(kind='lua', sym=sym, args=self.lua, popped=False, proto=tuple(proto))
+            i = self.node(kind='lua', sym=sym, args=self.lua + consts, popped=False, proto=tuple(proto))
             self.lua = None
-            self.reg['x0'] = UNDEF
+            # S21 (status sources only): such a function can return an integer directly in x0 (app::item::common_param_int):
+            # ('luax', node); its width is the register read (l2c_decomp.FExec.get), printed lua_ret<int32_t>(...)
+            self.reg['x0'] = ('luax', ('ref', i)) if self.mode != 'body' else UNDEF
             self.reg['v0'] = ('ref', i)                  # S2: such a function can return a float directly (get_value_float)
             return
         # ordinary imported function
@@ -514,6 +554,14 @@ class Exec:
             a = self.add(base, 0 if post else off)
             if pre:
                 self.put(base_tok, a)
+            if mn == 'stp' and ops[0][0] == 'q' and ops[1][0] == 'q' and self.mode != 'body':
+                # S21 (status sources only): two 128-bit vectors stored side by side (`stp q0, q0, [sp, #0x10]`: two
+                # Vector3f built from the same register), each cell as a `str q` would leave it
+                for k in (0, 1):
+                    self.store(self.add(a, k * 16), self.get(ops[k]))
+                if post:
+                    self.put(base_tok, self.add(base, imm(ops[3])))
+                return
             for k in (0, 1):
                 isf = ops[k] in VREG
                 size = 8 if ops[k][0] in 'xd' else 4

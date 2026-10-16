@@ -86,6 +86,17 @@ static void ensure_data(void) {
     DWORD old;
     VirtualProtect((void *)(uintptr_t)OWNER_TABLE, 4 * WEAPON_KINDS, PAGE_READWRITE, &old);
 }
+// N5: the weapon agent dispatchers (0x71033abee0 ..) take the owner kind of the weapon kind from the same table that
+// the weapon init is lent (the live owner), build the agent name "<owner's name>_<weapon>" from it and jump by it:
+// for a new kind that is a name no factory knows and no case of the jump table, so the weapon got NO agents at all
+// (found in N5: a new kind's fireball spawned, flew, and never ran a script or hit anything). During the dispatcher
+// the row is the weapon kind's static owner again; the agent the donor's factory returns is then moved to the live
+// owner's module by the registry.
+static int static_owner(int wk) {
+    static int32_t keep[617]; static volatile LONG have;
+    if (!InterlockedCompareExchange(&have, 1, 0)) memcpy(keep, (void *)(uintptr_t)OWNER_TABLE, sizeof keep);
+    return wk >= 0 && wk < WEAPON_KINDS ? keep[wk] : -1;
+}
 
 // ---- live fighters and weapons ---------------------------------------------------------------------------------
 struct Seen { uint64_t obj; int kind; };
@@ -149,6 +160,80 @@ static void h_disp(Ctx *c, void *u) {              // dispatchers 0..4: kind at 
     o_disp[i](c);
     if (g_reg) g_reg->agent_end(nullptr, c->x[0]);
 }
+// ---- N5: THE FIGHTER'S OWN PARAMETER FILES, read by the parameter-object builders from its folder.
+// The builders parse the donor's two per-fighter parameter files out of the archive's "loaded data" buffers (the
+// path of the new name is answered with the donor's file: one file, one buffer, shared with a real donor). When
+// <fighter folder>\fighter\<name>\param\<file> exists, the loaded-data entry of the donor's file points to OUR copy
+// of that file for the duration of the builder call made for the new kind (under the lock that serialises the
+// builders), and to the archive's buffer again afterwards: the new kind's parameter object is built from its own
+// file, the donor's from the archive's. Tables (reference\smash-arc; offsets as in loose_files.c): filesystem info
+// *(0x7105331f20): +0x08 loaded file paths (8 bytes: loaded data index, flags), +0x10 loaded datas (0x18 bytes: +0
+// buffer), +0x78 -> { archive tables }: +0x50 buckets, +0x58 hash -> file path index entries.
+static const char *const OWN_PARAM[2] = { "vl.prc", "expression_vl.prc" };
+static struct { uint8_t *data; long size; int tried; } g_own[MAXNEW][2];
+static struct { uint64_t *slot; uint64_t was; } g_lent[2]; static int g_nlent;
+static long g_n_own;
+static int64_t arc_file_index(const char *path) {
+    uint64_t h = hash40(path);
+    uint64_t fsinfo = *(uint64_t *)(uintptr_t)0x7105331f20ull;
+    if (!readable(fsinfo + 0x78, 8)) return -1;
+    uint64_t holder = *(uint64_t *)(uintptr_t)(fsinfo + 0x78);
+    if (!readable(holder, 8)) return -1;
+    uint64_t tab = *(uint64_t *)(uintptr_t)holder;
+    if (!readable(tab + 0x50, 16)) return -1;
+    uint64_t buckets = *(uint64_t *)(uintptr_t)(tab + 0x50), entries = *(uint64_t *)(uintptr_t)(tab + 0x58);
+    if (!readable(buckets, 8)) return -1;
+    uint32_t nb = *(uint32_t *)(uintptr_t)(buckets + 4);
+    if (!nb) return -1;
+    uint32_t *b = (uint32_t *)(uintptr_t)(buckets + 8 + (h % nb) * 8);
+    for (uint32_t k = 0; k < b[1]; k++) {
+        uint64_t e = *(uint64_t *)(uintptr_t)(entries + 8ull * (b[0] + k));
+        if ((e & MASK40) == h) return (int64_t)(e >> 40);
+    }
+    return -1;
+}
+static void own_param_begin(uint32_t kind) {
+    g_nlent = 0;
+    if (!g_reg || !is_new(kind)) return;
+    int n = (int)kind - FIRST;
+    const SsbuRegFighter *f = &g_reg->fighters[n];
+    for (int k = 0; k < 2; k++) {
+        if (!g_own[n][k].tried) {
+            g_own[n][k].tried = 1;
+            char path[600]; snprintf(path, sizeof path, "%s\\fighter\\%s\\param\\%s", f->folder, f->name, OWN_PARAM[k]);
+            FILE *fp = fopen(path, "rb");
+            if (fp) {
+                fseek(fp, 0, SEEK_END); long sz = ftell(fp); fseek(fp, 0, SEEK_SET);
+                uint8_t *d = (uint8_t *)VirtualAlloc(nullptr, (size_t)sz + 0x1000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+                if (d && sz > 8 && fread(d, 1, (size_t)sz, fp) == (size_t)sz) { g_own[n][k].data = d; g_own[n][k].size = sz; }
+                fclose(fp);
+            }
+        }
+        if (!g_own[n][k].data) continue;
+        char donor[200]; snprintf(donor, sizeof donor, "fighter/%s/param/%s", f->donor, OWN_PARAM[k]);
+        int64_t fi = arc_file_index(donor);
+        uint64_t fsinfo = *(uint64_t *)(uintptr_t)0x7105331f20ull;
+        if (fi < 0 || !readable(fsinfo + 8, 16)) continue;
+        uint64_t lfp = *(uint64_t *)(uintptr_t)(fsinfo + 8), ld = *(uint64_t *)(uintptr_t)(fsinfo + 0x10);
+        if (!readable(lfp + 8ull * fi, 8)) continue;
+        uint32_t ldi = *(uint32_t *)(uintptr_t)(lfp + 8ull * fi);
+        if (ldi == 0xffffffffu || !readable(ld + 0x18ull * ldi, 0x18)) continue;
+        uint64_t *slot = (uint64_t *)(uintptr_t)(ld + 0x18ull * ldi);
+        // both must be parameter files (the same 8-byte magic at the start), or nothing is lent
+        if (!readable(*slot, 8) || memcmp((void *)(uintptr_t)*slot, g_own[n][k].data, 8) != 0) {
+            if (g_n_own++ < 4) logf("[n5] own parameter file %s of %s: the archive's buffer of %s is not there or not the same kind of file: NOT lent", OWN_PARAM[k], f->name, donor);
+            continue;
+        }
+        g_lent[g_nlent].slot = slot; g_lent[g_nlent].was = *slot; g_nlent++;
+        *slot = (uint64_t)(uintptr_t)g_own[n][k].data;
+        if (g_n_own++ < 8) logf("[n5] kind 0x%x: parameter builder reads %s\\fighter\\%s\\param\\%s (%ld bytes) instead of the archive's %s (file path index 0x%llx, loaded data %u, buffer %llx): for this call only",
+                                kind, f->folder, f->name, OWN_PARAM[k], g_own[n][k].size, donor, (unsigned long long)fi, ldi, (unsigned long long)g_lent[g_nlent - 1].was);
+    }
+}
+static void own_param_end(void) {
+    for (int k = 0; k < g_nlent; k++) *g_lent[k].slot = g_lent[k].was;
+    g_nlent = 0;
+}
 static void h_build(Ctx *c, void *u) {             // (this, kind, x2): the case builds the kind's parameter object and stores it in A[kind]
     int i = (int)(intptr_t)u;
     uint32_t kind = (uint32_t)c->x[1];
@@ -172,7 +257,9 @@ static void h_build(Ctx *c, void *u) {             // (this, kind, x2): the case
     }
     EnterCriticalSection(&g_lock);
     memcpy(keep, a0, 0x38); memcpy(a0, an, 0x38);          // the donor's case works on row 0: lend it the new row for the call
+    own_param_begin(kind);                                 // N5: the fighter's OWN parameter files, when its folder has them
     c->x[1] = DONOR; o_build[i](c);
+    own_param_end();
     memcpy(an, a0, 0x38); memcpy(a0, keep, 0x38);
     LeaveCriticalSection(&g_lock);
     if (g_n_build[i]++ < 4) logf("[n4] kind: parameter object builder %d ran the donor's case for kind 0x%x: A[0x%x] = %llx %llx | %llx %llx ; A[0] = %llx | %llx", i, kind, kind,
@@ -287,6 +374,7 @@ static void h_init(Ctx *c, void *) {               // fighter init: x0 = fighter
 // ---- weapons: the live owner -----------------------------------------------------------------------------------
 static int with_owner(Ctx *c, HookOrig o, int wk, int live) {      // run o with OWNER_TABLE[wk] = live
     int32_t *t = (int32_t *)(uintptr_t)OWNER_TABLE;
+    static_owner(0);                                    // N5: the table as the game has it, before the first row is lent
     if (wk < 0 || wk >= WEAPON_KINDS || live < 0 || t[wk] == live || !is_new((uint32_t)live)) { o(c); return 0; }
     EnterCriticalSection(&g_lock);
     int32_t was = t[wk];
@@ -332,13 +420,25 @@ static void h_wdisp(Ctx *c, void *u) {             // weapon agent dispatcher (w
     uint64_t w = c->x[0];
     int wk = *(int32_t *)(uintptr_t)(w + 0xc);
     int live = recall(g_weapon, g_nweapon, w);
+    // N5: the dispatchers run INSIDE the weapon init, which runs inside the owner's fighter init on this thread (the
+    // object in x0 is not the one the weapon init got: nothing was ever recalled in N4): the live owner is that fighter
+    if (live < 0 && t_init_kind >= 0) live = t_init_kind;
+    { static long seen; if (seen++ < 8) logf("[n5] weapon agent dispatcher %d called: x0 %llx (weapon kind field 0x%x), x1 %llx, recorded live owner 0x%x, %d weapons recorded",
+                                              i, (unsigned long long)w, wk, (unsigned long long)c->x[1], live, g_nweapon); }
     if (is_new((uint32_t)live)) {
         // the agent comes from the donor's script module: the table row stays the donor's for this call
         if (g_n_wdisp[i]++ < 2) logf("[n4] weapon agent dispatcher %d: weapon kind 0x%x of live owner 0x%x -> the donor module's factory%s", i, wk, live,
                                      g_reg ? ", the agent goes to the live owner's own module" : "");
         if (g_reg) {
+            int32_t *t = (int32_t *)(uintptr_t)OWNER_TABLE;
+            int so = static_owner(wk);
             g_reg->agent_begin(g_name[live - FIRST]);
+            EnterCriticalSection(&g_lock);              // the weapon init above us on this thread holds it already
+            int32_t was = (wk >= 0 && wk < WEAPON_KINDS) ? t[wk] : 0;
+            if (so >= 0) t[wk] = so;
             o_wdisp[i](c);
+            if (so >= 0) t[wk] = was;
+            LeaveCriticalSection(&g_lock);
             g_reg->agent_end(g_name[live - FIRST], c->x[0]);
             return;
         }
@@ -369,6 +469,21 @@ static void h_ai(Ctx *c, void *u) {
         if (g_n_ai[i]++ < 3) logf("[n5] AI function %d: the kind field at %llx was 0x%x -> the donor's kind %d (written once per object)", i, (unsigned long long)p, was, DONOR);
     }
     o_ai[i](c);
+}
+// ---- N5: Kirby's copy resources. 0x71017f0bd0(x0, x1 -> fighter kind, ...) takes a row of the pointer table
+// 0x710509ece0[kind] (8 bytes per kind; row -> the kind's copy-ability name strings) and builds resource paths from
+// it (0x71017f06e0); the table has no row for a new kind (N4 run r2: the crash while loading). For the call the
+// kind the function reads is the donor's: Kirby gets the DONOR's copy ability for a new fighter. N5_KIRBY=0: off.
+static HookOrig o_kirby; static long g_n_kirby; static int g_kirby = 1;
+static void h_kirby(Ctx *c, void *) {
+    uint32_t *p = (uint32_t *)(uintptr_t)c->x[1];
+    if (g_kirby && readable(c->x[1], 4) && is_new(*p)) {
+        uint32_t was = *p;
+        if (g_n_kirby++ < 4) logf("[n5] copy-ability resources asked for kind 0x%x (caller %llx): the donor's row of the table is used", was, (unsigned long long)c->x[30]);
+        *p = DONOR; o_kirby(c); *p = was;
+        return;
+    }
+    o_kirby(c);
 }
 static void h_fireball(Ctx *c, void *) {           // (article, owner's module accessor)
     uint64_t acc = c->x[1];
@@ -452,6 +567,8 @@ extern "C" __declspec(dllexport) void mod_init(const HookApi *a) {
     all++; ok += !!api->install(0x7100cb9de0ull, h_fireball, nullptr, &o_fireball);
     all++; ok += !!api->install(0x71017e88d0ull, h_path, nullptr, &o_path);
     static const uint64_t ai[8] = { 0x71002c5cf0ull, 0x71002c9900ull, 0x710034b310ull, 0x7100351630ull, 0x710035fc50ull, 0x7100362df0ull, 0x710036c1c0ull, 0x71003719c0ull };
+    g_kirby = !((e = getenv("N5_KIRBY")) && e[0] == '0');
+    if (g_kirby) { all++; ok += !!api->install(0x71017f0bd0ull, h_kirby, nullptr, &o_kirby); }
     g_ai = !((e = getenv("N5_AI")) && e[0] == '0');
     if (g_ai) for (int i = 0; i < 8; i++) { all++; ok += !!api->install(ai[i], h_ai, (void *)(intptr_t)i, &o_ai[i]); }
     logf("[n4] kind mod loaded: %d new kind(s) from 0x%x (first: %s, hash %llx), donor kind %d; weapons: %s; own names %d; %d of %d hooks",

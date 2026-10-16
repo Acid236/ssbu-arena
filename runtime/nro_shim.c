@@ -50,3 +50,8 @@ __declspec(dllexport) void nro_bind(const NroHost *h, void *host_module, NroTabl
     t->resume = CAT(resume_table_, NRO_MODULE);
     t->resume_count = CAT(resume_count_, NRO_MODULE);
 }
+
+#ifdef R1_MARK          /* track R1 round 3: the dirty-page maps this module's stores mark (runtime.h R1M); set by the exe (r1_state.c) */
+__declspec(dllexport) uint8_t *r1_m1, *r1_m2;
+__declspec(dllexport) uint64_t r1_lo1, r1_n1, r1_n2;
+#endif

@@ -435,6 +435,7 @@ void hid_report(FILE *out) {
 static void hid_setup(void) {
     if (g_hid_ready) return;
     g_hid_ready = 1;
+    { void r1_init(void); r1_init(); }                       /* R1 (r1_state.c): nothing without SSBU_R1 */
     if (getenv("SSBU_XINPUT_SYNTH")) {
         g_x_synth = 1;
         x_get_state = synth_get_state; x_set_state = synth_set_state; x_get_caps = synth_get_caps;
@@ -518,11 +519,30 @@ static int key_for(uint32_t id, int vk, int kbidx) {         /* vk = the fixed k
     return down;
 }
 
+/* Track V session 13, TEST ONLY: SSBU_SHOT_FIGHT=<n>[,<n>...] (ascending): a picture of fight frame n. The fight frames
+ * are counted here, at player 1's pad poll, from the input mark "fight" on (with SSBU_DETERMINISTIC the number of the
+ * first fighter's frame-line calls: fight_seq_ticks; without it one per poll). When the count reaches n the front end is
+ * told (nvn_front_shot_fight); the next present the game queues is saved as fight_<n>.bmp by the renderer in use. */
+static void fight_shot_poll(int ticks) {
+    static int list[16], n = -1, next;
+    static long long ff;
+    void nvn_front_shot_fight(int frame);
+    if (n < 0) { const char *e = getenv("SSBU_SHOT_FIGHT"); n = 0; while (e && *e && n < 16) { list[n++] = atoi(e); e = strchr(e, ','); if (e) e++; } }
+    if (next >= n || !mark_seen("fight")) return;
+    ff += ticks;
+    if (ff >= list[next]) { printf("shot: fight frame %lld reached at poll %lld (wanted %d): the next queued present is saved\n", ff, (long long)g_seq_polls, list[next]); fflush(stdout); nvn_front_shot_fight(list[next]); next++; }
+}
 static void fill_pad(uint64_t out, uint32_t id, int style_is_fullkey) {
+    { void r1_wrote(uint64_t, uint64_t); r1_wrote(out, 0x28); }   /* R1: marked (nothing without SSBU_R1_MARK) */
     memset((void *)(uintptr_t)out, 0, 0x28);
     wr64(out, (uint64_t)InterlockedIncrement64(&g_sampling));
     if (id > 7 || !style_is_fullkey) return;                  /* every controller here is a full-key (Pro) controller */
-    if (id == 0) { int fight_seq_ticks(void); for (int n = fight_seq_ticks(); n > 0; n--) seq_tick(); }      /* S11: 1 per poll; SSBU_DETERMINISTIC in a fight: per fight frame (fighter_sdk\fighter_host.c) */
+    static long long l1_ticks;                               /* L1: fight-frame ticks seen at player 1's polls (SSBU_L1 report) */
+    int r1_on(void), r1_poll(int ticks); void r1_pad(uint64_t *b, int *lx, int *ly, int *rx, int *ry);    /* R1 (r1_state.c, SSBU_R1 only) */
+    if (id == 0) { int fight_seq_ticks(void); int nt = fight_seq_ticks();
+                   if (r1_on() && r1_poll(mark_seen("fight") ? nt : 0)) nt = 0;                  /* R1 re-run: the sequence waits, the recorded values are given (R1 run-ahead: the speculative poll) */
+                   fight_shot_poll(nt); if (mark_seen("fight")) l1_ticks += nt;
+                   for (int n = nt; n > 0; n--) seq_tick(); }     /* S11: 1 per poll; SSBU_DETERMINISTIC in a fight: per fight frame (fighter_sdk\fighter_host.c) */
     if (!player_connected(id)) return;
     static const struct { int vk, bit; } map[] = {
         {'Z', BTN_A}, {'X', BTN_B}, {'C', BTN_X}, {'V', BTN_Y}, {'Q', BTN_L}, {'E', BTN_R}, {'A', BTN_ZL}, {'S', BTN_ZR},
@@ -567,6 +587,7 @@ static void fill_pad(uint64_t out, uint32_t id, int style_is_fullkey) {
         wired = !g_x[slot].wireless;
     }
     if (id == 0) record_or_replay(&buttons, &lx, &ly);
+    if (id == 0 && r1_on()) r1_pad(&buttons, &lx, &ly, &rx, &ry);
     if (lx < -STICK_MAX / 2) buttons |= 1ull << BTN_SL_LEFT;
     if (lx > STICK_MAX / 2) buttons |= 1ull << BTN_SL_RIGHT;
     if (ly > STICK_MAX / 2) buttons |= 1ull << BTN_SL_UP;
@@ -576,6 +597,7 @@ static void fill_pad(uint64_t out, uint32_t id, int style_is_fullkey) {
     if (rx > STICK_MAX / 2) buttons |= 1ull << (BTN_SL_RIGHT + 4);
     if (ry < -STICK_MAX / 2) buttons |= 1ull << (BTN_SL_DOWN + 4);
     wr64(out + 8, buttons);
+    if (id == 0) { void display_l1_poll(uint64_t buttons, long long fight_ticks, long long poll); int r1_ra_phase(void); if (r1_ra_phase() != 1) display_l1_poll(buttons, l1_ticks, (long long)g_seq_polls); }      /* (R1 run-ahead: the speculative pass's poll is not a poll of the real timeline) */      /* L1 (input latency): the time of player 1's poll, the press it saw */
     wr32(out + 0x10, (uint32_t)lx);
     wr32(out + 0x14, (uint32_t)ly);
     wr32(out + 0x18, (uint32_t)rx);
@@ -655,6 +677,7 @@ static void hid_GetSixAxisSensorState(Ctx *c) {             /* (SixAxisSensorSta
         g_six[id].ever = 1;
     } else g_six[id].connected = 0;
     if (!g_six[id].ever) return;                             /* empty ring: nothing is copied */
+    { void r1_wrote(uint64_t, uint64_t); r1_wrote(o, 0x60); }   /* R1 (r1_state.c): the page is marked (nothing without SSBU_R1_MARK) */
     memset((void *)(uintptr_t)o, 0, 0x60);
     wr64(o, 5000000);                                        /* delta time, ns */
     wr64(o + 8, (uint64_t)g_six[id].last);                   /* sampling number */
@@ -765,6 +788,7 @@ static void hid_GetVibrationDeviceInfo(Ctx *c) {            /* (VibrationDeviceI
 }
 static void hid_SendVibrationValue(Ctx *c) {                /* (handle, const VibrationValue &{ampLow, freqLow, ampHigh, freqHigh}) */
     uint32_t id, dev;
+    { int r1_ra_phase(void); if (r1_ra_phase() == 1) return; }      /* R1 round 5, run-ahead: a speculative pass's rumble is not felt (the real pass sends it) */
     if (!vib_slot(rd32(A0), &id, &dev)) return;
     memcpy(g_vib[id][dev].v, (void *)(uintptr_t)A1, 16);
     g_vib[id][dev].set = 1;
@@ -799,6 +823,7 @@ static int gc_handle_check(Ctx *c, uint32_t handle, const char *what) {      /* 
 static void hid_SendVibrationGcErmCommand(Ctx *c) {         /* (const VibrationDeviceHandle &, const VibrationGcErmCommand &) */
     uint32_t handle = rd32(A0), id = (handle >> 8) & 0xff;
     uint64_t command = rd64(A1);
+    { int r1_ra_phase(void); if (r1_ra_phase() == 1) return; }      /* R1 round 5, run-ahead: not in a speculative pass */
     hid_setup();
     if (!gc_handle_check(c, handle, "nn::hid::SendVibrationGcErmCommand with an invalid handle (the hid module refuses it and the SDK aborts, sdk 0x2537d4)")) return;
     if (command > 2) return;
@@ -1086,4 +1111,5 @@ static const ImportDef hid_imports[] = {
 
 void register_hid_imports(void) {
     register_imports(hid_imports, (int)(sizeof hid_imports / sizeof hid_imports[0]));
+    { void r1_register_heap(void); r1_register_heap(); }     /* R1 (r1_state.c): the guest C heap in snapshotted memory, SSBU_R1 only */
 }

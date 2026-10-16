@@ -81,7 +81,7 @@ typedef struct { Tex *tex; View view; } TargetRef;
 
 /* ---------------------------------------------------------------- render-thread jobs (arguments of RBackend members) */
 typedef struct { int count; const uint64_t *handles; } SubmitJob;
-typedef struct { Window *win; int index; } PresentJob;
+typedef struct { Window *win; int index; int shot_fight; } PresentJob;      /* shot_fight (session 13, test): fight frame whose picture this present is, 0 = none; set when the game queues the present */
 typedef struct { SyncObj *o; int flags; uint64_t timeout; int result; } SyncJob;
 typedef struct { Tex *tex; View view; int has_view; int region[6]; const void *data; int64_t row_stride; } WriteJob;
 typedef struct { Tex *tex; View view; int has_view, to_pool; int region[6]; void *out; int64_t row_stride, image_stride; } ReadJob;      /* to_pool: nvnTextureInvalidateTexels */

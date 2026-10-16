@@ -1,0 +1,3 @@
+p1=n3test,p2=donkey,p2=human,stage=end,stock=1
+p1=n6link,p2=n3test,p2=human,stage=end,stock=1
+p1=mario,p2=link,p2=human,stage=end,stock=1

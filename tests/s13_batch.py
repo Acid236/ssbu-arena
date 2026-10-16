@@ -28,7 +28,7 @@ def say(msg):
 
 
 def s12(*args):
-    r = subprocess.run([sys.executable, S12] + list(args), capture_output=True, text=True, cwd=STUDY)
+    r = subprocess.run([sys.executable, S12] + list(args), capture_output=True, text=True, cwd=STUDY, env=dict(os.environ, S11_SECS='200'))
     return r.stdout + r.stderr
 
 
@@ -69,6 +69,12 @@ def one(f):
         say('%s: run (round %d)' % (f, rnd + 1))
         s12('run', f)
         row = last_row(rows, f)
+        for retry in range(2):           # a game that never reached the fight (menu sequence lost: 'hash lines 0', TIMEOUT) is not a difference: run again
+            if row and any(('hash lines 0 ' in row.get(k, '') or 'TIMEOUT' in row.get(k, '')) for k in ('a', 'b', 'a2', 'b2', 'd')):
+                say('%s: a game did not reach the fight (%s); run again' % (f, [row.get(k, '')[:60] for k in ('a', 'b', 'a2', 'b2', 'd') if 'hash lines 0 ' in row.get(k, '') or 'TIMEOUT' in row.get(k, '')]))
+                res.setdefault('reruns', []).append([row.get(k, '')[:80] for k in ('a', 'b', 'a2', 'b2', 'd') if 'hash lines 0 ' in row.get(k, '') or 'TIMEOUT' in row.get(k, '')])
+                s12('run', f)
+                row = last_row(rows, f)
         res['row'] = row
         if not row:
             res['verdict'] = 'NO ROW'

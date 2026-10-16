@@ -1,0 +1,20 @@
+# S16 float case (peach / daisy as player 1): menus as seq_s15_check.txt, then the ground specials, then: jump, press jump again in the air and HOLD it (= float
+# just above the ground), then the side special (rX) from the float; twice. Keys: X = B, C = jump, Z = A, r l u d = stick.
+@movie
+@draws:22-26/30
+@draws:36-44/30
+30:Z
+@draws:700-800/40 30:Z
+150:Z
+@draws:370-400/40 30:Z
+@draws:270-295/40 30:Z
+@draws:175-205/60
+30:u/30 20:l/18 30:Z
+60:r/50 20:d/8 30:Z
+@fight
+200
+20:Z/4 30:X/4 45:rX/4 45:uX/4 45:dX/4
+40:X/40 55:rX/40 55:uX/40 55:dX/40
+40:C/4 10:X/4 45:C/4 10:rX/4 45:C/4 10:uX/4 45:C/4 10:dX/4
+45:C/4 10:X/25 50:C/4 10:rX/25 50:C/4 10:uX/25 50:C/4 10:dX/25
+60:C/4 12:C/90 60:rX/25 80:C/4 12:C/90 50:rX/25 150

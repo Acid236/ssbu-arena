@@ -302,6 +302,9 @@ void fs_return(Ctx *c, const L2CValue &r);
 // differing; every other function is still compared. (A function that does not exist in the game at all needs no
 // mark: build_fighter.py gives it an address of its own and the tests report it as NEW.)
 #define FS_MODIFIED(name) extern "C" __declspec(dllexport) const char fs_modified_##name = 1
+// N13: once, in a source that includes status_local.h: the guest address of an offset of this fighter's module, for
+// the host components (an own article's agent is made by the kind component from the DLL's functions)
+#define FS_EXPORT_MODULE_ADDRESS() extern "C" __declspec(dllexport) uint64_t fs_module_address(uint32_t off) { return (uint64_t)(uintptr_t)fs_module_function(off); }
 
 // S11 (part 4): NEW WORK VARIABLES by name.
 //   FS_NEW_WORK_VAR(STATUS, FLOAT, MECH_CHARGE_FLOAT_CHARGE);       at file scope, in a source or header of the fighter
@@ -334,3 +337,22 @@ static inline bool fs_new_work_fits_n(BattleObjectModuleAccessor *boma, const in
 
 #include "lua_const.h"
 #include "lua_bind.h"
+
+// S21: a STRING value (type 8). The game's lib::L2CValue::L2CValue(char const*) (main 0x71037341c0) allocates a
+// std::string the value owns; ~L2CValue (0x7103733f20) frees it; the copy constructor (0x7103733fe0) and operator=
+// make a new one. L2CString is such a value for the length of one statement, built and destroyed by those very
+// functions: `local::f(agent, L2CString("INITIALIZE"))` = what the original does around its call. It is passed as a
+// `const L2CValue &`; a plain L2CValue copy of it (bits only, see L2CValue) must not outlive the statement: the
+// generator never writes one into a variable or a returned value. Only where gen_sdk.py made the two slots.
+#if defined(FS_HAVE_S_lv_ctor_string) && defined(FS_HAVE_S_lv_dtor)
+struct L2CString : L2CValue {
+    explicit L2CString(const char *s) : L2CValue() { gcall<void>(S_lv_ctor_string, (const L2CValue *)this, s); }
+    ~L2CString() { gcall<void>(S_lv_dtor, (const L2CValue *)this); }
+    L2CString(const L2CString &) = delete;
+    L2CString &operator=(const L2CString &) = delete;
+};
+#endif
+// S21: lib::L2CValue::length() (main 0x7103735ea0): of a string its size, of a table the length of its array part
+#ifdef FS_HAVE_S_lv_length
+inline uint64_t fs_lv_length(const L2CValue &v) { return gcall<uint64_t>(S_lv_length, &v); }
+#endif

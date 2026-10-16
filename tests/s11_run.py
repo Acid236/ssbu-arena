@@ -48,7 +48,7 @@ def main():
         diff(sys.argv[2], sys.argv[3])
         return
     tag, bindir, seqfile, frames = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
-    while os.path.exists(os.path.join(STUDY, 'tests', 'QUIET_PLEASE')):
+    while os.path.exists(os.path.join(STUDY, 'tests', 'QUIET_PLEASE')) or os.path.exists(os.path.join(STUDY, 'tests', 'OWNER_PLAYING')):   # OWNER_PLAYING: the owner plays the real game (gioca_log.bat)
         time.sleep(25)
     ud = os.path.join(STUDY, 'tests', 's11_userdata')
     shutil.rmtree(ud, ignore_errors=True)
@@ -107,9 +107,10 @@ def main():
                     verdict = 'DONE'
                     time.sleep(3)
                     break
-            at = text.rfind('fighter source: mario')
+            rmod = os.environ.get('S11_RESULTS_MOD', 'mario')            # S13: the fighter module whose unload means the results (default as before)
+            at = text.rfind('fighter source: ' + rmod)
             at = at if at >= 0 else text.find('first battle frame')
-            if at >= 0 and 'nn::ro::UnloadModule: lua2cpp_mario' in text[at:]:
+            if at >= 0 and 'nn::ro::UnloadModule: lua2cpp_' + rmod in text[at:]:
                 verdict = 'RESULTS'
                 time.sleep(4)
                 break

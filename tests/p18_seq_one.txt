@@ -1,0 +1,14 @@
+# Round 18: boot -> one fight chosen by SSBU_DEBUG_MATCH, player 1 gives NO input in the fight (ended by SSBU_DEBUG_END).
+@movie
+@draws:22-26/30
+@draws:36-44/30
+30:Z
+@draws:700-800/40 30:Z
+150:Z
+@draws:370-400/40 30:Z
+@draws:270-295/40 30:Z
+@draws:175-260/60
+30:u/30 20:l/18 30:Z
+60:r/50 20:d/8 30:Z
+@draws:30-60/20
+@draws:120-2000/60
