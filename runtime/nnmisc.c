@@ -543,9 +543,33 @@ static void prepo_PlayReport_ctor(Ctx *c) { wr8(A0, 0); wr64(A0 + 0x20, 0); wr64
  * The console lists the installed add-on contents of the running application by INDEX (add-on content id =
  * application id + 0x1000 + index). The game's DLC fighters, stages and costumes are data of the game update; an owned
  * add-on content only unlocks them. Which ones this player owns is his own fact: <exe folder>\..\config\dlc.txt
- * (SSBU_DLC_LIST overrides the path), one index per line, decimal or 0x.. hex, `#` comments; tools\dlc_list.py writes
- * it from the file names of the player's own DLC dumps. No file = none owned (as before). */
+ * (SSBU_DLC_LIST overrides the path), one entry per line, `#` comments; an entry is an index (decimal, or 0x.. hex) or the
+ * whole add-on content id (16 hex digits); tools_audit\dlc_list.py (tools/audit/ in the repository) writes the file from the
+ * file names of the player's own DLC dumps. No file = none owned (as before). A line that is none of these is logged and
+ * ignored. */
+#define AOC_APP_ID 0x01006A800016E000ULL           /* the application these add-on contents belong to */
 static int g_aoc[2048], g_aoc_n = -1;
+static int aoc_hexval(int ch) { return ch >= '0' && ch <= '9' ? ch - '0' : (ch | 32) >= 'a' && (ch | 32) <= 'f' ? (ch | 32) - 'a' + 10 : -1; }
+/* One entry of dlc.txt (past the leading blanks): an index in decimal ("010" is ten, not an octal 8) or as 0x.. hex, or the whole
+ * add-on content id of this application (16 hex digits, with or without 0x: application id + 0x1000 + index); then only blanks
+ * and perhaps a `#` comment. Returns the index (1..0xfff), or 0 for a line that is not an entry. */
+static int aoc_parse(const char *p) {
+    int hex = p[0] == '0' && (p[1] == 'x' || p[1] == 'X'), nd = 0;
+    const char *d = p + (hex ? 2 : 0);
+    unsigned long long v = 0;
+    while (aoc_hexval(d[nd]) >= 0) nd++;
+    int base = hex || nd == 16 ? 16 : 10;
+    if (!nd) return 0;
+    for (int i = 0; i < nd; i++) {
+        int dv = aoc_hexval(d[i]);
+        if (dv >= base || v > (~0ULL - (unsigned long long)dv) / (unsigned long long)base) return 0;     /* a letter in a decimal number, or too long */
+        v = v * (unsigned long long)base + (unsigned long long)dv;
+    }
+    for (d += nd; *d == ' ' || *d == '\t'; d++) ;
+    if (*d && *d != '#' && *d != '\r' && *d != '\n') return 0;                    /* anything else after the number */
+    if (v > 0xfff) v = v > AOC_APP_ID + 0x1000 && v < AOC_APP_ID + 0x2000 ? v - AOC_APP_ID - 0x1000 : 0;
+    return v > 0 && v < 0x1000 ? (int)v : 0;
+}
 static void aoc_load(void) {
     char exe[MAX_PATH], path[MAX_PATH + 32];
     const char *e = getenv("SSBU_DLC_LIST");
@@ -556,18 +580,34 @@ static void aoc_load(void) {
         if (s) *s = 0;
         snprintf(path, sizeof path, "%s\\..\\config\\dlc.txt", exe);
     }
-    int n = 0;
+    int n = 0, bad = 0, line = 0;
     FILE *fp = fopen(path, "r");
     char ln[128];
     while (fp && fgets(ln, sizeof ln, fp) && n < (int)(sizeof g_aoc / sizeof g_aoc[0])) {
-        char *p = ln, *end;
+        char *p = ln;
+        line++;
         while (*p == ' ' || *p == '\t') p++;
         if (*p == '#' || *p == '\r' || *p == '\n' || !*p) continue;
-        long v = strtol(p, &end, 0);
-        if (end != p && v > 0 && v < 0x1000) g_aoc[n++] = (int)v;
+        int v = aoc_parse(p);
+        if (v) g_aoc[n++] = v;
+        else if (bad++ < 5) {
+            p[strcspn(p, "\r\n")] = 0;
+            printf("nn::aoc: line %d of the list is not an index or an add-on content id: ignored (%.40s)\n", line, p);
+        }
     }
     if (fp) fclose(fp);
     printf("nn::aoc: %d add-on content(s) owned (%s)\n", n, fp ? path : "no config\\dlc.txt");
+    if (bad > 5) printf("nn::aoc: %d more lines ignored\n", bad - 5);
+    if (n) {                                         /* the indices read, runs of consecutive ones as a-b */
+        char list[512];
+        int at = 0, i = 0, j;
+        for (; i < n && at < (int)sizeof list - 24; i = j + 1) {
+            for (j = i; j + 1 < n && g_aoc[j + 1] == g_aoc[j] + 1; j++) ;
+            at += j > i ? snprintf(list + at, sizeof list - (size_t)at, "%s%d-%d", at ? " " : "", g_aoc[i], g_aoc[j])
+                        : snprintf(list + at, sizeof list - (size_t)at, "%s%d", at ? " " : "", g_aoc[i]);
+        }
+        printf("nn::aoc: indices read: %s%s\n", list, i < n ? " ..." : "");
+    }
     g_aoc_n = n;
 }
 static void aoc_CountAddOnContent(Ctx *c) { if (g_aoc_n < 0) aoc_load(); RET(g_aoc_n); }

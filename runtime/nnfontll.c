@@ -94,7 +94,7 @@ typedef struct {
     char name[50];
     int upem, glyphs, hmetrics, cff;
     const uint8_t *head, *hhea, *os2, *hmtx, *cmap, *sub, *kern, *gpos, *nametab;
-    uint32_t kern_len, gpos_len, cmap_len;
+    uint32_t kern_len, gpos_len, cmap_len, name_len;
     int sub_format;
     HFONT hfont;
     int gdi;                                      /* 0 not tried, 1 usable, -1 unusable */
@@ -161,16 +161,25 @@ static uint32_t file_size(const uint8_t *data) {
     return (end + 3) & ~3u;
 }
 
+/* Bytes of the 'name' table that lie inside the font file: the reads of name_string / has_family_name stay within them. */
+static uint32_t name_room(const FontData *f) {
+    uint32_t left = f->size - (uint32_t)(f->nametab - f->data);
+    return f->name_len < left ? f->name_len : left;
+}
+
 /* A string of the name table as ASCII (Windows platform, English preferred). */
 static int name_string(const FontData *f, int id, char *out, int room, WCHAR *wide, int wroom) {
     const uint8_t *name = f->nametab, *best = NULL;
     if (room) out[0] = 0;
     if (wide && wroom) wide[0] = 0;
-    if (!name) return 0;
+    if (!name || name_room(f) < 6) return 0;
+    uint32_t avail = name_room(f);
     int n = (int)be16(name + 2);
+    if (6 + (uint32_t)n * 12 > avail) n = (int)((avail - 6) / 12);
     const uint8_t *strings = name + be16(name + 4);
     for (int i = 0; i < n; i++) {
         const uint8_t *rec = name + 6 + i * 12;
+        if (be16(name + 4) + be16(rec + 10) + be16(rec + 8) > avail) continue;            /* the string lies outside the table */
         if (be16(rec) == 3 && (int)be16(rec + 6) == id && (!best || be16(rec + 4) == 0x409)) best = rec;
     }
     if (!best) return 0;
@@ -263,7 +272,7 @@ static FontData *font_data(const uint8_t *data, uint32_t index) {
     f->cmap = table(f, "cmap", &f->cmap_len);
     f->kern = table(f, "kern", &f->kern_len);
     f->gpos = table(f, "GPOS", &f->gpos_len);
-    f->nametab = table(f, "name", NULL);
+    f->nametab = table(f, "name", &f->name_len);
     f->cff = table(f, "CFF ", NULL) != NULL;
     const uint8_t *maxp = table(f, "maxp", NULL);
     if (!f->head || !f->hhea || !maxp) { free(f->data); return NULL; }
@@ -307,6 +316,32 @@ static void path_close(Path *path) {
 }
 static double fx(FIXED v) { return v.value + v.fract / 65536.0; }
 
+/* Whether `face` is one of the font's Windows family names (name ID 1) in any language. GetTextFace answers with the
+ * name in the user's display language when the font has one: on a Chinese Windows "DFHeiGB Std W12" is reported as
+ * its 0x804 name (U+534E U+5EB7 U+9ED1 U+4F53 " Std W12"). ASCII case folding, as lstrcmpiW does for the English name. */
+static int has_family_name(const FontData *f, const WCHAR *face) {
+    const uint8_t *name = f->nametab;
+    if (!name || name_room(f) < 6) return 0;
+    uint32_t avail = name_room(f);
+    int n = (int)be16(name + 2), want = lstrlenW(face);
+    if (6 + (uint32_t)n * 12 > avail) n = (int)((avail - 6) / 12);
+    const uint8_t *strings = name + be16(name + 4);
+    for (int i = 0; i < n; i++) {
+        const uint8_t *rec = name + 6 + i * 12;
+        if (be16(rec) != 3 || be16(rec + 6) != 1 || (int)be16(rec + 8) / 2 != want) continue;
+        if (be16(name + 4) + be16(rec + 10) + be16(rec + 8) > avail) continue;           /* the string lies outside the table */
+        int k = 0;
+        for (; k < want; k++) {
+            WCHAR a = (WCHAR)be16(strings + be16(rec + 10) + k * 2), b = face[k];
+            if (a >= 'A' && a <= 'Z') a += 32;
+            if (b >= 'A' && b <= 'Z') b += 32;
+            if (a != b) break;
+        }
+        if (k == want) return 1;
+    }
+    return 0;
+}
+
 /* Makes GDI able to draw from this font file; verifies that the face GDI selects really is this file. */
 static int gdi_prepare(FontData *f) {             /* callers hold g_lock */
     if (f->gdi) return f->gdi > 0;
@@ -320,8 +355,16 @@ static int gdi_prepare(FontData *f) {             /* callers hold g_lock */
     uint8_t head[54];
     GetTextFaceW(g_dc, LF_FACESIZE, got);
     DWORD n = GetFontData(g_dc, 0x64616568 /* "head" */, 0, head, sizeof head);
-    int same = n == sizeof head && !memcmp(head, f->head, sizeof head) && !lstrcmpiW(got, f->face);
-    if (!same) { printf("nn::fontll: font \"%s\": GDI selected another font (\"%ls\"): its glyphs will be blank\n", f->name, got); return 0; }
+    int same = n == sizeof head && !memcmp(head, f->head, sizeof head) && (!lstrcmpiW(got, f->face) || has_family_name(f, got));
+    if (!same) {
+        char shown[LF_FACESIZE * 6 + 1];          /* printf's %ls stops at the first character the C locale cannot convert */
+        int k = 0;
+        for (const WCHAR *p = got; *p && k < (int)sizeof shown - 7; p++)
+            k += *p >= 32 && *p < 127 ? snprintf(shown + k, sizeof shown - (size_t)k, "%c", (char)*p) : snprintf(shown + k, sizeof shown - (size_t)k, "\\u%04x", *p);
+        shown[k] = 0;
+        printf("nn::fontll: font \"%s\": GDI selected another font (\"%s\"): its glyphs will be blank\n", f->name, shown);
+        return 0;
+    }
     f->gdi = 1;
     return 1;
 }

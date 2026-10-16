@@ -41,7 +41,7 @@ def compile_one(name):
 def cmd_compile(jobs, force):
     os.makedirs(OBJ, exist_ok=True)
     sources = sorted(n for n in os.listdir(GEN) if n.endswith('.c'))
-    # only the headers the generated code includes; hostrt.h belongs to the host sources, which are rebuilt at every link
+    # only the headers the generated code includes; hostrt.h belongs to the host sources, which cmd_link rebuilds when they are stale
     newest_header = max(os.path.getmtime(os.path.join(HERE, h)) for h in GEN_HEADERS)
     todo = []
     for n in sources:
@@ -71,12 +71,21 @@ def cmd_compile(jobs, force):
 # The lifted game code lives in ssbu_game.dll, linked only when obj\ changes; the exe holds just the
 # host runtime, so the edit-link-run loop costs a couple of seconds (see game_shim.c, gamedll.c).
 GAME_DLL = os.environ.get('RECOMP_DLL', 'ssbu_game_eh_o1.dll')
-HOST_FLAGS = ['-O1', '-w', '-fno-strict-aliasing', '-I', HERE, '-I', GEN, '-Dfn_table=(*game_fn_table_p)', '-Dfn_table_count=(*game_fn_table_count_p)',
+HOST_FLAGS = ['-O1', '-g', '-w', '-fno-strict-aliasing', '-I', HERE, '-I', GEN, '-Dfn_table=(*game_fn_table_p)', '-Dfn_table_count=(*game_fn_table_count_p)',
               '-Ddyn_syms=(*game_dyn_syms_p)', '-Ddyn_sym_count=(*game_dyn_sym_count_p)',
               '-I', os.path.join(os.environ.get('SDL3_ROOT', os.path.join(HERE, '..', 'reference', 'upstream', 'SDL3-3.4.18-VC', 'SDL3-3.4.18')), 'include'),
               '-I', os.path.join(os.environ.get('VULKAN_HEADERS', os.path.join(HERE, '..', 'reference', 'upstream', 'Vulkan-Headers')), 'include')]      # Khronos headers for nvn_vk.c (track V)
 SDL_DIR = os.path.join(os.environ.get('SDL3_ROOT', os.path.join(HERE, '..', 'reference', 'upstream', 'SDL3-3.4.18-VC', 'SDL3-3.4.18')), 'lib', 'x64')      # SDL3 for nnpad_sdl.c; SDL3.dll is copied beside the exe at link (SDL3_ROOT / VULKAN_HEADERS: scripts\setup.py)
 LIBS = ['-luser32', '-lgdi32', '-lwinmm', '-lmfplat', '-lmfreadwrite', '-lmfuuid', '-lole32', '-lshlwapi']
+
+
+def debug_link_flags(out):
+    """The exe's debug information (-g in HOST_FLAGS) and linker map, beside the exe: <exe>.pdb lets WinDbg / Visual Studio
+    name the host functions of a minidump (hostrt.c), <exe>.map the freeze watchdog's report (nvn_vk_wd.c). /OPT and
+    /INCREMENTAL as link.exe has them without /DEBUG, so the code is the same as before. /PDBALTPATH: the exe holds the
+    file name of its .pdb, not the full path (which names the Windows user). Every link line of the tree should use this."""
+    base = os.path.splitext(out)[0]
+    return ['-Wl,/DEBUG', '-Wl,/PDB:' + base + '.pdb', '-Wl,/PDBALTPATH:%_PDB%', '-Wl,/MAP:' + base + '.map', '-Wl,/OPT:REF', '-Wl,/OPT:ICF', '-Wl,/INCREMENTAL:NO']
 
 
 def build_game_dll():
@@ -114,12 +123,14 @@ def cmd_link():
     objdir = os.path.join(HERE, 'obj_host', os.path.splitext(exe)[0])
     os.makedirs(objdir, exist_ok=True)
     t0 = time.time()
-    newest_dep = max([os.path.getmtime(os.path.join(HERE, h)) for h in os.listdir(HERE) if h.endswith('.h')] + [os.path.getmtime(os.path.join(HERE, 'build.py'))])
+    newest_dep = max([os.path.getmtime(os.path.join(HERE, h)) for h in os.listdir(HERE) if h.endswith(('.h', '.inc'))] + [os.path.getmtime(os.path.join(HERE, 'build.py'))])
+    # nvn_vk.c includes the other nvn_vk*.c files as one translation unit: an edit of one of them must rebuild nvn_vk.obj
+    newest_vk = max(os.path.getmtime(os.path.join(HERE, n)) for n in os.listdir(HERE) if n.startswith('nvn_vk') and n.endswith('.c'))
     objs, jobs = [], []
     for n in HOST_SOURCES + ['gamedll.c']:
         src, obj = os.path.join(HERE, n), os.path.join(objdir, n[:-2] + '.obj')
         objs.append(obj)
-        if not os.path.exists(obj) or os.path.getmtime(obj) < max(os.path.getmtime(src), newest_dep):
+        if not os.path.exists(obj) or os.path.getmtime(obj) < max(os.path.getmtime(src), newest_dep, newest_vk if n == 'nvn_vk.c' else 0):
             jobs.append((src, obj))
     failed = 0
     with concurrent.futures.ThreadPoolExecutor(16) as pool:
@@ -129,7 +140,7 @@ def cmd_link():
                 print('FAILED %s\n%s' % (os.path.basename(src), err))
     if failed:
         return 1
-    r = subprocess.run([CLANG] + objs + [os.path.join(HERE, GAME_DLL[:-4] + '.lib'), os.path.join(SDL_DIR, 'SDL3.lib')] + LIBS + ['-o', out], capture_output=True, text=True)
+    r = subprocess.run([CLANG] + objs + [os.path.join(HERE, GAME_DLL[:-4] + '.lib'), os.path.join(SDL_DIR, 'SDL3.lib')] + LIBS + debug_link_flags(out) + ['-o', out], capture_output=True, text=True, errors='replace')
     if r.returncode == 0:
         import shutil
         shutil.copy2(os.path.join(SDL_DIR, 'SDL3.dll'), os.path.join(HERE, 'SDL3.dll'))

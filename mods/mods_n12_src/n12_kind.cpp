@@ -66,11 +66,37 @@ static uint32_t crc32(const char *s) {
     return ~c;
 }
 static uint64_t hash40(const char *s) { return ((uint64_t)strlen(s) << 32) | crc32(s); }
+// 2026-10-16 (owner: fights at 30-40 fps with big stutters in the two-new-fighter build; main thread 18-26 ms per
+// frame against ~3 in the plain build): readable() was a VirtualQuery on every call, and it runs inside hooks the
+// fight calls thousands of times per frame (h_cb on the donor's 146 callbacks probes up to four arguments each call,
+// h_wparam on every get_param of every object once an own article exists, h_kindfield). VirtualQuery takes the
+// process's address-space lock (contention with the renderer's GetWriteWatch too). Now every region VirtualQuery
+// reports - readable or not - is remembered for the current system tick (about 16 ms) and answered from the memo;
+// the memo is emptied at each new tick, so a region freed or decommitted is seen again within one tick.
+typedef struct { uint64_t lo, hi; int ok; } RdRange;
+static SRWLOCK g_rd_lock = SRWLOCK_INIT;
+static RdRange g_rd[128];
+static int g_rd_n;
+static ULONGLONG g_rd_tick;
 static int readable(uint64_t a, size_t n) {
+    if (a < 0x10000) return 0;
+    ULONGLONG t = GetTickCount64();
+    int hit = -1;
+    AcquireSRWLockShared(&g_rd_lock);
+    if (t == g_rd_tick)
+        for (int k = 0; k < g_rd_n; k++)
+            if (a >= g_rd[k].lo && a < g_rd[k].hi) { hit = g_rd[k].ok && a + n <= g_rd[k].hi; break; }
+    ReleaseSRWLockShared(&g_rd_lock);
+    if (hit >= 0) return hit;
     MEMORY_BASIC_INFORMATION mi;
-    if (a < 0x10000 || !VirtualQuery((void *)(uintptr_t)a, &mi, sizeof mi)) return 0;
-    if (mi.State != MEM_COMMIT || (mi.Protect & (PAGE_NOACCESS | PAGE_GUARD))) return 0;
-    return a + n <= (uint64_t)(uintptr_t)mi.BaseAddress + mi.RegionSize;
+    if (!VirtualQuery((void *)(uintptr_t)a, &mi, sizeof mi)) return 0;
+    int ok = mi.State == MEM_COMMIT && !(mi.Protect & (PAGE_NOACCESS | PAGE_GUARD));
+    uint64_t lo = (uint64_t)(uintptr_t)mi.BaseAddress, hi = lo + mi.RegionSize;
+    AcquireSRWLockExclusive(&g_rd_lock);
+    if (t != g_rd_tick) { g_rd_n = 0; g_rd_tick = t; }
+    if (g_rd_n < 128) { g_rd[g_rd_n].lo = lo; g_rd[g_rd_n].hi = hi; g_rd[g_rd_n].ok = ok; g_rd_n++; }
+    ReleaseSRWLockExclusive(&g_rd_lock);
+    return ok && a + n <= hi;
 }
 static int is_new(uint32_t kind) { return kind >= (uint32_t)FIRST && kind < (uint32_t)(FIRST + g_nnew); }
 static void set_row(uint64_t table, int row, uint64_t value, const char *what) {

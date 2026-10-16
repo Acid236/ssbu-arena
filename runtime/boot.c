@@ -6,6 +6,8 @@
 #include <malloc.h>
 #include <math.h>
 #include <windows.h>
+#include <psapi.h>
+#include <time.h>
 #include "runtime.h"
 #include "hostrt.h"
 
@@ -278,9 +280,172 @@ static DWORD WINAPI guest_main(LPVOID arg) {
     return 0;
 }
 
+/* The first lines of every log: which binaries these are (link time stamps of the exe and of the DLLs beside it, the values
+ * a minidump also shows) and when the process started, so that a log from another PC names its build. File names only: logs
+ * get posted, and the folders name the Windows user. */
+static void print_build_identity(void) {
+    char exe[MAX_PATH], name[MAX_PATH];
+    DWORD n = GetModuleFileNameA(NULL, exe, MAX_PATH);
+    if (!n || n >= MAX_PATH) return;
+    const char *slash = strrchr(exe, '\\');
+    size_t dl = slash ? (size_t)(slash - exe + 1) : 0;
+    SYSTEMTIME st; GetLocalTime(&st);
+    printf("build: %s, started %04d-%02d-%02d %02d:%02d:%02d, process %lu\n", exe + dl, st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, GetCurrentProcessId());
+    HMODULE mods[256];
+    DWORD need = 0;
+    if (!K32EnumProcessModules(GetCurrentProcess(), mods, sizeof mods, &need)) return;
+    for (DWORD i = 0; i < need / sizeof mods[0] && i < 256; i++) {
+        if (!GetModuleFileNameA(mods[i], name, MAX_PATH) || _strnicmp(name, exe, dl)) continue;      /* ours: the exe's folder */
+        const IMAGE_NT_HEADERS *nt = (const IMAGE_NT_HEADERS *)((const char *)mods[i] + ((const IMAGE_DOS_HEADER *)mods[i])->e_lfanew);
+        __time64_t t = nt->FileHeader.TimeDateStamp;
+        struct tm tm;
+        char when[32] = "?";
+        if (!_gmtime64_s(&tm, &t)) strftime(when, sizeof when, "%Y-%m-%d %H:%M:%S UTC", &tm);
+        printf("build: %-22s linked %s (stamp %08lx, image %lu bytes)\n", name + dl, when, (unsigned long)nt->FileHeader.TimeDateStamp, (unsigned long)nt->OptionalHeader.SizeOfImage);
+    }
+}
+
+/* SSBU_CRASH_TEST=<seconds>: a write to address 0 after that time, on a thread of its own: tries the whole crash path of a
+ * PC (crash report, minidump) without waiting for a real crash. Test only. */
+static DWORD WINAPI crash_test(LPVOID arg) {
+    (void)arg;
+    Sleep((DWORD)(atof(getenv("SSBU_CRASH_TEST")) * 1000.0));
+    printf("SSBU_CRASH_TEST: writing to address 0 now\n");
+    *(volatile int *)(uintptr_t)0 = 1;
+    return 0;
+}
+
+/* A launch without scripts/run.py (the exe started by itself, from build\work): the RomFS folder that run.py would pass is
+ * taken from ..\state.json ("romfs", written by scripts/setup.py) when that folder has data.arc. A variable that is set is
+ * left alone. Without this a direct start looked for ..\romfs, found no data.arc, and the game crashed reading the file it
+ * could not open. (The add-on content list is found by nnmisc.c itself.) */
+static char g_state_romfs[MAX_PATH];                /* the folder ..\state.json names, if launch_defaults read one: check_romfs names it */
+static int g_state_romfs_lossy;                     /* ... and its name has characters the ANSI code page of this Windows cannot hold */
+static char *put_utf8(char *o, unsigned cp) {
+    if (cp < 0x80) *o++ = (char)cp;
+    else if (cp < 0x800) { *o++ = (char)(0xc0 | cp >> 6); *o++ = (char)(0x80 | (cp & 0x3f)); }
+    else if (cp < 0x10000) { *o++ = (char)(0xe0 | cp >> 12); *o++ = (char)(0x80 | (cp >> 6 & 0x3f)); *o++ = (char)(0x80 | (cp & 0x3f)); }
+    else { *o++ = (char)(0xf0 | cp >> 18); *o++ = (char)(0x80 | (cp >> 12 & 0x3f)); *o++ = (char)(0x80 | (cp >> 6 & 0x3f)); *o++ = (char)(0x80 | (cp & 0x3f)); }
+    return o;
+}
+static const char *json_blank(const char *p) { while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++; return p; }
+static unsigned hex4(const char *p) {                   /* the 4 hex digits at p, or ~0u */
+    unsigned v = 0;
+    for (int i = 0; i < 4; i++, p++) {
+        int d = *p >= '0' && *p <= '9' ? *p - '0' : (*p | 32) >= 'a' && (*p | 32) <= 'f' ? (*p | 32) - 'a' + 10 : -1;
+        if (d < 0) return ~0u;
+        v = v << 4 | (unsigned)d;
+    }
+    return v;
+}
+/* The JSON string whose opening quote is at `q`, as a path in the ANSI code page that the runtime's file calls use. \\ \" \/
+ * and \uXXXX (surrogate pairs too) are decoded: json.dump writes every non-ASCII character of a path as \uXXXX. A path the
+ * code page cannot hold goes through its 8.3 name when the volume has one; else `lossy` is set and the unknown characters
+ * are '?'. Returns 0 when the string is cut off or too long. */
+static int json_path(const char *q, char *out, size_t size, int *lossy) {
+    char u8[4 * MAX_PATH], *o = u8;
+    WCHAR w[MAX_PATH], sw[MAX_PATH];
+    BOOL lost = FALSE;
+    const char *p = q + 1;
+    for (; *p && *p != '"'; p++) {
+        unsigned cp = (unsigned char)*p;
+        if (o - u8 > (int)sizeof u8 - 5) return 0;
+        if (cp == '\\' && p[1]) {
+            cp = (unsigned char)*++p;
+            if (cp == 'u') {
+                unsigned u = hex4(p + 1);
+                if (u == ~0u) return 0;
+                p += 4;
+                if (u >= 0xd800 && u < 0xdc00 && p[1] == '\\' && p[2] == 'u') {          /* the first half of a surrogate pair */
+                    unsigned lo = hex4(p + 3);
+                    if (lo >= 0xdc00 && lo < 0xe000) { u = 0x10000 + ((u - 0xd800) << 10) + (lo - 0xdc00); p += 6; }
+                }
+                cp = u;
+            }
+        }
+        o = put_utf8(o, cp);
+    }
+    if (*p != '"') return 0;
+    *o = 0;
+    *lossy = 0;
+    if (!MultiByteToWideChar(CP_UTF8, 0, u8, -1, w, MAX_PATH) || !WideCharToMultiByte(CP_ACP, 0, w, -1, out, (int)size, NULL, &lost)) return 0;
+    if (lost) {
+        DWORD n = GetShortPathNameW(w, sw, MAX_PATH);
+        BOOL lost2 = FALSE;
+        if (n && n < MAX_PATH && WideCharToMultiByte(CP_ACP, 0, sw, -1, out, (int)size, NULL, &lost2) && !lost2) lost = FALSE;
+        else WideCharToMultiByte(CP_ACP, 0, w, -1, out, (int)size, NULL, &lost);
+    }
+    *lossy = lost;
+    return 1;
+}
+static void launch_defaults(void) {
+    const char *rom = getenv("SSBU_ROMFS"), *p;
+    char buf[16384], probe[MAX_PATH + 16];
+    if (rom && rom[0]) return;
+    FILE *f = fopen("..\\state.json", "rb");
+    if (!f) return;
+    size_t n = fread(buf, 1, sizeof buf - 1, f);
+    fclose(f);
+    buf[n] = 0;
+    if (!(p = strstr(buf, "\"romfs\""))) return;
+    p = json_blank(p + 7);
+    if (*p++ != ':') return;
+    p = json_blank(p);
+    if (*p != '"' || !json_path(p, g_state_romfs, sizeof g_state_romfs, &g_state_romfs_lossy)) { g_state_romfs[0] = 0; return; }     /* not a string (null) */
+    snprintf(probe, sizeof probe, "%s\\data.arc", g_state_romfs);
+    if (g_state_romfs[0] && !g_state_romfs_lossy && GetFileAttributesA(probe) != INVALID_FILE_ATTRIBUTES) {
+        _putenv_s("SSBU_ROMFS", g_state_romfs);
+        printf("SSBU_ROMFS not set: taken from ..\\state.json\n");
+    }
+}
+/* The message of a start that cannot work, on the console and on stderr. A box on the screen as well, unless the run is a
+ * scripted one or SSBU_ERROR_DIALOG=0 (the rule of nnmisc.c err_dialog: tests never hang on a dialog). Exit code 2. */
+static void romfs_fail(const char *msg) {
+    const char *off = getenv("SSBU_ERROR_DIALOG");
+    int quiet = (off && off[0] == '0') || getenv("SSBU_SEQ") || getenv("SSBU_PLAY") || getenv("SSBU_PRESS") || getenv("SSBU_SCRIPT");
+    printf("\n%s\n", msg);
+    if (quiet) fprintf(stderr, "%s\n", msg);
+    else MessageBoxA(NULL, msg, "SSBU native", MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
+    exit(2);
+}
+/* The game cannot run without data.arc: say so instead of crashing later inside the game. Modes that run without game data
+ * (the self-tests, all of which exit) skip it. */
+static void check_romfs(void) {
+    static const char *const no_data[] = {"SSBU_SDK_SELFTEST", "SSBU_VK_SELFTEST", "SSBU_CXXRT_SELFTEST", "SSBU_MISC_SELFTEST", "SSBU_EH_MAIN_TEST"};
+    const char *rom = getenv("SSBU_ROMFS");
+    char probe[MAX_PATH + 16], msg[2 * MAX_PATH + 800];
+    const char *dir = rom && rom[0] ? rom : "..\\romfs";
+    for (size_t i = 0; i < sizeof no_data / sizeof no_data[0]; i++) if (getenv(no_data[i])) return;
+    snprintf(probe, sizeof probe, "%s\\data.arc", dir);
+    if (GetFileAttributesA(probe) == INVALID_FILE_ATTRIBUTES) {
+        static const char how[] = "Start the game with  python scripts\\run.py --userdata <folder>  from the repository, "
+                                  "or set SSBU_ROMFS to the RomFS folder of your dump (the one that holds data.arc).";
+        if (!(rom && rom[0]) && g_state_romfs[0])           /* ..\state.json names a folder that has no data.arc (any more) */
+            snprintf(msg, sizeof msg, "data.arc was not found in %s, the RomFS folder that ..\\state.json names%s, nor in %s.\n\n"
+                     "The dump was moved or renamed after scripts\\setup.py recorded it. %s", g_state_romfs,
+                     g_state_romfs_lossy ? " (some characters of its name do not exist in this Windows code page)" : "", dir, how);
+        else snprintf(msg, sizeof msg, "data.arc was not found (%s).\n\n%s", probe, how);
+    } else {
+        /* .nrr\*.nrr beside data.arc: the lists of the script modules nn::ro may load (the game registers them at start). A
+         * RomFS without them runs to the menus, then every module is refused and the game waits for ever on the loading
+         * screen before a fight. */
+        WIN32_FIND_DATAA fd;
+        snprintf(probe, sizeof probe, "%s\\.nrr\\*.nrr", dir);
+        HANDLE h = FindFirstFileA(probe, &fd);
+        if (h != INVALID_HANDLE_VALUE) { FindClose(h); return; }
+        snprintf(msg, sizeof msg, "The RomFS folder %s has data.arc but no .nrr\\*.nrr files.\n\nThe game would refuse to load its script "
+                 "modules and stop on the loading screen before the first fight. Copy the whole RomFS folder of your dump "
+                 "(the .nrr folder sits beside data.arc).", dir);
+    }
+    romfs_fail(msg);
+}
+
 int main(int argc, char **argv) {
+    if (argc > 1 && !strcmp(argv[1], "--write-dump")) { int diag_dump_helper(int, char **); return diag_dump_helper(argc, argv); }   /* hostrt.c: minidump of the crashed game, written from outside */
     g_elf = argc > 1 ? argv[1] : "..\\binaries\\13.0.4\\main.elf";
     setvbuf(stdout, NULL, _IONBF, 0);
+    print_build_identity();
+    launch_defaults();
     {   /* pad tools and their self-test (nnpad_sdl.c): no game is started */
         int nnhid_pad_selftest(void), nnpad_tool(int, char **);
         int tool;
@@ -297,7 +462,9 @@ int main(int argc, char **argv) {
         import_set_address(sdk_data[i].name, copy);
     }
     cxxrt_install_data();
+    check_romfs();
     runtime_init(g_elf, getenv("SSBU_TRACE") ? getenv("SSBU_TRACE") : "boot_trace.txt");
+    if (getenv("SSBU_CRASH_TEST")) CloseHandle(CreateThread(NULL, 0, crash_test, NULL, 0, NULL));
     register_imports(base_imports, (int)(sizeof base_imports / sizeof base_imports[0]));
     register_sdk_imports();
     register_cxx_imports();

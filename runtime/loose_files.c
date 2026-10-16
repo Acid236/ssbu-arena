@@ -320,14 +320,42 @@ static void lf_clone_list(const char *folder, int owner, int first) {
 }
 
 // ---------------------------------------------------------------- the archive's in-memory tables
+// 2026-10-16 (owner: menus and movies at 3 fps in the two-new-fighter build): this ran on EVERY decompress of the
+// game's load thread with five VirtualQuery calls; a playing movie and the menus decompress all the time, and the
+// queries contended with the renderer's GetWriteWatch for the process's address-space lock (log: ResInflateThread
+// 19-35 ms per frame inside lf_readable / VirtualQuery, texture checks 16.8 ms per frame against 0.28 in the plain
+// build). The chain service -> fsinfo -> pi -> arc belongs to objects that live for the whole run: once a chain has
+// been checked, the next call for the same service only re-reads the same words (memory already proven readable) and
+// takes the fast path while they are unchanged; any change of a link goes through the full check again.
+typedef struct { uint64_t service, fsinfo, pi, arc; volatile LONG ok; } LfTablesMemo;
+static LfTablesMemo g_lf_tmemo[4];
 static int lf_tables(uint64_t service, uint64_t *fsinfo, uint64_t *arc) {
+    for (int k = 0; k < 4; k++) {
+        LfTablesMemo *m = &g_lf_tmemo[k];
+        if (!m->ok || m->service != service) continue;
+        uint64_t f = lf_r64(service ? service + 0xd0 : 0x7105331f20ull);
+        if (f != m->fsinfo || lf_r64(f + 0x78) != m->pi || lf_r64(m->pi) != m->arc) break;
+        if (!lf_r64(m->arc + 0x60) || !lf_r64(m->arc + 0x40)) return 0;
+        *fsinfo = f; *arc = m->arc;
+        return 1;
+    }
     if (service) { if (!lf_readable(service + 0xd0, 8)) return 0; *fsinfo = lf_r64(service + 0xd0); }
     else { if (!lf_readable(0x7105331f20ull, 8)) return 0; *fsinfo = lf_r64(0x7105331f20ull); }
     if (!lf_readable(*fsinfo + 0x78, 8)) return 0;
     uint64_t pi = lf_r64(*fsinfo + 0x78);
     if (!lf_readable(pi, 16)) return 0;
     *arc = lf_r64(pi);
-    return lf_readable(*arc + 0xa0, 8) && lf_r64(*arc + 0x60) && lf_r64(*arc + 0x40);
+    if (!(lf_readable(*arc + 0xa0, 8) && lf_r64(*arc + 0x60) && lf_r64(*arc + 0x40))) return 0;
+    {   /* remember the checked chain: the slot of this service, else a free one, else slot 0 */
+        int k = 0;
+        for (int j = 0; j < 4; j++) if (g_lf_tmemo[j].ok && g_lf_tmemo[j].service == service) { k = j; goto store; }
+        for (int j = 0; j < 4; j++) if (!g_lf_tmemo[j].ok) { k = j; break; }
+      store:
+        InterlockedExchange(&g_lf_tmemo[k].ok, 0);
+        g_lf_tmemo[k].service = service; g_lf_tmemo[k].fsinfo = *fsinfo; g_lf_tmemo[k].pi = pi; g_lf_tmemo[k].arc = *arc;
+        InterlockedExchange(&g_lf_tmemo[k].ok, 1);
+    }
+    return 1;
 }
 static int64_t lf_find(uint64_t arc, uint64_t hash) {                // the game's own lookup: bucket, then the sorted range
     uint64_t buckets = lf_r64(arc + 0x50), entries = lf_r64(arc + 0x58);

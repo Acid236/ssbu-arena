@@ -3,6 +3,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <windows.h>
+#include <psapi.h>                                  /* K32EnumProcessModules: module list of the crash report */
+#include <dbghelp.h>                                /* minidump types; dbghelp.dll itself is loaded only when a dump is written */
 #include "runtime.h"
 #include "hostrt.h"
 
@@ -456,8 +458,202 @@ void guest_unimpl(uint64_t pc, uint32_t insn, const char *what) {
 }
 void guest_svc(Ctx *c, uint32_t number) { (void)c; guest_trap("svc (direct kernel call)", number); }
 
+const char *guest_thread_name_of(DWORD tid);       /* os_threads.c */
+
+/* Where the reports of this process go: "<exe name><suffix>" next to the exe, or in SSBU_REPORT_DIR when that is set (the
+ * launcher can give every run its own folder, so that a report from another PC arrives with the log of the same run). */
+int diag_report_path(char *out, size_t size, const char *suffix) {
+    char exe[MAX_PATH];
+    DWORD n = GetModuleFileNameA(NULL, exe, MAX_PATH);
+    if (n <= 4 || n >= MAX_PATH) return 0;
+    exe[n - 4] = 0;                                 /* without ".exe" */
+    const char *dir = getenv("SSBU_REPORT_DIR"), *base = strrchr(exe, '\\');
+    int k = dir && dir[0] ? snprintf(out, size, "%s\\%s%s", dir, base ? base + 1 : exe, suffix) : snprintf(out, size, "%s%s", exe, suffix);
+    return k > 0 && (size_t)k < size;
+}
+static const char *base_name(const char *path) { const char *s = strrchr(path, '\\'); return s ? s + 1 : path; }     /* the reports name files, not folders: logs get posted */
+
+/* SSBU_MINIDUMP: not set = a minidump when the game crashes; 0 = none at all; "freeze" = also when the freeze watchdog
+ * reports a stall of 5 s or more (never for the 1 s reports: the start-up white screen and the opening movie trip those on a
+ * normal start); "full" = the whole memory instead of the stacks and what they point to (several GB). Joined: freeze,full. */
+enum { MD_OFF = 1, MD_FREEZE = 2, MD_FULL = 4 };
+#define DUMP_WAIT_MS 30000                          /* the helper gets this long (a dump of the stacks takes about a second) ... */
+#define DUMP_WAIT_FULL_MS 600000                    /* ... and this long for a full one */
+static int minidump_mode(void) {
+    static int mode = -1;
+    if (mode < 0) {
+        const char *v = getenv("SSBU_MINIDUMP");
+        char w[64];
+        mode = 0;
+        if (v && v[0] == '0') mode = MD_OFF;
+        else if (v) {
+            snprintf(w, sizeof w, "%s", v);
+            _strlwr(w);
+            if (strstr(w, "freeze")) mode |= MD_FREEZE;
+            if (strstr(w, "full")) mode |= MD_FULL;
+        }
+    }
+    return mode;
+}
+/* The helper's environment: this process's without the SSBU_* variables, so that the constructors of the exe (fighter
+ * registry, loose files) have nothing to start in it. A static buffer: the heap of a crashed process may be damaged. */
+static char *helper_env(void) {
+    static char block[32768];
+    size_t n = 0;
+    for (char **e = _environ; e && *e; e++) {
+        size_t len = strlen(*e) + 1;
+        if (!_strnicmp(*e, "SSBU_", 5)) continue;
+        if (n + len + 2 > sizeof block) return NULL;                 /* does not fit: the helper inherits the whole environment */
+        memcpy(block + n, *e, len);
+        n += len;
+    }
+    block[n] = block[n + 1] = 0;
+    return block;
+}
+/* A minidump of the process, "<exe name>_<why>_last.dmp" beside the text report (the same name every time: one file, not
+ * a pile): every thread's stack and registers, the loaded modules with their versions, and the memory the stacks point to,
+ * so that the state can be opened on the development PC (WinDbg / Visual Studio, with the build's exe, .pdb and DLLs).
+ * why = "crash" (crash_filter) or "freeze" (nvn_vk_wd.c, only with SSBU_MINIDUMP=freeze). Returns 1 when a dump was tried.
+ * A minidump holds process memory: the environment, user paths, pieces of game data (=full: all of it). Never post one.
+ * Written by ANOTHER process: this exe started again as "--write-dump" (diag_dump_helper), while the calling thread waits.
+ * MiniDumpWriteDump on the own process suspends every other thread first, and when one of them held a lock dbghelp then
+ * needs (the process heap), the dump never ended: 0 bytes and a hung game. */
+int diag_minidump(EXCEPTION_POINTERS *ep, const char *why) {
+    int mode = minidump_mode(), full = (mode & MD_FULL) != 0;
+    char suffix[48], path[2 * MAX_PATH], exe[MAX_PATH], cmd[4 * MAX_PATH];
+    if ((mode & MD_OFF) || (!strcmp(why, "freeze") && !(mode & MD_FREEZE))) return 0;
+    snprintf(suffix, sizeof suffix, "_%s_last.dmp", why);
+    if (!diag_report_path(path, sizeof path, suffix) || !GetModuleFileNameA(NULL, exe, MAX_PATH)) return 0;
+    snprintf(cmd, sizeof cmd, "\"%s\" --write-dump %lu %lu %llx %d \"%s\"", exe, GetCurrentProcessId(), GetCurrentThreadId(),
+             (unsigned long long)(uintptr_t)ep, full, path);
+    STARTUPINFOA si = {sizeof si};
+    PROCESS_INFORMATION pi;
+    if (!CreateProcessA(NULL, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, helper_env(), NULL, &si, &pi)) { printf("minidump: the helper process did not start (%lu)\n", GetLastError()); return 1; }
+    DWORD wr = WaitForSingleObject(pi.hProcess, full ? DUMP_WAIT_FULL_MS : DUMP_WAIT_MS), code = 1;
+    if (wr != WAIT_OBJECT_0) {                      /* stopped, with the half-written file */
+        TerminateProcess(pi.hProcess, 1);
+        WaitForSingleObject(pi.hProcess, 2000);
+        DeleteFileA(path);
+    }
+    GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
+    WIN32_FILE_ATTRIBUTE_DATA fa;
+    if (wr == WAIT_OBJECT_0 && code == 0 && GetFileAttributesExA(path, GetFileExInfoStandard, &fa))
+        printf("minidump: %s (%.1f MB)\n", base_name(path), (double)(((unsigned long long)fa.nFileSizeHigh << 32) | fa.nFileSizeLow) / 1048576.0);
+    else printf("minidump: not written (%s, helper exit code 0x%lx)\n", wr == WAIT_OBJECT_0 ? "the helper failed" : "the helper took too long and was stopped", code);
+    fflush(stdout);
+    return 1;
+}
+/* ssbu_native.exe --write-dump <pid> <thread id> <EXCEPTION_POINTERS address in that process, hex, 0 = none> <full> <path>:
+ * the other side of diag_minidump. Exit code 0 = written, 6 = the process is not this exe (the switch is no general dumper). */
+int diag_dump_helper(int argc, char **argv) {
+    typedef BOOL (WINAPI *WriteFn)(HANDLE, DWORD, HANDLE, MINIDUMP_TYPE, PMINIDUMP_EXCEPTION_INFORMATION, PMINIDUMP_USER_STREAM_INFORMATION, PMINIDUMP_CALLBACK_INFORMATION);
+    if (argc < 7) return 2;
+    DWORD pid = strtoul(argv[2], NULL, 10), tid = strtoul(argv[3], NULL, 10), tn = MAX_PATH;
+    EXCEPTION_POINTERS *ep = (EXCEPTION_POINTERS *)(uintptr_t)strtoull(argv[4], NULL, 16);
+    int full = atoi(argv[5]);
+    HMODULE dbg = LoadLibraryExA("dbghelp.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);      /* the system's, not one beside the exe */
+    WriteFn write = dbg ? (WriteFn)GetProcAddress(dbg, "MiniDumpWriteDump") : NULL;
+    HANDLE proc = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ | PROCESS_DUP_HANDLE, FALSE, pid);
+    if (!write || !proc) return 3;
+    char mine[MAX_PATH], theirs[MAX_PATH];
+    if (!GetModuleFileNameA(NULL, mine, MAX_PATH) || !QueryFullProcessImageNameA(proc, 0, theirs, &tn) || _stricmp(mine, theirs)) return 6;
+    HANDLE h = CreateFileA(argv[6], GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return 4;
+    MINIDUMP_EXCEPTION_INFORMATION info = {tid, ep, TRUE};      /* dbghelp.h's type (packed to 4 bytes); the pointer is the target's */
+    MINIDUMP_TYPE type = (MINIDUMP_TYPE)(MiniDumpWithHandleData | MiniDumpWithUnloadedModules | MiniDumpWithThreadInfo |
+        (full ? MiniDumpWithFullMemory | MiniDumpWithFullMemoryInfo : MiniDumpWithIndirectlyReferencedMemory | MiniDumpWithProcessThreadData));
+    BOOL ok = write(proc, pid, h, type, ep ? &info : NULL, NULL, NULL);
+    CloseHandle(h);
+    if (!ok) DeleteFileA(argv[6]);
+    return ok ? 0 : 5;
+}
+/* The modules of the process with their address ranges (names only, no folders): the host addresses of a report (registers,
+ * stack words) can be placed in a module without the minidump. */
+static void diag_modules(FILE *f) {
+    HMODULE mods[512];
+    DWORD need = 0;
+    if (!K32EnumProcessModules(GetCurrentProcess(), mods, sizeof mods, &need)) return;
+    fprintf(f, "modules:\n");
+    for (DWORD i = 0; i < need / sizeof mods[0] && i < 512; i++) {
+        MODULEINFO mi;
+        char name[MAX_PATH] = "?";
+        if (!K32GetModuleInformation(GetCurrentProcess(), mods[i], &mi, sizeof mi)) continue;
+        GetModuleFileNameA(mods[i], name, MAX_PATH);
+        const IMAGE_NT_HEADERS *nt = (const IMAGE_NT_HEADERS *)((const char *)mi.lpBaseOfDll + ((const IMAGE_DOS_HEADER *)mi.lpBaseOfDll)->e_lfanew);
+        fprintf(f, "  %016llx-%016llx  linked %08lx  %s\n", (unsigned long long)(uintptr_t)mi.lpBaseOfDll,
+                (unsigned long long)(uintptr_t)mi.lpBaseOfDll + mi.SizeOfImage, (unsigned long)nt->FileHeader.TimeDateStamp, base_name(name));
+    }
+}
+
+/* The crash report also goes to <exe name>_crash.txt next to the exe (appended; SSBU_REPORT_DIR: there), as the freeze
+ * watchdog does with _freeze.txt: a game started without --log loses its console output when it exits. */
+static void crash_file_report(EXCEPTION_POINTERS *ep) {
+    char path[2 * MAX_PATH];
+    if (!diag_report_path(path, sizeof path, "_crash.txt")) return;
+    FILE *f = fopen(path, "ab");
+    if (!f) return;
+    EXCEPTION_RECORD *er = ep->ExceptionRecord;
+    CONTEXT *cx = ep->ContextRecord;
+    SYSTEMTIME st; GetLocalTime(&st);
+    DWORD tid = GetCurrentThreadId();
+    const char *tn = guest_thread_name_of(tid);
+    HMODULE mod = NULL;
+    GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)er->ExceptionAddress, &mod);
+    char mname[MAX_PATH] = "?";
+    if (mod) GetModuleFileNameA(mod, mname, MAX_PATH);
+    fprintf(f, "=== %04d-%02d-%02d %02d:%02d:%02d  HOST EXCEPTION 0x%08lx at %p (%s + 0x%llx)\n", st.wYear, st.wMonth, st.wDay, st.wHour,
+            st.wMinute, st.wSecond, er->ExceptionCode, er->ExceptionAddress, base_name(mname),
+            mod ? (unsigned long long)((uintptr_t)er->ExceptionAddress - (uintptr_t)mod) : 0ull);
+    if (er->ExceptionCode == EXCEPTION_ACCESS_VIOLATION)
+        fprintf(f, "  %s address 0x%llx\n", er->ExceptionInformation[0] == 1 ? "writing" : "reading", (unsigned long long)er->ExceptionInformation[1]);
+    fprintf(f, "thread %lu (%s), on logical processor %lu\n", tid, tn ? tn : "not a guest thread, or the main thread", GetCurrentProcessorNumber());
+    fprintf(f, "host registers: rax %016llx rbx %016llx rcx %016llx rdx %016llx\n                rsi %016llx rdi %016llx rbp %016llx rsp %016llx\n"
+               "                r8  %016llx r9  %016llx r10 %016llx r11 %016llx\n                r12 %016llx r13 %016llx r14 %016llx r15 %016llx\n",
+            cx->Rax, cx->Rbx, cx->Rcx, cx->Rdx, cx->Rsi, cx->Rdi, cx->Rbp, cx->Rsp, cx->R8, cx->R9, cx->R10, cx->R11, cx->R12, cx->R13, cx->R14, cx->R15);
+    MEMORY_BASIC_INFORMATION mbi;       /* a stack overflow leaves rsp on a guard page: reading it would fault again */
+    if (VirtualQuery((void *)(uintptr_t)(cx->Rsp - 0x40), &mbi, sizeof mbi) && mbi.State == MEM_COMMIT && !(mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS))) {
+        fprintf(f, "host stack from rsp-0x40:\n");
+        const uint64_t *s = (const uint64_t *)(uintptr_t)(cx->Rsp - 0x40);
+        uintptr_t end = (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
+        for (int i = 0; i < 48 && (uintptr_t)(s + i + 1) <= end; i++)
+            fprintf(f, "  rsp%+4d  %016llx%s", (i - 8) * 8, (unsigned long long)s[i], i % 2 ? "\n" : "");
+        fprintf(f, "\n");
+    }
+    Ctx *c = t_cur_ctx;
+    if (c) {
+        fprintf(f, "last guest function entered: f_%llx\nguest registers:\n", (unsigned long long)c->fn);
+        for (int i = 0; i < 31; i++) fprintf(f, "  x%-2d %016llx%s", i, (unsigned long long)c->x[i], i % 3 == 2 ? "\n" : "");
+        fprintf(f, "  sp  %016llx\n", (unsigned long long)c->x[31]);
+    }
+    fprintf(f, "guest call stack (innermost first):\n");
+    CONTEXT ctx = *cx;
+    uint64_t last = 0;
+    for (int depth = 0, shown = 0; depth < 400 && shown < 40; depth++) {
+        uint64_t g = guest_function_of(ctx.Rip);
+        if (g && g != last) { fprintf(f, "  f_%llx\n", (unsigned long long)g); shown++; last = g; }
+        DWORD64 image_base;
+        RUNTIME_FUNCTION *rf = RtlLookupFunctionEntry(ctx.Rip, &image_base, NULL);
+        if (!rf) break;
+        void *handler_data;
+        DWORD64 establisher;
+        RtlVirtualUnwind(UNW_FLAG_NHANDLER, image_base, ctx.Rip, rf, &ctx, &handler_data, &establisher, NULL);
+        if (!ctx.Rip) break;
+    }
+    diag_modules(f);
+    fprintf(f, "\n");
+    fclose(f);
+}
+
 static LONG WINAPI crash_filter(EXCEPTION_POINTERS *ep) {
     EXCEPTION_RECORD *er = ep->ExceptionRecord;
+    static volatile LONG owner;                     /* one report and one dump: a second thread that faults meanwhile waits for the exit */
+    LONG me = (LONG)GetCurrentThreadId(), was = InterlockedCompareExchange(&owner, me, 0);
+    if (was == me) TerminateProcess(GetCurrentProcess(), 4);      /* a fault inside the report itself ends the process */
+    if (was) {                                      /* not for ever: this thread may hold a lock that the report needs */
+        Sleep((minidump_mode() & MD_FULL ? DUMP_WAIT_FULL_MS : DUMP_WAIT_MS) + 15000);
+        TerminateProcess(GetCurrentProcess(), 4);
+    }
     printf("\nHOST EXCEPTION 0x%08lx at host address %p\n", er->ExceptionCode, er->ExceptionAddress);
     if (er->ExceptionCode == EXCEPTION_ACCESS_VIOLATION)
         printf("  %s address 0x%llx\n", er->ExceptionInformation[0] == 1 ? "writing" : "reading",
@@ -477,6 +673,9 @@ static LONG WINAPI crash_filter(EXCEPTION_POINTERS *ep) {
         RtlVirtualUnwind(UNW_FLAG_NHANDLER, image_base, ctx.Rip, rf, &ctx, &handler_data, &establisher, NULL);
         if (!ctx.Rip) break;
     }
+    fflush(stdout);
+    crash_file_report(ep);                          /* the console report is out: a fault in what follows (stack, heap) cannot take it away */
+    diag_minidump(ep, "crash");
     report_and_exit(4);
     return EXCEPTION_EXECUTE_HANDLER;
 }
@@ -500,6 +699,7 @@ void runtime_init(const char *elf, const char *trace_path) {
     }
     g_trace = fopen(trace_path, "w");
     SetUnhandledExceptionFilter(crash_filter);
+    (void)minidump_mode();                          /* read SSBU_MINIDUMP now: the crash path should not have to */
 
     void *mem = VirtualAlloc((void *)GUEST_BASE, IMAGE_SIZE, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
     if (mem != (void *)GUEST_BASE) { fprintf(stderr, "cannot map guest image at 0x%llx\n", GUEST_BASE); exit(1); }

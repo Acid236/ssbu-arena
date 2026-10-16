@@ -26,7 +26,7 @@ One command, eleven resumable steps. When it ends it prints how to start the gam
 | glslang, Windows x86_64 release package (`glslang-*-windows-x86_64-release.zip`, has `include/` and `lib/`) | 16.6.0 | https://github.com/KhronosGroup/glslang/releases |
 | Source checkout of a yuzu-family emulator (only `src/core/hle/service/mii/` is read, by `tools/lifter/gen_sdktest.py`, for the reference data of the self-test) | suyu | any yuzu-lineage open-source repository that still has `src/core/hle/service/mii/types/raw_data.cpp` |
 | A GPU with a Vulkan 1.3 driver (to run, not to build) | | your GPU vendor |
-| Media Foundation (movies) | part of Windows | |
+| Media Foundation (movies) with the Microsoft Store codecs **VP9 Video Extensions** and **Web Media Extensions 2.x** (the movies' Vorbis sound; without it the opening movie stays black; Windows N editions also need the Media Feature Pack) | part of Windows + the two Store packages | Microsoft Store. Check with PowerShell: `Get-AppxPackage *WebMediaExtensions*, *VP9VideoExtensions* \| Select Name, Version`. The log line `no Vorbis decoder on this PC` names the missing one; `SSBU_SKIP_MOVIES=1` skips every movie meanwhile |
 | libopus as a DLL (the music and the game's other Opus sounds; **without it they are silent**, the rest runs) | 1.6.1, built from source as below | the source release from https://opus-codec.org/downloads/ (check it against Xiph's `SHA256SUMS`), or MSYS2's `mingw-w64-ucrt-x86_64-opus` |
 
 Unpack SDL3, Vulkan-Headers, glslang and the emulator checkout anywhere and give the folders with `--sdl3`,
@@ -151,6 +151,14 @@ Pad mapping file and tools: `ssbu_native.exe --pad-test`, `--pad-map <n>`.
 - `the list of SDK functions to lift was not found`: `tools/lifter/sdklift_roots.txt` is missing from your clone.
 - No music (the menus and fights are silent apart from some effects), and the run's log says `nn::codec: libopus NOT
   FOUND`: there is no libopus beside the exe; see libopus under "What you need", then run `--redo link`.
+- Black window at the start, and the log says `movie: track 1 (audio/vorbis): no Media Foundation decoder path to PCM` or
+  `no Vorbis decoder on this PC`: the opening movie has no sound decoder, and the game's movie player never shows the
+  picture without it. Install or update Web Media Extensions (2.x) from the Microsoft Store; meanwhile
+  `--env SSBU_SKIP_MOVIES=1` skips every movie.
+- DLC not found: the add-on list is `build\config\dlc.txt` (written by `tools/audit/dlc_list.py`, whose default output is
+  that file; it reads the file names of your own DLC dumps).
+- A crash: the console report is also written to `<exe>_crash.txt` and a minidump to `<exe>_crash_last.dmp` beside the
+  exe; attach the `.txt` (and the log) to an issue.
 - A compiler job that fails after a power loss or while the PC is under load: run the same command again; only what
   changed is rebuilt. Closing a running game first matters: a running exe holds its DLLs open and the link fails.
 - Output with non-ASCII characters from Windows tools is shown with `?`; the logs in `build/logs` are the originals.
