@@ -1249,8 +1249,13 @@ static void fh_hook(Ctx *c, void *user) {
              * the line ("w <value>"); not part of H (the hash stays comparable with runs without it) */
             static int wk_on = -1; static double wk_id;
             if (wk_on < 0) { const char *w = getenv("SSBU_FIGHT_HASH_WORK"); wk_on = w && w[0] && (fd_value(w, &wk_id) || ((wk_id = (double)strtoul(w, NULL, 16)), wk_id != 0)); }
-            char wtxt[32] = "";
+            char wtxt[64] = "";
             if (wk_on) snprintf(wtxt, sizeof wtxt, " w %d", (int)fd_call(c, FD_N("24WorkModule__get_int_impl") "i", boma, (uint64_t)(int64_t)wk_id, 0, 0, 0, 0, 0, NULL));
+            {   /* SSBU_FIGHT_HASH_PAD=1 (test only, input delay): player 1's buttons at the last poll, at the end of the line ("pad <hex>"); not part of H */
+                static int pad_on = -1; uint64_t display_p1_buttons(void);
+                if (pad_on < 0) pad_on = getenv("SSBU_FIGHT_HASH_PAD") != NULL;
+                if (pad_on) { size_t l = strlen(wtxt); snprintf(wtxt + l, sizeof wtxt - l, " pad %llx", (unsigned long long)display_p1_buttons()); }
+            }
             fprintf(g_fh_out, "F %lld e %d st %x mot %llx mf %08x x %08x y %08x dmg %08x rngcalls %u rng %08x H %016llx  (%.3f %.3f frame %.2f %.2f%%)%s\n",
                     f, g_fh_f[k].entry, st, (unsigned long long)mot, bm, bx, by, bd, rc, (unsigned)(rh ^ (rh >> 32)), (unsigned long long)g_fh_run, (double)x, (double)y, (double)mf, (double)dmg, wtxt);
             if ((f & 63) == 0) fflush(g_fh_out);

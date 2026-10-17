@@ -4,7 +4,7 @@
 # check what the game needs and start it. Windows PowerShell 5.1 + WinForms: nothing to install.
 # Lives in build\ (scripts\setup.py link copies it there, with "Avvia SSBU.bat"); in the portable copy too.
 # Files it writes: build\config\online.ini, build\config\account.txt, build\config\dlc.txt, build\config\launcher.ini,
-# and some keys of build\config\graphics.ini (aspect, window, width, height) and controllers.ini ([players], [keyboard]).
+# and some keys of build\config\graphics.ini (aspect, window, width, height, latency) and controllers.ini ([players], [keyboard]).
 # The game's own data is only read. ASCII only (Windows PowerShell reads scripts in the ANSI code page).
 param([switch]$Check)
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
@@ -49,7 +49,7 @@ function Get-UidFromName([string]$name) {
 # ---------------------------------------------------------------- the window
 $f = New-Object System.Windows.Forms.Form
 $f.Text = 'SSBU recomp - Launcher'
-$f.Size = New-Object System.Drawing.Size(560, 770)
+$f.Size = New-Object System.Drawing.Size(560, 800)
 $f.StartPosition = 'CenterScreen'
 $f.FormBorderStyle = 'FixedDialog'
 $f.MaximizeBox = $false
@@ -205,8 +205,8 @@ function Add-Combo($parent, $items, $x, $y, $w, $editable = $false) {
 # video (graphics.ini)
 $GfxIni = Join-Path $Cfg 'graphics.ini'
 $G = Read-Ini $GfxIni
-$gv = Add-Group 'Video' 454 120
-$gv.Size = New-Object System.Drawing.Size(255, 120)
+$gv = Add-Group 'Video' 454 150
+$gv.Size = New-Object System.Drawing.Size(255, 150)
 Add-Label $gv 'Proporzioni' 10 25 80 | Out-Null
 $aspect = Add-Combo $gv @('16:9 (bande nere)', 'Stirata (riempie)') 92 22 150
 $aspect.SelectedIndex = $(if ($G['aspect'] -eq 'stretch') { 1 } else { 0 })
@@ -218,13 +218,17 @@ Add-Label $gv 'Dimensione' 10 85 80 | Out-Null
 $winSize = Add-Combo $gv @('1280x720', '1600x900', '1920x1080', '2560x1440') 92 82 150 $true
 $winSize.Text = $(if ($G['width'] -and $G['height']) { $G['width'] + 'x' + $G['height'] } else { '1280x720' })
 $tip.SetToolTip($winSize, 'Dimensione della finestra (solo in modalita'' Finestra). Puoi scriverne una tua, es. 1366x768.')
+Add-Label $gv 'Latenza input' 10 115 80 | Out-Null
+$latency = Add-Combo $gv @('Normale', 'Bassa', 'Minima') 92 112 150
+$latency.SelectedIndex = $(switch ($G['latency']) { 'low' { 1 } 'lowest' { 2 } default { 0 } })
+$tip.SetToolTip($latency, 'Bassa: il gioco legge il controller piu'' tardi in ogni frame (2-5 ms in meno). Minima: anche l''immagine va a schermo appena pronta (circa 4 ms in meno ancora, ma i frame non durano tutti uguale). Non cambia i frame di logica del gioco ne'' il buffer del Wireless locale.')
 function Update-WinSize { $winSize.Enabled = ($winMode.SelectedIndex -eq 0) }
 $winMode.Add_SelectedIndexChanged({ Update-WinSize }); Update-WinSize
 
 # controllers (controllers.ini)
 $PadIni = Join-Path $Cfg 'controllers.ini'
 $gc = New-Object System.Windows.Forms.GroupBox; $gc.Text = 'Controller'; $gc.Location = New-Object System.Drawing.Point(277, 454)
-$gc.Size = New-Object System.Drawing.Size(255, 120); $f.Controls.Add($gc)
+$gc.Size = New-Object System.Drawing.Size(255, 150); $f.Controls.Add($gc)
 Add-Label $gc 'Giocatore 1' 10 25 72 | Out-Null
 $p1 = Add-Combo $gc @() 82 22 112
 Add-Label $gc 'Giocatore 2' 10 55 72 | Out-Null
@@ -268,7 +272,7 @@ Fill-Pads
 
 # status + buttons
 $status = New-Object System.Windows.Forms.TextBox; $status.Multiline = $true; $status.ReadOnly = $true; $status.ScrollBars = 'Vertical'
-$status.Location = New-Object System.Drawing.Point(12, 582); $status.Size = New-Object System.Drawing.Size(520, 100); $status.Font = New-Object System.Drawing.Font('Consolas', 8.5)
+$status.Location = New-Object System.Drawing.Point(12, 612); $status.Size = New-Object System.Drawing.Size(520, 100); $status.Font = New-Object System.Drawing.Font('Consolas', 8.5)
 $f.Controls.Add($status)
 function Say($t) { $status.AppendText($t + "`r`n") }
 
@@ -284,7 +288,8 @@ function Save-Settings {
         Move-Item -Force $OnlineIni (Join-Path $Cfg 'online.ini.off')      # off: kept aside, back when it is turned on again
     }
     Set-Content -Path $LauncherIni -Encoding ASCII -Value @('# written by the launcher', ('saves = ' + $Saves), ('nickname = ' + $n))
-    $gfx = @{ aspect = @('keep', 'stretch')[[Math]::Max(0, $aspect.SelectedIndex)]; window = @('windowed', 'borderless', 'fullscreen')[[Math]::Max(0, $winMode.SelectedIndex)] }
+    $gfx = @{ aspect = @('keep', 'stretch')[[Math]::Max(0, $aspect.SelectedIndex)]; window = @('windowed', 'borderless', 'fullscreen')[[Math]::Max(0, $winMode.SelectedIndex)]
+             latency = @('normal', 'low', 'lowest')[[Math]::Max(0, $latency.SelectedIndex)] }
     if ($winSize.Text.Trim() -match '^(\d{3,5})\s*[xX*]\s*(\d{3,5})$') { $gfx['width'] = $Matches[1]; $gfx['height'] = $Matches[2] }
     Set-IniValues $GfxIni $null $gfx
     if ($p1.SelectedIndex -ge 0 -and $p2.SelectedIndex -ge 0) {
@@ -339,21 +344,24 @@ $timer.Add_Tick({
         } else { Say 'Gioco chiuso.' }
     }
 })
-Add-Button $f 'Salva' 12 692 120 { Save-Settings; Test-All -Quiet | Out-Null; Say 'Impostazioni salvate.' } | Out-Null
-$play = Add-Button $f 'GIOCA' 392 692 140 {
+Add-Button $f 'Salva' 12 722 120 { Save-Settings; Test-All -Quiet | Out-Null; Say 'Impostazioni salvate.' } | Out-Null
+$play = Add-Button $f 'GIOCA' 392 722 140 {
     Save-Settings
     if ((Test-All) -gt 0) { return }
     New-Item -ItemType Directory -Force $Saves, (Join-Path $Build 'cache') | Out-Null
     $env:SSBU_ROMFS = $RomFS; $env:SSBU_USERDATA = $Saves; $env:SSBU_FONTS = $Fonts
     $cacheMark = @(Get-ChildItem (Join-Path $Build 'cache\vk') -Filter 'prepared_*.txt' -ErrorAction SilentlyContinue).Count
     if ($cacheMark -eq 0) { Say 'Primo avvio: prima di giocare il gioco prepara gli shader per questa scheda video (qualche minuto).' }
-    $script:game = Start-Process -FilePath $Exe -ArgumentList @('"' + $MainElf + '"', '0') -WorkingDirectory $Work -PassThru `
-                   -RedirectStandardOutput (Join-Path $Build 'game.log')
+    # no console window: the game's output goes to game.log through a hidden cmd.exe (its exit code is the game's)
+    $psi = New-Object System.Diagnostics.ProcessStartInfo; $psi.FileName = "$env:WINDIR\System32\cmd.exe"; $psi.WorkingDirectory = $Work
+    $psi.Arguments = '/d /c ""' + $Exe + '" "' + $MainElf + '" 0 > "' + (Join-Path $Build 'game.log') + '" 2>&1"'
+    $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+    $script:game = [System.Diagnostics.Process]::Start($psi)
     Say 'Gioco avviato (log: build\game.log).'
     $play.Enabled = $false; $f.WindowState = 'Minimized'; $timer.Start()
 }
 $play.Font = $bold
-Add-Button $f 'Apri log' 140 692 90 { $p = Join-Path $Build 'game.log'; if (Test-Path $p) { Start-Process notepad.exe $p } } | Out-Null
+Add-Button $f 'Apri log' 140 722 90 { $p = Join-Path $Build 'game.log'; if (Test-Path $p) { Start-Process notepad.exe $p } } | Out-Null
 
 if ($Check) { Test-All -Quiet | Out-Null; $status.Lines | ForEach-Object { Write-Output $_ }; exit }
 Test-All -Quiet | Out-Null

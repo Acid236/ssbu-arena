@@ -622,6 +622,7 @@ static void fill_pad(uint64_t out, uint32_t id, int kind) {
     if (ry < -STICK_MAX / 2) buttons |= 1ull << (BTN_SL_DOWN + 4);
     wr64(out + 8, buttons);
     if (g_test_vk && (int)id == g_keyboard_player) { InterlockedIncrement(&g_test_polls); InterlockedOr64(&g_test_seen, (LONG64)buttons); }      /* U1 test only */
+    { void display_pad_any(unsigned id, uint64_t b); display_pad_any((unsigned)id, buttons); }      /* SSBU_FIGHT_HASH_PAD (test only) */
     if (id == 0) { void display_l1_poll(uint64_t buttons, long long fight_ticks, long long poll); int r1_ra_phase(void); if (r1_ra_phase() != 1) display_l1_poll(buttons, l1_ticks, (long long)g_seq_polls); }      /* (R1 run-ahead: the speculative pass's poll is not a poll of the real timeline) */      /* L1 (input latency): the time of player 1's poll, the press it saw */
     wr32(out + 0x10, (uint32_t)lx);
     wr32(out + 0x14, (uint32_t)ly);

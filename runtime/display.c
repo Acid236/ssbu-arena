@@ -722,6 +722,9 @@ static volatile LONG g_l1_trace_left, g_l1_trace_done;
 static LONG64 g_l1_trace_t0;
 int display_l1_trace(void) { return g_l1_trace_left > 0; }
 double display_l1_ms(void) { LARGE_INTEGER n; QueryPerformanceCounter(&n); return (double)(n.QuadPart - g_l1_trace_t0) * 1000.0 / (double)g_freq.QuadPart; }
+static volatile uint64_t g_pad_any[8];
+void display_pad_any(unsigned id, uint64_t b) { g_pad_any[id & 7] = b; }
+uint64_t display_p1_buttons(void) { uint64_t b = 0; for (int i = 0; i < 8; i++) b |= g_pad_any[i]; return b; }      /* every local pad, ORed */
 void display_l1_poll(uint64_t buttons, long long fight_ticks, long long poll) {
     static uint64_t prev;
     LARGE_INTEGER now;
