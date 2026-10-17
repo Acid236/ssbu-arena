@@ -64,6 +64,35 @@ enum { LM_SCAN = 1, LM_SCAN_RESP, LM_CONNECT, LM_DISCONNECT, LM_DESTROY, LM_SYNC
 static struct { uint32_t vip; int ms; DWORD at; } g_ldn_pings[LDN_PEERS];
 static volatile LONG g_ldn_my_ping = -1;                  /* ms, -1 = not measured yet */
 static int g_ldn_ping_overlay = 1;
+
+/* Input delay of local wireless. The battle's net input object (guest f_71016d78d0, `this` = the object below) makes the
+ * local player's input for frames up to [obj+0x41] frames ahead of the current one ([obj+4] next input frame, [obj+2]
+ * current frame, u16) and sends it; both games apply it at that frame. f_71016ccae0 (re)computes [obj+0x41] from the
+ * largest ping of the players ([obj+0x14], ms): a margin of 1..3 frames (+1 when [obj+0x40]) plus half the round trip
+ * * 1.1 * 0.06, at most 25. With 0 ms it is 4: 5 frames from press to reaction where the game offline needs 1.
+ * online.ini input_delay = auto (the game's value) | 0..25 (frames ahead, for every computation of the match); env
+ * SSBU_LDN_DELAY wins. Every player's input carries its own frame number, so two players with different values stay
+ * in step; a value below the trip the datagrams need makes the games wait for each other (stutter) instead. */
+static int g_ldn_delay = -1;                               /* -1 auto */
+int hook_install(uint64_t addr, void (*repl)(Ctx *, void *), void *user, ImportFn *orig);      /* fighter_sdk\hook_host.c */
+static ImportFn g_ldn_delay_orig;
+static void ldn_delay_hook(Ctx *c, void *u) {
+    (void)u;
+    uint64_t obj = c->x[0];
+    g_ldn_delay_orig(c);
+    uint8_t *p = (uint8_t *)(uintptr_t)(obj + 0x41);
+    int game = *p;
+    if (g_ldn_delay >= 0 && g_ldn_delay <= 25) *p = (uint8_t)g_ldn_delay;
+    static int last = -2;
+    if (game != last) { last = game; printf("nn::ldn: input delay: the game asks for %d frame(s) ahead (largest ping %.0f ms), used %d\n", game, (double)*(float *)(uintptr_t)(obj + 0x14), *p); }
+}
+static void ldn_delay_install(void) {
+    static int done;
+    if (done) return;
+    done = 1;
+    int id = hook_install(0x71016ccae0ull, ldn_delay_hook, NULL, &g_ldn_delay_orig);
+    printf("nn::ldn: input delay %s%s\n", g_ldn_delay < 0 ? "auto (the game's own)" : "fixed by online.ini input_delay", id ? "" : " (hook FAILED: the game's own)");
+}
 static void ldn_peer_ping(uint32_t vip, int ms) {          /* g_ldn.cs held */
     int free_i = -1;
     for (int i = 0; i < LDN_PEERS; i++) {
@@ -161,6 +190,7 @@ static void ldn_load_config(void) {
         else if (!_stricmp(k, "room")) snprintf(g_ldn.room, sizeof g_ldn.room, "%s", v);
         else if (!_stricmp(k, "nickname")) snprintf(nick, sizeof nick, "%s", v);
         else if (!_stricmp(k, "ping_overlay")) g_ldn_ping_overlay = _stricmp(v, "off") && strcmp(v, "0");
+        else if (!_stricmp(k, "input_delay")) g_ldn_delay = _stricmp(v, "auto") ? atoi(v) : -1;
     }
     if (f) fclose(f);
     const char *e;
@@ -168,6 +198,8 @@ static void ldn_load_config(void) {
     if ((e = getenv("SSBU_LDN_ROOM")) && *e) snprintf(g_ldn.room, sizeof g_ldn.room, "%s", e);
     if ((e = getenv("SSBU_LDN_NICKNAME")) && *e) snprintf(nick, sizeof nick, "%s", e);
     if ((e = getenv("SSBU_LDN_PING")) && *e) g_ldn_ping_overlay = atoi(e) != 0;
+    if ((e = getenv("SSBU_LDN_DELAY")) && *e) g_ldn_delay = _stricmp(e, "auto") ? atoi(e) : -1;
+    if (g_ldn_delay > 25) g_ldn_delay = 25;
     char *colon = strrchr(server, ':');
     g_ldn.port = 39010;
     if (colon) { *colon = 0; g_ldn.port = (uint16_t)atoi(colon + 1); }
@@ -721,6 +753,7 @@ static void ldn_make_node(uint8_t *node, uint64_t user_config, uint16_t version)
 static void ldn_Initialize(Ctx *c) {
     ldn_load_config();
     if (!g_ldn.configured) { RET(LDN_WIRELESS_OFF); return; }
+    ldn_delay_install();
     EnterCriticalSection(&g_ldn.cs);
     int ok = g_ldn.state != LDN_NONE || ldn_connect_server();
     if (ok && g_ldn.state == LDN_NONE) { g_ldn.state = LDN_INITIALIZED; g_ldn.disconnect_reason = 0; }

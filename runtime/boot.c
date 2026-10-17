@@ -456,6 +456,7 @@ int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
     print_build_identity();
     launch_defaults();
+    { void hwwatch_start(void); hwwatch_start(); }      /* TEST ONLY: SSBU_HWWATCH (nvn_vk_wd.c) */
     {   /* pad tools and their self-test (nnpad_sdl.c): no game is started */
         int nnhid_pad_selftest(void), nnpad_tool(int, char **);
         int tool;

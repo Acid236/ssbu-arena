@@ -94,12 +94,18 @@ Add-Label $go 'Stanza (password)' 12 82 | Out-Null
 $room = Add-Box $go ($(if ($O['room']) { $O['room'] } else { '' })) 130 79 250
 $tip.SetToolTip($room, 'Chi usa la stessa password vede le stesse stanze nel Wireless locale.')
 $pingOn = New-Object System.Windows.Forms.CheckBox; $pingOn.Text = 'Mostra il ping a schermo'; $pingOn.Location = New-Object System.Drawing.Point(130, 108)
-$pingOn.Size = New-Object System.Drawing.Size(250, 22); $pingOn.Checked = ($O['ping_overlay'] -ne 'off'); $go.Controls.Add($pingOn)
+$pingOn.Size = New-Object System.Drawing.Size(170, 22); $pingOn.Checked = ($O['ping_overlay'] -ne 'off'); $go.Controls.Add($pingOn)
+Add-Label $go 'Ritardo input' 305 111 80 | Out-Null
+$delay = New-Object System.Windows.Forms.ComboBox; $delay.DropDownStyle = 'DropDownList'; $delay.Location = New-Object System.Drawing.Point(388, 108)
+$delay.Size = New-Object System.Drawing.Size(120, 22); $go.Controls.Add($delay)
+[void]$delay.Items.Add('Auto (gioco)'); 0..8 | ForEach-Object { [void]$delay.Items.Add($(if ($_ -eq 0) { '0 (minimo)' } else { [string]$_ })) }
+$delay.SelectedIndex = $(if ($O['input_delay'] -match '^\d+$' -and [int]$O['input_delay'] -le 8) { [int]$O['input_delay'] + 1 } else { 0 })
+$tip.SetToolTip($delay, 'Frame di anticipo dell''input nel Wireless locale. Auto: quelli che sceglie il gioco (circa 4 + il ping; 5-6 frame dal tasto all''azione, offline 1). 0: 2 frame in tutto. Se e'' troppo basso per il ping il gioco aspetta l''altro giocatore (scatti): alza di 1. Ognuno puo'' usare il suo valore.')
 if (-not $HasOnline) {
-    $onlineOn.Checked = $false; $onlineOn.Enabled = $false; $server.Enabled = $false; $room.Enabled = $false; $pingOn.Enabled = $false
+    $onlineOn.Checked = $false; $onlineOn.Enabled = $false; $server.Enabled = $false; $room.Enabled = $false; $pingOn.Enabled = $false; $delay.Enabled = $false
     Add-Label $go 'Questa build non ha l''online (setup.py --ldn-online on)' 200 22 300 | Out-Null
 }
-function Update-Online { $e = $onlineOn.Checked -and $HasOnline; $server.Enabled = $e; $room.Enabled = $e; $pingOn.Enabled = $e }
+function Update-Online { $e = $onlineOn.Checked -and $HasOnline; $server.Enabled = $e; $room.Enabled = $e; $pingOn.Enabled = $e; $delay.Enabled = $e }
 $onlineOn.Add_CheckedChanged({ Update-Online }); Update-Online
 
 # saves
@@ -282,7 +288,8 @@ function Save-Settings {
         Set-Content -Path $OnlineIni -Encoding ASCII -Value @(
             '# written by the launcher (build\Launcher.ps1); see tools/online/online.ini.example',
             ('server = ' + $server.Text.Trim()), ('room = ' + $room.Text.Trim()), ('nickname = ' + $n),
-            ('ping_overlay = ' + $(if ($pingOn.Checked) { 'on' } else { 'off' })))
+            ('ping_overlay = ' + $(if ($pingOn.Checked) { 'on' } else { 'off' })),
+            ('input_delay = ' + $(if ($delay.SelectedIndex -le 0) { 'auto' } else { [string]($delay.SelectedIndex - 1) })))
         if ($n) { Set-Content -Path (Join-Path $Cfg 'account.txt') -Value (Get-UidFromName $n) -Encoding ASCII }
     } elseif (Test-Path $OnlineIni) {
         Move-Item -Force $OnlineIni (Join-Path $Cfg 'online.ini.off')      # off: kept aside, back when it is turned on again
@@ -300,6 +307,7 @@ function Save-Settings {
 if (-not (Test-Path $OnlineIni) -and (Test-Path (Join-Path $Cfg 'online.ini.off'))) {
     $O = Read-Ini (Join-Path $Cfg 'online.ini.off')
     if ($O['server']) { $server.Text = $O['server'] }; if ($O['room']) { $room.Text = $O['room'] }
+    if ($O['input_delay'] -match '^\d+$' -and [int]$O['input_delay'] -le 8) { $delay.SelectedIndex = [int]$O['input_delay'] + 1 }
     if (-not $name.Text -and $O['nickname']) { $name.Text = $O['nickname'] }
 }
 if (-not $name.Text -and $L['nickname']) { $name.Text = $L['nickname'] }

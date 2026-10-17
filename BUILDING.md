@@ -312,6 +312,12 @@ Dear ImGui (MIT, https://github.com/ocornut/imgui) is compiled into the runtime 
 text stays in the downloaded folder.
 ### Local wireless over the internet (optional build)
 
+Input delay: the game makes each player's input for frames up to N frames ahead and both games apply it then; N is
+about 4 + half the round trip (measured: 5-6 frames from a press to the fighter's reaction, 1 offline). online.ini
+`input_delay = auto | 0..25` (launcher: "Ritardo input"; env `SSBU_LDN_DELAY`) replaces N (runtime/ldn_online.inc,
+hook on guest 0x71016ccae0). 0 gives 2 frames in all; with it the fight hashes of both games stayed identical. Too low
+for the ping makes the games wait for each other.
+
 The game's own **Local Wireless** mode, carried through a room server you host (`tools/online/ldn_room_server.py`,
 Python 3, no dependencies; `tools/online/test_room_server.py` is its protocol and fuzz test). For a server with many rooms
 on Linux, `tools/online/ldn_relay.c` is the same server in C (`cc -O2 -o ldn_relay ldn_relay.c`, same options, plus

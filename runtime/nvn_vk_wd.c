@@ -396,3 +396,110 @@ static void wd_stop(void) {
     g_wd_quit = 1;
     if (g_wd_thread) { WaitForSingleObject(g_wd_thread, 3000); CloseHandle(g_wd_thread); g_wd_thread = NULL; }
 }
+/* TEST ONLY, SSBU_HWWATCH=<command file>: data watchpoints (x64 debug registers) set while the game runs, to find which
+ * lifted functions read or write a guest address (used to follow the local pad through the local-wireless input queue).
+ * The file is read again whenever it changes (every 500 ms): up to 4 lines "<hex address> <1|2|4|8> <w|rw>" (an empty
+ * file clears them). Every thread of the process gets them; each new place that touches an address is logged once,
+ * "hwwatch: #<slot> <address> = <value> by <host pc [guest f_..]>" with the 8 callers under it, at most 40 places a slot. */
+static volatile uint64_t g_hw_addr[4]; static volatile int g_hw_len[4], g_hw_rw[4], g_hw_n;
+static uint64_t g_hw_seen[4][40]; static volatile LONG g_hw_nseen[4]; static volatile LONG64 g_hw_hits[4];
+static DWORD g_hw_tid;
+static LONG CALLBACK hw_veh(EXCEPTION_POINTERS *ep) {
+    if (ep->ExceptionRecord->ExceptionCode != EXCEPTION_SINGLE_STEP) return EXCEPTION_CONTINUE_SEARCH;
+    CONTEXT *c = ep->ContextRecord;
+    DWORD64 dr6 = c->Dr6;
+    if (!(dr6 & 15)) return EXCEPTION_CONTINUE_SEARCH;
+    c->Dr6 = 0;
+    for (int k = 0; k < 4; k++) {
+        if (!(dr6 & (1u << k))) continue;
+        InterlockedIncrement64(&g_hw_hits[k]);
+        uint64_t pc = c->Rip;
+        int seen = 0, n = g_hw_nseen[k];
+        for (int i = 0; i < n && i < 40; i++) if (g_hw_seen[k][i] == pc) seen = 1;
+        if (seen || n >= 40) continue;
+        g_hw_seen[k][InterlockedIncrement(&g_hw_nseen[k]) - 1] = pc;
+        char s[300]; uint64_t v = 0, pcs[10]; CONTEXT cc = *c;
+        memcpy(&v, (const void *)(uintptr_t)g_hw_addr[k], (size_t)g_hw_len[k]);
+        wd_addr(pc, s, sizeof s);
+        printf("hwwatch: #%d %llx = %llx (%s) by %s, thread %lu\n", k, (unsigned long long)g_hw_addr[k], (unsigned long long)v, g_hw_rw[k] ? "read/write" : "write", s, GetCurrentThreadId());
+        {   Ctx *hostrt_cur_ctx(void); Ctx *g = hostrt_cur_ctx();
+            if (g) { printf("hwwatch:   guest fn f_%llx regs", (unsigned long long)g->fn); for (int r = 0; r < 32; r++) printf(" x%d=%llx", r, (unsigned long long)g->x[r]); printf("\n"); }
+        }
+        int m = wd_walk(&cc, pcs, 10);
+        for (int i = 1; i < m; i++) { wd_addr(pcs[i], s, sizeof s); printf("hwwatch:      %d %s\n", i, s); }
+        fflush(stdout);
+    }
+    return EXCEPTION_CONTINUE_EXECUTION;
+}
+static void hw_apply(void) {
+    HANDLE sn = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    THREADENTRY32 te; te.dwSize = sizeof te;
+    DWORD64 dr7 = 0;
+    for (int k = 0; k < g_hw_n; k++) {
+        int len = g_hw_len[k] == 1 ? 0 : g_hw_len[k] == 2 ? 1 : g_hw_len[k] == 8 ? 2 : 3;
+        dr7 |= 1ull << (2 * k) | (uint64_t)(g_hw_rw[k] ? 3 : 1) << (16 + 4 * k) | (uint64_t)len << (18 + 4 * k);
+    }
+    if (sn == INVALID_HANDLE_VALUE) return;
+    for (BOOL ok = Thread32First(sn, &te); ok; ok = Thread32Next(sn, &te)) {
+        if (te.th32OwnerProcessID != GetCurrentProcessId() || te.th32ThreadID == g_hw_tid) continue;
+        HANDLE t = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_SET_CONTEXT, FALSE, te.th32ThreadID);
+        if (!t) continue;
+        if (SuspendThread(t) != (DWORD)-1) {
+            CONTEXT c; memset(&c, 0, sizeof c); c.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+            if (GetThreadContext(t, &c)) {
+                c.Dr0 = g_hw_addr[0]; c.Dr1 = g_hw_addr[1]; c.Dr2 = g_hw_addr[2]; c.Dr3 = g_hw_addr[3]; c.Dr7 = dr7; c.Dr6 = 0;
+                SetThreadContext(t, &c);
+            }
+            ResumeThread(t);
+        }
+        CloseHandle(t);
+    }
+    CloseHandle(sn);
+}
+static DWORD WINAPI hw_main(void *arg) {
+    const char *path = arg;
+    FILETIME last = {0, 0};
+    g_hw_tid = GetCurrentThreadId();
+    for (int tick = 0;; tick++) {
+        Sleep(500);
+        WIN32_FILE_ATTRIBUTE_DATA fa;
+        int changed = GetFileAttributesExA(path, GetFileExInfoStandard, &fa) && CompareFileTime(&fa.ftLastWriteTime, &last) != 0;
+        if (changed) {
+            last = fa.ftLastWriteTime;
+            FILE *f = fopen(path, "r");
+            int n = 0; char ln[256];
+            while (f && n < 4 && fgets(ln, sizeof ln, f)) {
+                unsigned long long a; int len; char m[8];
+                if (sscanf(ln, "%llx %d %7s", &a, &len, m) != 3 || (len != 1 && len != 2 && len != 4 && len != 8)) continue;
+                g_hw_addr[n] = a & ~(unsigned long long)(len - 1); g_hw_len[n] = len; g_hw_rw[n] = !strcmp(m, "rw");
+                g_hw_nseen[n] = 0; g_hw_hits[n] = 0; n++;
+            }
+            if (f) fclose(f);
+            for (int k = n; k < 4; k++) g_hw_addr[k] = 0;
+            g_hw_n = n;
+            printf("hwwatch: %d watch(es) from %s\n", n, path);
+            for (int k = 0; k < n; k++) printf("hwwatch:   #%d %llx len %d %s\n", k, (unsigned long long)g_hw_addr[k], g_hw_len[k], g_hw_rw[k] ? "read/write" : "write");
+            fflush(stdout);
+        }
+        if (changed || (g_hw_n && tick % 2 == 0)) hw_apply();      /* threads made since get them too */
+        if (g_hw_n && tick % 20 == 0) { printf("hwwatch: hits"); for (int k = 0; k < g_hw_n; k++) printf(" #%d %lld", k, (long long)g_hw_hits[k]); printf("\n"); fflush(stdout); }
+    }
+    return 0;
+}
+void hwwatch_start(void) {
+    static char path[MAX_PATH];
+    const char *e = getenv("SSBU_HWWATCH");
+    if (!e || !e[0]) return;
+    snprintf(path, sizeof path, "%s", e);
+    AddVectoredExceptionHandler(1, hw_veh);
+    HANDLE h = CreateThread(NULL, 0, hw_main, path, 0, NULL);
+    if (h) CloseHandle(h);
+    printf("hwwatch: TEST ONLY: data watchpoints from %s\n", path);
+}
+void hwwatch_stack(const char *tag) {               /* TEST ONLY (SSBU_HWWATCH): this thread's callers, symbolized */
+    CONTEXT c; uint64_t pcs[14]; char s[300];
+    RtlCaptureContext(&c);
+    int m = wd_walk(&c, pcs, 14);
+    for (int i = 1; i < m; i++) { wd_addr(pcs[i], s, sizeof s); printf("hwwatch: %s %d %s\n", tag, i, s); }
+    fflush(stdout);
+}

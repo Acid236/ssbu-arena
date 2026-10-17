@@ -623,6 +623,18 @@ static void fill_pad(uint64_t out, uint32_t id, int kind) {
     wr64(out + 8, buttons);
     if (g_test_vk && (int)id == g_keyboard_player) { InterlockedIncrement(&g_test_polls); InterlockedOr64(&g_test_seen, (LONG64)buttons); }      /* U1 test only */
     { void display_pad_any(unsigned id, uint64_t b); display_pad_any((unsigned)id, buttons); }      /* SSBU_FIGHT_HASH_PAD (test only) */
+    {   /* TEST ONLY (SSBU_HWWATCH): where the game keeps each pad's state, and who asks, once per id and after each new press */
+        static int on = -1; static uint64_t last_out[8]; static uint64_t prevb[8];
+        if (on < 0) on = getenv("SSBU_HWWATCH") != NULL;
+        if (on && ((last_out[id & 7] != (uint64_t)out) || ((buttons & 4) && !(prevb[id & 7] & 4)))) {
+            void hwwatch_stack(const char *tag);
+            last_out[id & 7] = (uint64_t)out;
+            extern Ctx *g_pad_ctx;
+            printf("hwwatch: pad id %u state at %llx, buttons %llx, caller x19 %llx\n", (unsigned)id, (unsigned long long)out, (unsigned long long)buttons, g_pad_ctx ? (unsigned long long)g_pad_ctx->x[19] : 0ull);
+            hwwatch_stack("pad caller");
+        }
+        if (on) prevb[id & 7] = buttons;
+    }
     if (id == 0) { void display_l1_poll(uint64_t buttons, long long fight_ticks, long long poll); int r1_ra_phase(void); if (r1_ra_phase() != 1) display_l1_poll(buttons, l1_ticks, (long long)g_seq_polls); }      /* (R1 run-ahead: the speculative pass's poll is not a poll of the real timeline) */      /* L1 (input latency): the time of player 1's poll, the press it saw */
     wr32(out + 0x10, (uint32_t)lx);
     wr32(out + 0x14, (uint32_t)ly);
@@ -723,9 +735,10 @@ static void hid_GetNpadStyleSet(Ctx *c) {   /* (const NpadIdType &) */
     }
     RET(r);
 }
-static void hid_GetNpadState_FullKey(Ctx *c) { fill_pad(A0, rd32(A1), 1); }
-static void hid_GetNpadState_Gc(Ctx *c) { fill_pad(A0, rd32(A1), 2); }
-static void hid_GetNpadState_Other(Ctx *c) { fill_pad(A0, rd32(A1), 0); }
+Ctx *g_pad_ctx;                                             /* TEST ONLY (SSBU_HWWATCH): the caller's registers */
+static void hid_GetNpadState_FullKey(Ctx *c) { g_pad_ctx = c; fill_pad(A0, rd32(A1), 1); }
+static void hid_GetNpadState_Gc(Ctx *c) { g_pad_ctx = c; fill_pad(A0, rd32(A1), 2); }
+static void hid_GetNpadState_Other(Ctx *c) { g_pad_ctx = c; fill_pad(A0, rd32(A1), 0); }
 static void hid_GetPlayerLedPattern(Ctx *c) {               /* the console's patterns for players 1..8 */
     static const uint8_t led[8] = {1, 3, 7, 15, 9, 5, 13, 6};
     uint32_t id = rd32(A0);
