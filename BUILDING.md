@@ -217,6 +217,15 @@ input sequence reached its last step, 12,613 frames presented, 0 Vulkan call fai
 
 ## Running
 
+**The simple way: `build\Avvia SSBU.bat`** (copied there by the link step). A small window, nothing to install: the
+player name (the account id is made from it), local wireless over the internet (server, room password, ping on screen;
+only with a `--ldn-online on` build), the save folder (open it, import a save from Ryujinx automatically or from any
+folder holding `save_data`, the save that was there is kept as `save-backup-<date>`), the DLC list from a folder of your
+own DLC dumps, a check of what the game needs (files, Vulkan, the Store codecs of the opening movie, offered for
+installation), and **GIOCA** to start. Settings go to `build\config\launcher.ini`, `online.ini`, `account.txt`, `dlc.txt`.
+
+From a shell, as before:
+
 ```
 python scripts/run.py --userdata <folder for your saves>
 ```

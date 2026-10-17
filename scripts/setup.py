@@ -1107,6 +1107,9 @@ def step_link(cx):
         shutil.copy2(opus, os.path.join(cx.work, name))
     say('  %s %.1f MB, SDL3.dll, ssbu_glslang.dll, ssbu_game_eh_o1.dll%s beside it' % (EXE, os.path.getsize(exe) / 1048576.0,
                                                                                          ', ' + name if opus else ''))
+    for f in ('Launcher.ps1', 'Avvia SSBU.bat'):           # the launcher window (tools/launcher): build\Avvia SSBU.bat
+        shutil.copy2(os.path.join(REPO, 'tools', 'launcher', f), os.path.join(cx.build, f))
+    say('  launcher: %s' % os.path.join(cx.build, 'Avvia SSBU.bat'))
     say('  local wireless over the internet (--ldn-online): %s' % (r'built in (config\online.ini, BUILDING.md)' if ldn == '1' else 'not built in'))
     if not opus:
         say('  WARNING: no libopus: music and the other Opus sounds will be silent (deps step above; BUILDING.md)')
