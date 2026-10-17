@@ -3315,6 +3315,7 @@ static void overlay_draw(uint32_t index) {
         for (int i = 0; i < 4; i++) if (g_ovl.text[i][0]) { int d = i ? dot : dot * 2; ovl_text(index, (W - (int)strlen(g_ovl.text[i]) * 6 * d) / 2, H / 4 + i * dot * 22, d, g_ovl.text[i]); }
     }
 }
+static int g_pic[4];          /* where vk_present2 put the game picture in the swapchain image (x, y, w, h): all of it, or the 16:9 part with aspect = keep */
 #ifdef SSBU_LDN_ONLINE
 /* Local wireless over the internet (ldn_online.inc): each player's ping to the room server, drawn over the picture while
  * in a network. In a fight with 2 players right of each player's stock icons (positions measured on the 2-player HUD,
@@ -3329,21 +3330,21 @@ static void ldn_ping_draw(uint32_t index) {
     int ms[8], n = ldn_ping_overlay(ms, 8);
     if (n <= 0) return;
     ovl_make();
-    int W = (int)V.extent.width, H = (int)V.extent.height, dot = H / 360 > 1 ? H / 360 : 1;
+    int X0 = g_pic[0], Y0 = g_pic[1], W = g_pic[2] > 0 ? g_pic[2] : (int)V.extent.width, H = g_pic[3] > 0 ? g_pic[3] : (int)V.extent.height, dot = H / 360 > 1 ? H / 360 : 1;
     char t[24];
     if (g_in_fight && n == 2) {                        /* measured at 1280x720: stock icons P1 x 318-350, P2 x 812-860, row y 692-704 */
         static const float fx[2] = {0.297f, 0.678f};
         for (int i = 0; i < 2; i++) {
             if (ms[i] == -2) continue;
             if (ms[i] < 0) snprintf(t, sizeof t, "-- MS"); else snprintf(t, sizeof t, "%d MS", ms[i]);
-            ldn_ping_text(index, (int)(fx[i] * W), (int)(0.960f * H), dot, t);
+            ldn_ping_text(index, X0 + (int)(fx[i] * W), Y0 + (int)(0.960f * H), dot, t);
         }
         return;
     }
     for (int i = 0, row = 0; i < n; i++) {             /* top right: the room / character select keep their buttons top left */
         if (ms[i] == -2) continue;
         if (ms[i] < 0) snprintf(t, sizeof t, "P%d --", i + 1); else snprintf(t, sizeof t, "P%d %d MS", i + 1, ms[i]);
-        ldn_ping_text(index, W - (int)strlen(t) * 6 * dot - W / 90, H / 60 + row++ * 10 * dot, dot, t);
+        ldn_ping_text(index, X0 + W - (int)strlen(t) * 6 * dot - W / 90, Y0 + H / 60 + row++ * 10 * dot, dot, t);
     }
 }
 #endif
@@ -3599,6 +3600,8 @@ swap: ;
             void display_fit(int sw, int sh, int dw, int dh, int out[4]);
             int d4[4];
             display_fit(16, 9, (int)V.extent.width, (int)V.extent.height, d4);
+            if (gfx_options()->aspect == 0) { d4[0] = d4[1] = 0; d4[2] = (int)V.extent.width; d4[3] = (int)V.extent.height; }      /* graphics.ini aspect = stretch (launcher "Stirata"): the picture fills the window */
+            memcpy(g_pic, d4, sizeof g_pic);
             if (vt->rs && vt->sx > 1.0f) rs_reduce(&src, s4, d4[2], d4[3]);      /* PR #8 (stephenjayakar): track O, supersampling: halved in 2:1 steps to at most twice the picture */
             memset(&b, 0, sizeof b);
             b.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT; b.srcSubresource.layerCount = 1; b.dstSubresource = b.srcSubresource;

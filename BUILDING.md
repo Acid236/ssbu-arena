@@ -221,8 +221,10 @@ input sequence reached its last step, 12,613 frames presented, 0 Vulkan call fai
 player name (the account id is made from it), local wireless over the internet (server, room password, ping on screen;
 only with a `--ldn-online on` build), the save folder (open it, import a save from Ryujinx automatically or from any
 folder holding `save_data`, the save that was there is kept as `save-backup-<date>`), the DLC list from a folder of your
-own DLC dumps, a check of what the game needs (files, Vulkan, the Store codecs of the opening movie, offered for
-installation), and **GIOCA** to start. Settings go to `build\config\launcher.ini`, `online.ini`, `account.txt`, `dlc.txt`.
+own DLC dumps, video (16:9 with black bars or stretched, window mode and size), the controller of players 1 and 2 and
+the keyboard's player, a check of what the game needs (files, Vulkan, the Store codecs of the opening movie, offered for
+installation), **Salva** and **GIOCA** to start. Settings go to `build\config\launcher.ini`, `online.ini`, `account.txt`,
+`dlc.txt`, and a few keys of `graphics.ini` (`aspect`, `window`, `width`, `height`) and `controllers.ini` (`[players]`, `[keyboard]`).
 
 From a shell, as before:
 
@@ -253,7 +255,7 @@ shader preparation (on a normal run it works for about 15 minutes of play and wr
 Options are environment variables, set with `--env NAME=VALUE` (full list: comments at the top of the runtime sources):
 `SSBU_RENDERER=vk|gl`, `SSBU_SHOW=1` (show the window of a test exe), `SSBU_STRICT=1|report|path` (list the host
 functions that are not the real behaviour), `SSBU_TRACE`, `SSBU_PAD_BACKEND=xinput`, `SSBU_FIXED_SEED=<n>`.
-Pad mapping file and tools: `ssbu_native.exe --pad-test`, `--pad-map <n>`.
+Pad mapping file and tools: `ssbu_native.exe --pad-test`, `--pad-map <n>`, `--pad-list` (one `pad<TAB>GUID<TAB>name` line per device, for the launcher).
 
 ## GameCube controller adapter
 

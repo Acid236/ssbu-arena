@@ -3,7 +3,8 @@
 # internet (server, room, ping), the save folder (open it, bring in a save from Ryujinx or from any folder), the DLC list,
 # check what the game needs and start it. Windows PowerShell 5.1 + WinForms: nothing to install.
 # Lives in build\ (scripts\setup.py link copies it there, with "Avvia SSBU.bat"); in the portable copy too.
-# Files it writes: build\config\online.ini, build\config\account.txt, build\config\dlc.txt, build\config\launcher.ini.
+# Files it writes: build\config\online.ini, build\config\account.txt, build\config\dlc.txt, build\config\launcher.ini,
+# and some keys of build\config\graphics.ini (aspect, window, width, height) and controllers.ini ([players], [keyboard]).
 # The game's own data is only read. ASCII only (Windows PowerShell reads scripts in the ANSI code page).
 param([switch]$Check)
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
@@ -48,7 +49,7 @@ function Get-UidFromName([string]$name) {
 # ---------------------------------------------------------------- the window
 $f = New-Object System.Windows.Forms.Form
 $f.Text = 'SSBU recomp - Launcher'
-$f.Size = New-Object System.Drawing.Size(560, 640)
+$f.Size = New-Object System.Drawing.Size(560, 770)
 $f.StartPosition = 'CenterScreen'
 $f.FormBorderStyle = 'FixedDialog'
 $f.MaximizeBox = $false
@@ -174,9 +175,100 @@ Add-Button $gd 'Attiva da cartella dei tuoi DLC...' 170 20 220 {
 } | Out-Null
 Add-Button $gd 'Disattiva' 398 20 110 { if (Test-Path $dlcFile) { Remove-Item $dlcFile }; $dlcLabel.Text = 'DLC attivi: 0' } | Out-Null
 
+# ini files of the game: change some keys, keep everything else (comments, other sections) as it is
+function Set-IniValues([string]$path, [string]$section, [hashtable]$vals) {
+    $lines = if (Test-Path $path) { @(Get-Content $path) } else { @() }
+    $out = New-Object System.Collections.Generic.List[string]
+    $left = @{}; foreach ($k in $vals.Keys) { $left[$k.ToLower()] = $vals[$k] }
+    $inTarget = -not $section; $seen = -not $section
+    foreach ($l in $lines) {
+        if ($section -and $l -match '^\s*\[(.+?)\]\s*$') {
+            $hdr = $Matches[1].Trim()
+            if ($inTarget) { foreach ($k in @($left.Keys)) { $out.Add($k + ' = ' + $left[$k]) }; $left.Clear() }
+            $inTarget = ($hdr -ieq $section); if ($inTarget) { $seen = $true }
+        } elseif ($inTarget -and $l -notmatch '^\s*[#;]' -and $l -match '^\s*([A-Za-z0-9_.]+)\s*=' -and $left.ContainsKey($Matches[1].ToLower())) {
+            $k = $Matches[1].ToLower(); $out.Add($Matches[1] + ' = ' + $left[$k]); $left.Remove($k); continue
+        }
+        $out.Add($l)
+    }
+    if ($left.Count) {
+        if (-not $seen) { $out.Add(''); $out.Add('[' + $section + ']') }
+        foreach ($k in @($left.Keys)) { $out.Add($k + ' = ' + $left[$k]) }
+    }
+    Set-Content -Path $path -Value $out -Encoding ASCII
+}
+function Add-Combo($parent, $items, $x, $y, $w, $editable = $false) {
+    $c = New-Object System.Windows.Forms.ComboBox; $c.Location = New-Object System.Drawing.Point($x, $y); $c.Size = New-Object System.Drawing.Size($w, 22)
+    if (-not $editable) { $c.DropDownStyle = 'DropDownList' }; foreach ($i in $items) { [void]$c.Items.Add($i) }; $parent.Controls.Add($c); return $c
+}
+
+# video (graphics.ini)
+$GfxIni = Join-Path $Cfg 'graphics.ini'
+$G = Read-Ini $GfxIni
+$gv = Add-Group 'Video' 454 120
+$gv.Size = New-Object System.Drawing.Size(255, 120)
+Add-Label $gv 'Proporzioni' 10 25 80 | Out-Null
+$aspect = Add-Combo $gv @('16:9 (bande nere)', 'Stirata (riempie)') 92 22 150
+$aspect.SelectedIndex = $(if ($G['aspect'] -eq 'stretch') { 1 } else { 0 })
+$tip.SetToolTip($aspect, '16:9: il gioco tiene le sue proporzioni, con bande nere se la finestra o lo schermo hanno un''altra forma. Stirata: riempie tutto.')
+Add-Label $gv 'Finestra' 10 55 80 | Out-Null
+$winMode = Add-Combo $gv @('Finestra', 'Senza bordi', 'Schermo intero') 92 52 150
+$winMode.SelectedIndex = $(switch ($G['window']) { 'borderless' { 1 } 'fullscreen' { 2 } default { 0 } })
+Add-Label $gv 'Dimensione' 10 85 80 | Out-Null
+$winSize = Add-Combo $gv @('1280x720', '1600x900', '1920x1080', '2560x1440') 92 82 150 $true
+$winSize.Text = $(if ($G['width'] -and $G['height']) { $G['width'] + 'x' + $G['height'] } else { '1280x720' })
+$tip.SetToolTip($winSize, 'Dimensione della finestra (solo in modalita'' Finestra). Puoi scriverne una tua, es. 1366x768.')
+function Update-WinSize { $winSize.Enabled = ($winMode.SelectedIndex -eq 0) }
+$winMode.Add_SelectedIndexChanged({ Update-WinSize }); Update-WinSize
+
+# controllers (controllers.ini)
+$PadIni = Join-Path $Cfg 'controllers.ini'
+$gc = New-Object System.Windows.Forms.GroupBox; $gc.Text = 'Controller'; $gc.Location = New-Object System.Drawing.Point(277, 454)
+$gc.Size = New-Object System.Drawing.Size(255, 120); $f.Controls.Add($gc)
+Add-Label $gc 'Giocatore 1' 10 25 72 | Out-Null
+$p1 = Add-Combo $gc @() 82 22 112
+Add-Label $gc 'Giocatore 2' 10 55 72 | Out-Null
+$p2 = Add-Combo $gc @() 82 52 112
+Add-Label $gc 'Tastiera' 10 85 72 | Out-Null
+$kb = Add-Combo $gc @('Automatica', 'Giocatore 1', 'Giocatore 2', 'Nessuna') 82 82 112
+$tip.SetToolTip($kb, 'Automatica: la tastiera e'' il primo giocatore libero dopo i controller collegati all''avvio.')
+$script:padGuids = @()
+function Get-Pads {
+    # the game's own view (SDL): ssbu_native.exe --pad-list prints "pad<TAB>GUID<TAB>name" per device
+    $pads = @()
+    if (-not (Test-Path $Exe)) { return ,$pads }
+    try {
+        $psi = New-Object System.Diagnostics.ProcessStartInfo; $psi.FileName = $Exe; $psi.Arguments = '--pad-list'; $psi.WorkingDirectory = $Work
+        $psi.UseShellExecute = $false; $psi.RedirectStandardOutput = $true; $psi.CreateNoWindow = $true
+        $pr = [System.Diagnostics.Process]::Start($psi); $text = $pr.StandardOutput.ReadToEnd(); [void]$pr.WaitForExit(10000)
+        foreach ($l in ($text -split "`r?`n")) { $c = $l -split "`t"; if ($c.Count -ge 3 -and $c[0] -eq 'pad') { $pads += ,@($c[1], $c[2]) } }
+    } catch { }
+    return ,$pads
+}
+function Fill-Pads {
+    $pads = Get-Pads; $P = Read-Ini $PadIni
+    $guids = @('auto', 'none'); $names = @('Automatico', 'Nessuno')
+    foreach ($x in $pads) { $guids += $x[0].ToLower(); $names += $x[1] }
+    foreach ($k in @('player1', 'player2')) {
+        $v = if ($P[$k]) { $P[$k].ToLower() } else { 'auto' }
+        if ($guids -notcontains $v) { $guids += $v; $names += ('(non collegato) ' + $v.Substring(0, [Math]::Min(8, $v.Length))) }
+    }
+    $script:padGuids = $guids
+    foreach ($pair in @(@($p1, 'player1'), @($p2, 'player2'))) {
+        $c = $pair[0]; $c.Items.Clear(); foreach ($n in $names) { [void]$c.Items.Add($n) }
+        $v = if ($P[$pair[1]]) { $P[$pair[1]].ToLower() } else { 'auto' }
+        $c.SelectedIndex = [Array]::IndexOf($guids, $v)
+    }
+    $kb.SelectedIndex = $(switch ($P['player']) { '1' { 1 } '2' { 2 } 'none' { 3 } default { 0 } })
+    $tip.SetToolTip($p1, 'Controller trovati: ' + $pads.Count + '. Automatico: il primo controller che si collega. Premi Cerca dopo averne collegato uno.')
+    $tip.SetToolTip($p2, 'Controller trovati: ' + $pads.Count + '. Nessuno: lo slot resta vuoto.')
+}
+Add-Button $gc 'Cerca' 198 21 50 { Fill-Pads } | Out-Null
+Fill-Pads
+
 # status + buttons
 $status = New-Object System.Windows.Forms.TextBox; $status.Multiline = $true; $status.ReadOnly = $true; $status.ScrollBars = 'Vertical'
-$status.Location = New-Object System.Drawing.Point(12, 452); $status.Size = New-Object System.Drawing.Size(520, 100); $status.Font = New-Object System.Drawing.Font('Consolas', 8.5)
+$status.Location = New-Object System.Drawing.Point(12, 582); $status.Size = New-Object System.Drawing.Size(520, 100); $status.Font = New-Object System.Drawing.Font('Consolas', 8.5)
 $f.Controls.Add($status)
 function Say($t) { $status.AppendText($t + "`r`n") }
 
@@ -192,6 +284,13 @@ function Save-Settings {
         Move-Item -Force $OnlineIni (Join-Path $Cfg 'online.ini.off')      # off: kept aside, back when it is turned on again
     }
     Set-Content -Path $LauncherIni -Encoding ASCII -Value @('# written by the launcher', ('saves = ' + $Saves), ('nickname = ' + $n))
+    $gfx = @{ aspect = @('keep', 'stretch')[[Math]::Max(0, $aspect.SelectedIndex)]; window = @('windowed', 'borderless', 'fullscreen')[[Math]::Max(0, $winMode.SelectedIndex)] }
+    if ($winSize.Text.Trim() -match '^(\d{3,5})\s*[xX*]\s*(\d{3,5})$') { $gfx['width'] = $Matches[1]; $gfx['height'] = $Matches[2] }
+    Set-IniValues $GfxIni $null $gfx
+    if ($p1.SelectedIndex -ge 0 -and $p2.SelectedIndex -ge 0) {
+        Set-IniValues $PadIni 'players' @{ player1 = $script:padGuids[$p1.SelectedIndex]; player2 = $script:padGuids[$p2.SelectedIndex] }
+    }
+    Set-IniValues $PadIni 'keyboard' @{ player = @('auto', '1', '2', 'none')[[Math]::Max(0, $kb.SelectedIndex)] }
 }
 if (-not (Test-Path $OnlineIni) -and (Test-Path (Join-Path $Cfg 'online.ini.off'))) {
     $O = Read-Ini (Join-Path $Cfg 'online.ini.off')
@@ -240,8 +339,8 @@ $timer.Add_Tick({
         } else { Say 'Gioco chiuso.' }
     }
 })
-Add-Button $f 'Controlla' 12 562 120 { Save-Settings; Test-All | Out-Null } | Out-Null
-$play = Add-Button $f 'GIOCA' 392 562 140 {
+Add-Button $f 'Salva' 12 692 120 { Save-Settings; Test-All -Quiet | Out-Null; Say 'Impostazioni salvate.' } | Out-Null
+$play = Add-Button $f 'GIOCA' 392 692 140 {
     Save-Settings
     if ((Test-All) -gt 0) { return }
     New-Item -ItemType Directory -Force $Saves, (Join-Path $Build 'cache') | Out-Null
@@ -254,7 +353,7 @@ $play = Add-Button $f 'GIOCA' 392 562 140 {
     $play.Enabled = $false; $f.WindowState = 'Minimized'; $timer.Start()
 }
 $play.Font = $bold
-Add-Button $f 'Apri log' 140 562 90 { $p = Join-Path $Build 'game.log'; if (Test-Path $p) { Start-Process notepad.exe $p } } | Out-Null
+Add-Button $f 'Apri log' 140 692 90 { $p = Join-Path $Build 'game.log'; if (Test-Path $p) { Start-Process notepad.exe $p } } | Out-Null
 
 if ($Check) { Test-All -Quiet | Out-Null; $status.Lines | ForEach-Object { Write-Output $_ }; exit }
 Test-All -Quiet | Out-Null

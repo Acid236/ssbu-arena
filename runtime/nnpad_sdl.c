@@ -960,6 +960,14 @@ int nnpad_tool(int argc, char **argv) {
     for (int i = 1; i < argc; i++) if (!strcmp(argv[i], "--seconds") && i + 1 < argc) secs = atoi(argv[i + 1]);
     for (int i = 1; i < argc; i++) if (!strcmp(argv[i], "--pad-map")) return pad_map(i + 1 < argc ? atoi(argv[i + 1]) : 1);
     if ((argc > 1 && !strcmp(argv[1], "--pad-test")) || getenv("SSBU_PAD_TEST")) return pad_test(secs);
+    if (argc > 1 && !strcmp(argv[1], "--pad-list")) {      /* for the launcher: one line per device, "pad<TAB>GUID<TAB>name", then exit */
+        if (!tool_init()) return 1;
+        lock();
+        for (int i = 0; i < MAXDEV; i++) if (g_dev[i].used && !g_dev[i].ignored) printf("pad\t%s\t%s\n", g_dev[i].guid, g_dev[i].name);
+        unlock();
+        fflush(stdout);
+        return 0;
+    }
     return -1;
 }
 

@@ -124,6 +124,11 @@ static const char *const k_default_ini =
 ";   vsync = clock; those three keys of the file are then not used. The log says which profile is active.\r\n"
 "profile = custom\r\n"
 "\r\n"
+"; aspect = stretch | keep      (Vulkan)\r\n"
+";   stretch: the picture fills the window whatever its shape. keep: the game's 16:9 proportions, with black bars\r\n"
+";   left and right (or above and below) when the window has another shape.\r\n"
+"aspect = stretch\r\n"
+"\r\n"
 "; frame_time_overlay = off | on\r\n"
 ";   on: the average frame time of the last second in the window title ('.. fps - 16.67 ms per frame') and as a\r\n"
 ";   'frame-time:' line in the log. (Bars drawn into the picture are not implemented yet.)\r\n"
@@ -183,6 +188,7 @@ static BOOL CALLBACK opt_load(PINIT_ONCE once, PVOID arg, PVOID *ctx) {
     GfxOptions *o = &g_opt;
     int written = 0, unknown = 0;
     memset(o, 0, sizeof *o);
+    o->aspect = 1;                                     /* keep: 16:9 with black bars (display_fit), as the renderer does without the key */
     o->width = 1280; o->height = 720; o->scale = 1.0f; o->present = 5;      /* vsync = auto when the key is missing (track V session 14) */
     opt_path(o->path);
     FILE *f = fopen(o->path, "rb");
@@ -214,6 +220,7 @@ static BOOL CALLBACK opt_load(PINIT_ONCE once, PVOID arg, PVOID *ctx) {
         else if (!_stricmp(key, "shader_wait")) o->shader_skip = !_stricmp(val, "skip");
         else if (!_stricmp(key, "runahead")) g_gfx_runahead = !_stricmp(val, "on") || !_stricmp(val, "1");      /* track R1 round 5 (r1_state.c) */
         else if (!_stricmp(key, "latency")) g_gfx_latency = !_stricmp(val, "lowest") ? 2 : !_stricmp(val, "low") ? 1 : 0;      /* track L1 (display.c latency_mode) */
+        else if (!_stricmp(key, "aspect")) o->aspect = !_stricmp(val, "keep");
         else if (!_stricmp(key, "shader_prepare")) o->shader_prepare = !_stricmp(val, "background") ? 1 : !_stricmp(val, "off") ? 2 : 0;
         else if (!_stricmp(key, "shader_load")) o->shader_load = !_stricmp(val, "loading");
         else if (!_stricmp(key, "stats_overlay")) g_gfx_stats = !_stricmp(val, "on") || !strcmp(val, "1");      /* U1 (menu.cpp, F2) */
