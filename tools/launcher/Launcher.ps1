@@ -180,7 +180,7 @@ Add-Button $gd 'Attiva da cartella dei tuoi DLC...' 170 20 220 {
     $dlcLabel.Text = 'DLC attivi: ' + (Dlc-Count)
 } | Out-Null
 $Comp = Join-Path $Build 'characters\competitive'
-$compOn = New-Object System.Windows.Forms.CheckBox; $compOn.Text = 'Modalita'' competitiva: 6 stage (BF, Small BF, FD, PS2, Smashville, T&C), niente oggetti casuali'
+$compOn = New-Object System.Windows.Forms.CheckBox; $compOn.Text = 'Modalita'' competitiva: 6 stage (BF, Small BF, FD, PS2, Smashville, T&C), niente oggetti casuali ne'' barra Final Smash'
 $compOn.Location = New-Object System.Drawing.Point(12, 50); $compOn.Size = New-Object System.Drawing.Size(500, 22); $gd.Controls.Add($compOn)
 $compOn.Checked = (Test-Path $Comp) -and ($L['competitive'] -ne 'off'); $compOn.Enabled = (Test-Path $Comp)
 $tip.SetToolTip($compOn, $(if (Test-Path $Comp) { 'Gli altri stage spariscono dalla selezione e dallo stage casuale. Per il Wireless locale va attivato su tutti i PC.' } else { 'Manca build\characters\competitive: python tools/competitive/make_competitive.py' }))
@@ -365,6 +365,7 @@ $play = Add-Button $f 'GIOCA' 392 746 140 {
     New-Item -ItemType Directory -Force $Saves, (Join-Path $Build 'cache') | Out-Null
     $env:SSBU_ROMFS = $RomFS; $env:SSBU_USERDATA = $Saves; $env:SSBU_FONTS = $Fonts
     $env:SSBU_LOOSE_FILES = $(if ($compOn.Checked) { '1' } else { '0' })      # build\characters\competitive (runtime/loose_files.c)
+    $env:SSBU_COMPETITIVE = $env:SSBU_LOOSE_FILES                              # no FS meter, no random items (runtime/competitive.c)
     $cacheMark = @(Get-ChildItem (Join-Path $Build 'cache\vk') -Filter 'prepared_*.txt' -ErrorAction SilentlyContinue).Count
     if ($cacheMark -eq 0) { Say 'Primo avvio: prima di giocare il gioco prepara gli shader per questa scheda video (qualche minuto).' }
     # no console window: the game's output goes to game.log through a hidden cmd.exe (its exit code is the game's)
