@@ -49,7 +49,7 @@ function Get-UidFromName([string]$name) {
 # ---------------------------------------------------------------- the window
 $f = New-Object System.Windows.Forms.Form
 $f.Text = 'SSBU recomp - Launcher'
-$f.Size = New-Object System.Drawing.Size(560, 800)
+$f.Size = New-Object System.Drawing.Size(560, 824)
 $f.StartPosition = 'CenterScreen'
 $f.FormBorderStyle = 'FixedDialog'
 $f.MaximizeBox = $false
@@ -159,7 +159,7 @@ Add-Button $gs 'Importa da cartella...' 396 48 115 {
 $saveHelp = Add-Label $gs 'Vanno bene i salvataggi di Ryujinx, yuzu e simili o della console: la cartella con save_data.' 12 84 500
 
 # DLC
-$gd = Add-Group 'DLC' 390 56
+$gd = Add-Group 'DLC e modalita''' 390 80
 $dlcFile = Join-Path $Cfg 'dlc.txt'
 function Dlc-Count { if (Test-Path $dlcFile) { @(Get-Content $dlcFile | Where-Object { $_ -match '^\s*0x[0-9a-fA-F]+|^\s*[0-9]+' }).Count } else { 0 } }
 $dlcLabel = Add-Label $gd ('DLC attivi: ' + (Dlc-Count)) 12 24 150
@@ -179,6 +179,11 @@ Add-Button $gd 'Attiva da cartella dei tuoi DLC...' 170 20 220 {
     Set-Content -Path $dlcFile -Value $out -Encoding ASCII
     $dlcLabel.Text = 'DLC attivi: ' + (Dlc-Count)
 } | Out-Null
+$Comp = Join-Path $Build 'characters\competitive'
+$compOn = New-Object System.Windows.Forms.CheckBox; $compOn.Text = 'Solo stage competitivi (Battlefield, Small BF, Final Destination, PS2, Smashville, Town and City)'
+$compOn.Location = New-Object System.Drawing.Point(12, 50); $compOn.Size = New-Object System.Drawing.Size(500, 22); $gd.Controls.Add($compOn)
+$compOn.Checked = (Test-Path $Comp) -and ($L['competitive'] -ne 'off'); $compOn.Enabled = (Test-Path $Comp)
+$tip.SetToolTip($compOn, $(if (Test-Path $Comp) { 'Gli altri stage spariscono dalla selezione e dallo stage casuale. Per il Wireless locale va attivato su tutti i PC.' } else { 'Manca build\characters\competitive: python tools/competitive/make_competitive.py' }))
 Add-Button $gd 'Disattiva' 398 20 110 { if (Test-Path $dlcFile) { Remove-Item $dlcFile }; $dlcLabel.Text = 'DLC attivi: 0' } | Out-Null
 
 # ini files of the game: change some keys, keep everything else (comments, other sections) as it is
@@ -211,7 +216,7 @@ function Add-Combo($parent, $items, $x, $y, $w, $editable = $false) {
 # video (graphics.ini)
 $GfxIni = Join-Path $Cfg 'graphics.ini'
 $G = Read-Ini $GfxIni
-$gv = Add-Group 'Video' 454 150
+$gv = Add-Group 'Video' 478 150
 $gv.Size = New-Object System.Drawing.Size(255, 150)
 Add-Label $gv 'Proporzioni' 10 25 80 | Out-Null
 $aspect = Add-Combo $gv @('16:9 (bande nere)', 'Stirata (riempie)') 92 22 150
@@ -233,7 +238,7 @@ $winMode.Add_SelectedIndexChanged({ Update-WinSize }); Update-WinSize
 
 # controllers (controllers.ini)
 $PadIni = Join-Path $Cfg 'controllers.ini'
-$gc = New-Object System.Windows.Forms.GroupBox; $gc.Text = 'Controller'; $gc.Location = New-Object System.Drawing.Point(277, 454)
+$gc = New-Object System.Windows.Forms.GroupBox; $gc.Text = 'Controller'; $gc.Location = New-Object System.Drawing.Point(277, 478)
 $gc.Size = New-Object System.Drawing.Size(255, 150); $f.Controls.Add($gc)
 Add-Label $gc 'Giocatore 1' 10 25 72 | Out-Null
 $p1 = Add-Combo $gc @() 82 22 112
@@ -278,7 +283,7 @@ Fill-Pads
 
 # status + buttons
 $status = New-Object System.Windows.Forms.TextBox; $status.Multiline = $true; $status.ReadOnly = $true; $status.ScrollBars = 'Vertical'
-$status.Location = New-Object System.Drawing.Point(12, 612); $status.Size = New-Object System.Drawing.Size(520, 100); $status.Font = New-Object System.Drawing.Font('Consolas', 8.5)
+$status.Location = New-Object System.Drawing.Point(12, 636); $status.Size = New-Object System.Drawing.Size(520, 100); $status.Font = New-Object System.Drawing.Font('Consolas', 8.5)
 $f.Controls.Add($status)
 function Say($t) { $status.AppendText($t + "`r`n") }
 
@@ -294,7 +299,8 @@ function Save-Settings {
     } elseif (Test-Path $OnlineIni) {
         Move-Item -Force $OnlineIni (Join-Path $Cfg 'online.ini.off')      # off: kept aside, back when it is turned on again
     }
-    Set-Content -Path $LauncherIni -Encoding ASCII -Value @('# written by the launcher', ('saves = ' + $Saves), ('nickname = ' + $n))
+    Set-Content -Path $LauncherIni -Encoding ASCII -Value @('# written by the launcher', ('saves = ' + $Saves), ('nickname = ' + $n),
+        ('competitive = ' + $(if ($compOn.Checked) { 'on' } else { 'off' })))
     $gfx = @{ aspect = @('keep', 'stretch')[[Math]::Max(0, $aspect.SelectedIndex)]; window = @('windowed', 'borderless', 'fullscreen')[[Math]::Max(0, $winMode.SelectedIndex)]
              latency = @('normal', 'low', 'lowest')[[Math]::Max(0, $latency.SelectedIndex)] }
     if ($winSize.Text.Trim() -match '^(\d{3,5})\s*[xX*]\s*(\d{3,5})$') { $gfx['width'] = $Matches[1]; $gfx['height'] = $Matches[2] }
@@ -352,12 +358,13 @@ $timer.Add_Tick({
         } else { Say 'Gioco chiuso.' }
     }
 })
-Add-Button $f 'Salva' 12 722 120 { Save-Settings; Test-All -Quiet | Out-Null; Say 'Impostazioni salvate.' } | Out-Null
-$play = Add-Button $f 'GIOCA' 392 722 140 {
+Add-Button $f 'Salva' 12 746 120 { Save-Settings; Test-All -Quiet | Out-Null; Say 'Impostazioni salvate.' } | Out-Null
+$play = Add-Button $f 'GIOCA' 392 746 140 {
     Save-Settings
     if ((Test-All) -gt 0) { return }
     New-Item -ItemType Directory -Force $Saves, (Join-Path $Build 'cache') | Out-Null
     $env:SSBU_ROMFS = $RomFS; $env:SSBU_USERDATA = $Saves; $env:SSBU_FONTS = $Fonts
+    $env:SSBU_LOOSE_FILES = $(if ($compOn.Checked) { '1' } else { '0' })      # build\characters\competitive (runtime/loose_files.c)
     $cacheMark = @(Get-ChildItem (Join-Path $Build 'cache\vk') -Filter 'prepared_*.txt' -ErrorAction SilentlyContinue).Count
     if ($cacheMark -eq 0) { Say 'Primo avvio: prima di giocare il gioco prepara gli shader per questa scheda video (qualche minuto).' }
     # no console window: the game's output goes to game.log through a hidden cmd.exe (its exit code is the game's)
@@ -369,7 +376,7 @@ $play = Add-Button $f 'GIOCA' 392 722 140 {
     $play.Enabled = $false; $f.WindowState = 'Minimized'; $timer.Start()
 }
 $play.Font = $bold
-Add-Button $f 'Apri log' 140 722 90 { $p = Join-Path $Build 'game.log'; if (Test-Path $p) { Start-Process notepad.exe $p } } | Out-Null
+Add-Button $f 'Apri log' 140 746 90 { $p = Join-Path $Build 'game.log'; if (Test-Path $p) { Start-Process notepad.exe $p } } | Out-Null
 
 if ($Check) { Test-All -Quiet | Out-Null; $status.Lines | ForEach-Object { Write-Output $_ }; exit }
 Test-All -Quiet | Out-Null
