@@ -7,6 +7,10 @@ content derived from your dump and stays on your PC.
 What it changes:
   ui/param/database/ui_stage_db.prc   only the 6 stages below can be selected (and drawn by "random"); every other
                                       stage row gets disp_order -1 and can_select false (the game's own way to hide a row)
+  ui/param/database/ui_item_db.prc    no item is in the item switch list or in training (use_switch / use_training
+                                      false, display orders -1), the Smash Ball included: nothing can appear at random.
+                                      The fighters' own items (turnips, bombs, ...) do not come from this list.
+  ui/param/database/ui_rule_db.prc    every preset ruleset: items off (item_switch), Final Smash meter off (charge 0)
 """
 import argparse
 import os
@@ -41,6 +45,29 @@ def stage_db(src, dst):
     print('ui_stage_db.prc: %d stages kept (%s), %d hidden -> %s' % (len(kept), ', '.join(kept), hidden, dst))
 
 
+def item_db(src, dst):
+    p = Prc(src)
+    n = 0
+    for r in p.rows('db_root'):
+        for f, v in (('use_switch', 0), ('use_training', 0), ('switch_disp_order', -1), ('training_disp_order', -1)):
+            o = p.field(r, f)
+            if o is not None and p.get(o) != v: p.set(o, v); n += 1
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    p.save(dst)
+    print('ui_item_db.prc: %d items, %d values changed -> %s' % (len(p.rows('db_root')), n, dst))
+
+
+def rule_db(src, dst):
+    p = Prc(src)
+    rows = p.rows('db_root')
+    for r in rows:
+        p.set(p.field(r, 'item_switch'), 0)
+        p.set(p.field(r, 'charge'), 0)
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    p.save(dst)
+    print('ui_rule_db.prc: %d presets with items off and the Final Smash meter off -> %s' % (len(rows), dst))
+
+
 def main():
     root = os.path.normpath(os.path.join(HERE, '..', '..'))
     ap = argparse.ArgumentParser()
@@ -57,9 +84,10 @@ def main():
     A = ax.Arc(arc)
     tmp = os.path.join(root, 'build', 'competitive_work')
     os.makedirs(tmp, exist_ok=True)
-    src = os.path.join(tmp, 'ui_stage_db.prc')
-    open(src, 'wb').write(A.get('ui/param/database/ui_stage_db.prc'))
-    stage_db(src, os.path.join(a.out, MOD, 'ui', 'param', 'database', 'ui_stage_db.prc'))
+    for name, fn in (('ui_stage_db', stage_db), ('ui_item_db', item_db), ('ui_rule_db', rule_db)):
+        src = os.path.join(tmp, name + '.prc')
+        open(src, 'wb').write(A.get('ui/param/database/%s.prc' % name))
+        fn(src, os.path.join(a.out, MOD, 'ui', 'param', 'database', name + '.prc'))
 
 
 if __name__ == '__main__':

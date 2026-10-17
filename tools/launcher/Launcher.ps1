@@ -180,7 +180,7 @@ Add-Button $gd 'Attiva da cartella dei tuoi DLC...' 170 20 220 {
     $dlcLabel.Text = 'DLC attivi: ' + (Dlc-Count)
 } | Out-Null
 $Comp = Join-Path $Build 'characters\competitive'
-$compOn = New-Object System.Windows.Forms.CheckBox; $compOn.Text = 'Solo stage competitivi (Battlefield, Small BF, Final Destination, PS2, Smashville, Town and City)'
+$compOn = New-Object System.Windows.Forms.CheckBox; $compOn.Text = 'Modalita'' competitiva: 6 stage (BF, Small BF, FD, PS2, Smashville, T&C), niente oggetti casuali'
 $compOn.Location = New-Object System.Drawing.Point(12, 50); $compOn.Size = New-Object System.Drawing.Size(500, 22); $gd.Controls.Add($compOn)
 $compOn.Checked = (Test-Path $Comp) -and ($L['competitive'] -ne 'off'); $compOn.Enabled = (Test-Path $Comp)
 $tip.SetToolTip($compOn, $(if (Test-Path $Comp) { 'Gli altri stage spariscono dalla selezione e dallo stage casuale. Per il Wireless locale va attivato su tutti i PC.' } else { 'Manca build\characters\competitive: python tools/competitive/make_competitive.py' }))
