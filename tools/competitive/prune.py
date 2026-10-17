@@ -10,6 +10,8 @@ only the bodies go. Then:
     cd build/work && set RECOMP_GEN=gen_comp && set RECOMP_OBJ=obj_comp && set RECOMP_DLL=ssbu_game_comp.dll
     python build.py compile && python build.py link
 and ssbu_game_comp.dll replaces ssbu_game_eh_o1.dll (same exports) in a competitive package.
+Use the call-graph closure of the coverage (closure.py) as the list: with the raw coverage alone a rare branch of a
+used function (Ike vs Cloud reached one in the first test) calls a removed function.
 A run that reaches a removed function says which one (guest trap with its address): add that run's coverage
 (SSBU_COVERAGE) to the lists and prune again. No game content in this file; the output is generated from your dump.
 """
