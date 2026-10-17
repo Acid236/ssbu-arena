@@ -287,6 +287,9 @@ static uint64_t resolve(NroModule *m, int sym, int *from_main) {
 }
 
 static ImportFn function_at(uint64_t addr) {
+    extern const FnEntry (*game_fn_table_p)[];      /* gamedll.c: NULL until its constructor has bound the game DLL; a hook
+                                                       thread started by another constructor can ask before that */
+    if (!game_fn_table_p) return NULL;
     if (addr >= GUEST_BASE && addr < NRO_BASE) return fn_in_table(fn_table, fn_table_count, addr);
     NroModule *m = module_at(addr);
     return m ? fn_in_table(m->fns, m->fn_count, addr) : NULL;

@@ -1,0 +1,2 @@
+# real save: title -> Smash -> last ruleset -> P1 picks the top-left fighter -> start (debug match replaces the choices)
+@movie 120:Z 180:Z 240:Z 240:Z 300:u/66 10:l/78 10:d/13 10:r/7 10:Z 90:! 120:! 120:Z
