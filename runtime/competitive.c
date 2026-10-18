@@ -8,7 +8,10 @@
  * battle made the meter appear). The battle takes its copy before 0x71014e58f0 runs (clearing them there was too late),
  * so a thread clears charge and item_switch (+ 0x68) in all three every 2 ms from the start (the rule editor then shows
  * the meter off too), and once more when a battle is built: no FS meter and no random items, whatever ruleset the
- * player picked or the room host sent. Every player of a local-wireless room must use the mode (same rules). */
+ * player picked or the room host sent. Every player of a local-wireless room must use the mode (same rules).
+ * Stage hazards and stage morph are rules of the same struct (the loader's field names, hash40): stage_gimmick + 0x61
+ * (bool; the byte tests/DEBUG_MODE.md wrote as "hazards") and change_stage + 0x63 (an enum: 0 = off, 1..9 the morph
+ * choices); both are kept at 0 the same way: hazards and morph always off. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -79,13 +82,15 @@ static void comp_battle(Ctx *c, void *user) {
     comp_stage();
     for (int i = 0; i < 3; i++) {
         volatile uint8_t *r = (volatile uint8_t *)(uintptr_t)k_rules[i];
-        if (r[0x5f] || r[0x68]) changed++;
+        if (r[0x5f] || r[0x68] || r[0x61] || r[0x63]) changed++;
         r[0x5f] = 0;            /* charge: Final Smash meter */
         r[0x68] = 0;            /* item_switch */
+        r[0x61] = 0;            /* stage_gimmick: hazards */
+        r[0x63] = 0;            /* change_stage: stage morph */
     }
     int items_were_on = *(volatile uint32_t *)(uintptr_t)MATCH_ITEM_APPEAR != 0;
     *(volatile uint32_t *)(uintptr_t)MATCH_ITEM_APPEAR = 0;
-    if (++g_battles <= 20) printf("competitive: battle %ld: FS meter and items off (%d of 3 rule copies had one on%s)\n", g_battles, changed, items_were_on ? ", item frequency was on" : "");
+    if (++g_battles <= 20) printf("competitive: battle %ld: FS meter, items, hazards and stage morph off (%d of 3 rule copies had one on%s)\n", g_battles, changed, items_were_on ? ", item frequency was on" : "");
     g_battle_orig(c);
 }
 
@@ -94,6 +99,8 @@ static void comp_clear(void) {
         volatile uint8_t *r = (volatile uint8_t *)(uintptr_t)k_rules[i];
         if (r[0x5f]) r[0x5f] = 0;
         if (r[0x68]) r[0x68] = 0;
+        if (r[0x61]) r[0x61] = 0;
+        if (r[0x63]) r[0x63] = 0;
     }
     if (*(volatile uint32_t *)(uintptr_t)MATCH_ITEM_APPEAR) *(volatile uint32_t *)(uintptr_t)MATCH_ITEM_APPEAR = 0;
 }
@@ -120,7 +127,7 @@ static DWORD WINAPI comp_wait(LPVOID arg) {
             if (!hook_install(0x710235cbf0ull, comp_scene, NULL, &g_scene_orig)) printf("competitive: scene hook FAILED: every mode can be opened\n");
             HANDLE k = CreateThread(NULL, 0, comp_keep, NULL, 0, NULL);
             if (k) CloseHandle(k);
-            printf("competitive: ON (no FS meter, no random items)\n");
+            printf("competitive: ON (no FS meter, no random items, no hazards, no stage morph)\n");
             return 0;
         }
         Sleep(10);
