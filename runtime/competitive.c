@@ -57,6 +57,22 @@ static void comp_stage(void) {
     }
 }
 
+/* The modes outside the competitive 1v1. The current sequence is a global of 13.0.4 (0x71053040f0: SEQUENCE_* ids, the
+ * lua constants registered at 0x7101bf1930: 0x01000000 title / menus, 0x02010000 Smash (also local wireless), 0x03.. Spirits,
+ * 0x04.. Games & More, 0x05.. Vault, 0x06.. Options, 0x07.. Online). The scene dispatcher 0x710235cbf0 reads it and
+ * creates <name>SequenceScene; any other id is put back to the menus there: the game returns to the main menu instead of
+ * opening a mode whose data the light archive does not have. */
+#define CURRENT_SEQUENCE 0x71053040f0ull
+static ImportFn g_scene_orig;
+static int comp_seq_allowed(uint32_t s) { return (s >> 24) == 0x01 || s == 0x02010000u || (s >> 24) == 0x06 || s == 0; }
+static void comp_scene(Ctx *c, void *user) {
+    (void)user;
+    volatile uint32_t *seq = (volatile uint32_t *)(uintptr_t)CURRENT_SEQUENCE;
+    uint32_t s = *seq;
+    if (!comp_seq_allowed(s)) { printf("competitive: mode %08x is not part of the competitive build: back to the menu\n", s); *seq = 0x01000000u; }
+    g_scene_orig(c);
+}
+
 static void comp_battle(Ctx *c, void *user) {
     (void)user;
     int changed = 0;
@@ -100,7 +116,8 @@ static DWORD WINAPI comp_keep(LPVOID arg) {
 static DWORD WINAPI comp_wait(LPVOID arg) {
     (void)arg;
     for (int i = 0; i < 3000; i++) {        /* the hook table answers once the game's function table is set up */
-        if (hook_install(0x71014e58f0ull, comp_battle, NULL, &g_battle_orig)) {      /* the game image (and its globals) is there */
+        if (hook_install(0x71014e58f0ull, comp_battle, NULL, &g_battle_orig)) {
+            if (!hook_install(0x710235cbf0ull, comp_scene, NULL, &g_scene_orig)) printf("competitive: scene hook FAILED: every mode can be opened\n");
             HANDLE k = CreateThread(NULL, 0, comp_keep, NULL, 0, NULL);
             if (k) CloseHandle(k);
             printf("competitive: ON (no FS meter, no random items)\n");

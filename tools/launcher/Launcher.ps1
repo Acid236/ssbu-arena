@@ -183,6 +183,8 @@ $Comp = Join-Path $Build 'characters\competitive'
 $compOn = New-Object System.Windows.Forms.CheckBox; $compOn.Text = 'Modalita'' competitiva: 6 stage (BF, Small BF, FD, PS2, Smashville, T&C), niente oggetti casuali ne'' barra Final Smash'
 $compOn.Location = New-Object System.Drawing.Point(12, 50); $compOn.Size = New-Object System.Drawing.Size(500, 22); $gd.Controls.Add($compOn)
 $compOn.Checked = (Test-Path $Comp) -and ($L['competitive'] -ne 'off'); $compOn.Enabled = (Test-Path $Comp)
+$LightArc = $RomFS -and (Test-Path (Join-Path $RomFS 'data.arcp')) -and -not (Test-Path (Join-Path $RomFS 'data.arc'))      # the light archive holds only the competitive 1v1
+if ($LightArc) { $compOn.Checked = $true; $compOn.Enabled = $false }
 $tip.SetToolTip($compOn, $(if (Test-Path $Comp) { 'Gli altri stage spariscono dalla selezione e dallo stage casuale. Per il Wireless locale va attivato su tutti i PC.' } else { 'Manca build\characters\competitive: python tools/competitive/make_competitive.py' }))
 Add-Button $gd 'Disattiva' 398 20 110 { if (Test-Path $dlcFile) { Remove-Item $dlcFile }; $dlcLabel.Text = 'DLC attivi: 0' } | Out-Null
 
