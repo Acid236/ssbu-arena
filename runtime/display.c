@@ -264,6 +264,93 @@ static void speed_init(void) {
     if (g_lockstep) printf("display: SSBU_SPEED=%s: %s, one refresh per presented frame\n", e, g_speed > 0 ? "paced at n x 60 Hz" : "uncapped");
 }
 
+/* The loading screen: the game presents its first frame 30-60 s after the start (longer on a first run), and until then
+ * nothing draws the window (it showed white). Until the first present the window is painted here with GDI: dark
+ * background, the name, "Caricamento" and a moving bar; a 50 ms timer animates it and stops at the first frame. */
+static DWORD g_splash_t0;
+static void splash_paint(HWND h) {
+    PAINTSTRUCT ps;
+    HDC dc = BeginPaint(h, &ps);
+    RECT rc; GetClientRect(h, &rc);
+    int w = rc.right, ht = rc.bottom;
+    if (w > 0 && ht > 0) {
+        HDC m = CreateCompatibleDC(dc);
+        HBITMAP bm = CreateCompatibleBitmap(dc, w, ht), old = SelectObject(m, bm);
+        for (int y = 0; y < ht; y += 4) {                                  /* vertical gradient, dark red to almost black */
+            double t = (double)y / ht;
+            HBRUSH b = CreateSolidBrush(RGB((int)(48 * (1 - t) + 10 * t), (int)(8 * (1 - t) + 10 * t), (int)(14 * (1 - t) + 14 * t)));
+            RECT s = {0, y, w, y + 4}; FillRect(m, &s, b); DeleteObject(b);
+        }
+        SetBkMode(m, TRANSPARENT);
+        int big = ht / 11 > 18 ? ht / 11 : 18, sm = big * 2 / 5 > 12 ? big * 2 / 5 : 12;
+        HFONT fb = CreateFontA(-big, 0, 0, 0, FW_BLACK, TRUE, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, "Segoe UI");
+        HFONT fs = CreateFontA(-sm, 0, 0, 0, FW_SEMIBOLD, FALSE, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, "Segoe UI");
+        HFONT of = SelectObject(m, fb);
+        int cy = ht / 2 - big;
+        RECT r1 = {0, cy - big / 2, w, cy + big};
+        SetTextColor(m, RGB(0, 0, 0)); OffsetRect(&r1, 3, 3); DrawTextA(m, "SUPER SMASH BROS.", -1, &r1, DT_CENTER | DT_SINGLELINE | DT_VCENTER); OffsetRect(&r1, -3, -3);
+        SetTextColor(m, RGB(255, 255, 255)); DrawTextA(m, "SUPER SMASH BROS.", -1, &r1, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+        RECT r2 = {0, cy + big / 2, w, cy + big * 2};
+        SetTextColor(m, RGB(0, 0, 0)); OffsetRect(&r2, 3, 3); DrawTextA(m, "ULTIMATE", -1, &r2, DT_CENTER | DT_SINGLELINE | DT_VCENTER); OffsetRect(&r2, -3, -3);
+        SetTextColor(m, RGB(232, 40, 40)); DrawTextA(m, "ULTIMATE", -1, &r2, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+        SelectObject(m, fs);
+        const char *c = getenv("SSBU_COMPETITIVE");
+        int by = cy + big * 2 + sm * 2;
+        if (c && c[0] == '1') {
+            RECT r3 = {0, cy + big * 2, w, cy + big * 2 + sm * 2};
+            SetTextColor(m, RGB(255, 200, 60)); DrawTextA(m, "1 vs 1  -  Competitivo", -1, &r3, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+            by += sm;
+        }
+        DWORD el = GetTickCount() - g_splash_t0;
+        char txt[32]; snprintf(txt, sizeof txt, "Caricamento%.*s", (int)(el / 400 % 4), "...");
+        int bw = w / 3, bx = (w - bw) / 2, bh = sm / 3 > 3 ? sm / 3 : 3;
+        RECT r4 = {bx, by, bx + bw, by + sm * 2};
+        SetTextColor(m, RGB(200, 200, 205)); DrawTextA(m, txt, -1, &r4, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+        RECT track = {bx, by + sm * 2 + sm / 2, bx + bw, by + sm * 2 + sm / 2 + bh};
+        HBRUSH tb = CreateSolidBrush(RGB(60, 60, 66)); FillRect(m, &track, tb); DeleteObject(tb);
+        int seg = bw / 4, pos = (int)(el / 4 % (unsigned)(bw + seg)) - seg;      /* a segment that runs along the track */
+        RECT run = {bx + (pos < 0 ? 0 : pos), track.top, bx + (pos + seg > bw ? bw : pos + seg), track.bottom};
+        if (run.right > run.left) { HBRUSH rb = CreateSolidBrush(RGB(232, 40, 40)); FillRect(m, &run, rb); DeleteObject(rb); }
+        BitBlt(dc, 0, 0, w, ht, m, 0, 0, SRCCOPY);
+        SelectObject(m, of); DeleteObject(fb); DeleteObject(fs);
+        SelectObject(m, old); DeleteObject(bm); DeleteDC(m);
+    }
+    EndPaint(h, &ps);
+}
+
+/* The window's place (windowed mode, the copies a person plays): config\window.ini beside graphics.ini, x / y of the
+ * top-left corner and maximized, written when a move or resize ends and when the window closes, used at the next
+ * start when that spot is still on a monitor. The size stays the launcher's (graphics.ini width / height). */
+static int g_place_save;
+static void place_path(char *out, size_t n) {
+    const char *p = gfx_options()->path, *s = strrchr(p, '\\');
+    if (s) snprintf(out, n, "%.*s\\window.ini", (int)(s - p), p); else snprintf(out, n, "window.ini");
+}
+static void place_save(HWND h) {
+    if (!g_place_save) return;
+    WINDOWPLACEMENT wp; memset(&wp, 0, sizeof wp); wp.length = sizeof wp;
+    if (!GetWindowPlacement(h, &wp) || wp.showCmd == SW_SHOWMINIMIZED || IsIconic(h)) return;
+    char path[MAX_PATH]; place_path(path, sizeof path);
+    FILE *f = fopen(path, "wb");
+    if (!f) return;
+    fprintf(f, "; window.ini: where the game window was last (written by the game)\r\nx = %ld\r\ny = %ld\r\nmaximized = %d\r\n",
+            wp.rcNormalPosition.left, wp.rcNormalPosition.top, IsZoomed(h) ? 1 : 0);
+    fclose(f);
+}
+static int place_load(int *x, int *y, int *maxed) {
+    char path[MAX_PATH], ln[128]; place_path(path, sizeof path);
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    int got = 0; long v;
+    while (fgets(ln, sizeof ln, f)) {
+        if (sscanf(ln, " x = %ld", &v) == 1) { *x = (int)v; got |= 1; }
+        else if (sscanf(ln, " y = %ld", &v) == 1) { *y = (int)v; got |= 2; }
+        else if (sscanf(ln, " maximized = %ld", &v) == 1) *maxed = v != 0;
+    }
+    fclose(f);
+    return got == 3;
+}
+
 int oe_exit_request(void);                            /* nnmisc.c */
 /* PR #24 (v1Ta44): the game's picture is 16:9 (its window texture is 1920x1080). The renderers place it with display_fit;
  * the windowed frame keeps that shape while it is dragged (WM_SIZING), and F11 switches between the window and a
@@ -350,7 +437,11 @@ void display_set_window_mode(int mode) { if (g_hwnd_menu) PostMessageA(g_hwnd_me
 void display_set_client_size(int w, int h) { if (g_hwnd_menu) PostMessageA(g_hwnd_menu, WM_APP + 0x52, (WPARAM)w, (LPARAM)h); }
 int display_window_mode(void) { return g_full ? (g_topmost ? 2 : 1) : 0; }
 static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    if (m == WM_PAINT && g_frames == 0) { splash_paint(h); return 0; }
+    if (m == WM_TIMER && w == 1) { if (g_frames) KillTimer(h, 1); else InvalidateRect(h, NULL, FALSE); return 0; }
+    if (m == WM_EXITSIZEMOVE) place_save(h);
     if (m == WM_CLOSE) {                             /* the exit request: nn::oe decides (nnmisc.c oe_exit_request) whether the game ends now or after its exit-request handling section */
+        place_save(h);
         printf("\nwindow closed by the user after %lld frames\n", (long long)g_frames);
         { extern volatile LONG g_display_close; InterlockedExchange(&g_display_close, 1); }      /* session 14: a hold of ours (the first-run shader preparation) ends at once */
         if (!oe_exit_request()) report_and_exit(0);
@@ -416,15 +507,41 @@ static DWORD WINAPI window_thread(LPVOID arg) {
     const char *base = strrchr(exe, '\\') ? strrchr(exe, '\\') + 1 : exe, *show = getenv("SSBU_SHOW");
     int visible = show ? atoi(show) != 0 : (!_stricmp(base, "ssbu_native.exe") || !_stricmp(base, "ssbu_user.exe"));
     snprintf(g_title, sizeof g_title, "%s", getenv("SSBU_TITLE") ? getenv("SSBU_TITLE") : "SSBU native (study build)");
-    if (visible)
-        g_hwnd = CreateWindowExA(go->window_mode == 2 ? WS_EX_TOPMOST : 0, wc.lpszClassName, g_title, style | WS_VISIBLE, px, py, r.right - r.left,
+    int maxed = 0;
+    if (visible && !go->window_mode) {
+        /* windowed: the last place (window.ini) when its title bar is still on a monitor; else centred on the primary
+         * monitor's work area, the top-left corner kept on screen when the window is bigger than it */
+        int sx = 0, sy = 0, ww = r.right - r.left, wh = r.bottom - r.top;
+        POINT bar;
+        if (place_load(&sx, &sy, &maxed)) {
+            bar.x = sx + ww / 2; bar.y = sy + 10;
+            if (MonitorFromPoint(bar, MONITOR_DEFAULTTONULL)) { px = sx; py = sy; }
+            else maxed = 0;
+        }
+        if (px == CW_USEDEFAULT) {
+            MONITORINFO mi; POINT origin = {0, 0};
+            memset(&mi, 0, sizeof mi); mi.cbSize = sizeof mi;
+            if (GetMonitorInfoA(MonitorFromPoint(origin, MONITOR_DEFAULTTOPRIMARY), &mi)) {
+                RECT wa = mi.rcWork;
+                px = wa.left + ((wa.right - wa.left) - ww) / 2; py = wa.top + ((wa.bottom - wa.top) - wh) / 2;
+                if (px < wa.left) px = wa.left;
+                if (py < wa.top) py = wa.top;
+            }
+        }
+        g_place_save = 1;
+    }
+    g_splash_t0 = GetTickCount();
+    if (visible) {
+        g_hwnd = CreateWindowExA(go->window_mode == 2 ? WS_EX_TOPMOST : 0, wc.lpszClassName, g_title, style | (maxed ? 0 : WS_VISIBLE), px, py, r.right - r.left,
                                  r.bottom - r.top, NULL, NULL, wc.hInstance, NULL);
-    else {
+        if (maxed) ShowWindow(g_hwnd, SW_SHOWMAXIMIZED);
+    } else {
         g_hwnd = CreateWindowExA(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, wc.lpszClassName, g_title, style, -32000, -32000,
                                  r.right - r.left, r.bottom - r.top, NULL, NULL, wc.hInstance, NULL);
         ShowWindow(g_hwnd, SW_SHOWNOACTIVATE);
     }
     g_hwnd_menu = g_hwnd; g_topmost = go->window_mode == 2;      /* U1 (settings menu) */
+    SetTimer(g_hwnd, 1, 50, NULL);                   /* the loading screen's animation, until the first frame */
     InterlockedExchange(&g_ready, 1);
     MSG msg;
     while (GetMessageA(&msg, NULL, 0, 0) > 0) { TranslateMessage(&msg); DispatchMessageA(&msg); }
