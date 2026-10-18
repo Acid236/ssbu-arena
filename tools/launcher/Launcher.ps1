@@ -4,7 +4,7 @@
 # check what the game needs and start it. Windows PowerShell 5.1 + WinForms: nothing to install.
 # Lives in build\ (scripts\setup.py link copies it there, with "Avvia SSBU.bat"); in the portable copy too.
 # Files it writes: build\config\online.ini, build\config\account.txt, build\config\dlc.txt, build\config\launcher.ini,
-# and some keys of build\config\graphics.ini (aspect, window, width, height, latency) and controllers.ini ([players], [keyboard]).
+# and some keys of build\config\graphics.ini (aspect, window, width, height; latency always normal) and controllers.ini ([players], [keyboard]).
 # The game's own data is only read. ASCII only (Windows PowerShell reads scripts in the ANSI code page).
 param([switch]$Check)
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
@@ -99,8 +99,8 @@ Add-Label $go 'Ritardo input' 305 111 80 | Out-Null
 $delay = New-Object System.Windows.Forms.ComboBox; $delay.DropDownStyle = 'DropDownList'; $delay.Location = New-Object System.Drawing.Point(388, 108)
 $delay.Size = New-Object System.Drawing.Size(120, 22); $go.Controls.Add($delay)
 [void]$delay.Items.Add('Auto (gioco)'); 0..8 | ForEach-Object { [void]$delay.Items.Add($(if ($_ -eq 0) { '0 (minimo)' } else { [string]$_ })) }
-$delay.SelectedIndex = $(if ($O['input_delay'] -match '^\d+$' -and [int]$O['input_delay'] -le 8) { [int]$O['input_delay'] + 1 } else { 0 })
-$tip.SetToolTip($delay, 'Frame di anticipo dell''input nel Wireless locale. Auto: quelli che sceglie il gioco (circa 4 + il ping; 5-6 frame dal tasto all''azione, offline 1). 0: 2 frame in tutto. Se e'' troppo basso per il ping il gioco aspetta l''altro giocatore (scatti): alza di 1. Ognuno puo'' usare il suo valore.')
+$delay.SelectedIndex = $(if ($O['input_delay'] -match '^\d+$' -and [int]$O['input_delay'] -le 8) { [int]$O['input_delay'] + 1 } elseif ($O['input_delay'] -eq 'auto') { 0 } else { 1 })      # default 0: 2 frames
+$tip.SetToolTip($delay, 'Frame di anticipo dell''input nel Wireless locale. 0 (predefinito): 2 frame in tutto dal tasto all''azione, come offline. Auto: quelli che sceglie il gioco (circa 4 + il ping; 5-6 frame). Se e'' troppo basso per il ping il gioco aspetta l''altro giocatore (scatti): alza di 1. Ognuno puo'' usare il suo valore.')
 if (-not $HasOnline) {
     $onlineOn.Checked = $false; $onlineOn.Enabled = $false; $server.Enabled = $false; $room.Enabled = $false; $pingOn.Enabled = $false; $delay.Enabled = $false
     Add-Label $go 'Questa build non ha l''online (setup.py --ldn-online on)' 200 22 300 | Out-Null
@@ -231,10 +231,6 @@ Add-Label $gv 'Dimensione' 10 85 80 | Out-Null
 $winSize = Add-Combo $gv @('1280x720', '1600x900', '1920x1080', '2560x1440') 92 82 150 $true
 $winSize.Text = $(if ($G['width'] -and $G['height']) { $G['width'] + 'x' + $G['height'] } else { '1280x720' })
 $tip.SetToolTip($winSize, 'Dimensione della finestra (solo in modalita'' Finestra). Puoi scriverne una tua, es. 1366x768.')
-Add-Label $gv 'Latenza input' 10 115 80 | Out-Null
-$latency = Add-Combo $gv @('Normale', 'Bassa', 'Minima') 92 112 150
-$latency.SelectedIndex = $(switch ($G['latency']) { 'low' { 1 } 'lowest' { 2 } default { 0 } })
-$tip.SetToolTip($latency, 'Bassa: il gioco legge il controller piu'' tardi in ogni frame (2-5 ms in meno). Minima: anche l''immagine va a schermo appena pronta (circa 4 ms in meno ancora, ma i frame non durano tutti uguale). Non cambia i frame di logica del gioco ne'' il buffer del Wireless locale.')
 function Update-WinSize { $winSize.Enabled = ($winMode.SelectedIndex -eq 0) }
 $winMode.Add_SelectedIndexChanged({ Update-WinSize }); Update-WinSize
 
@@ -304,7 +300,7 @@ function Save-Settings {
     Set-Content -Path $LauncherIni -Encoding ASCII -Value @('# written by the launcher', ('saves = ' + $Saves), ('nickname = ' + $n),
         ('competitive = ' + $(if ($compOn.Checked) { 'on' } else { 'off' })))
     $gfx = @{ aspect = @('keep', 'stretch')[[Math]::Max(0, $aspect.SelectedIndex)]; window = @('windowed', 'borderless', 'fullscreen')[[Math]::Max(0, $winMode.SelectedIndex)]
-             latency = @('normal', 'low', 'lowest')[[Math]::Max(0, $latency.SelectedIndex)] }
+             latency = 'normal' }      # input latency: always normal (the option is gone)
     if ($winSize.Text.Trim() -match '^(\d{3,5})\s*[xX*]\s*(\d{3,5})$') { $gfx['width'] = $Matches[1]; $gfx['height'] = $Matches[2] }
     Set-IniValues $GfxIni $null $gfx
     if ($p1.SelectedIndex -ge 0 -and $p2.SelectedIndex -ge 0) {
@@ -367,6 +363,7 @@ $play = Add-Button $f 'GIOCA' 392 746 140 {
     New-Item -ItemType Directory -Force $Saves, (Join-Path $Build 'cache') | Out-Null
     $env:SSBU_ROMFS = $RomFS; $env:SSBU_USERDATA = $Saves; $env:SSBU_FONTS = $Fonts
     $env:SSBU_LOOSE_FILES = $(if ($compOn.Checked) { '1' } else { '0' })      # build\characters\competitive (runtime/loose_files.c)
+    $env:SSBU_LATENCY = 'normal'                                               # wins over a latency = low / lowest written by hand in graphics.ini
     $env:SSBU_COMPETITIVE = $env:SSBU_LOOSE_FILES                              # no FS meter, no random items (runtime/competitive.c)
     $cacheMark = @(Get-ChildItem (Join-Path $Build 'cache\vk') -Filter 'prepared_*.txt' -ErrorAction SilentlyContinue).Count
     if ($cacheMark -eq 0) { Say 'Primo avvio: prima di giocare il gioco prepara gli shader per questa scheda video (qualche minuto).' }
