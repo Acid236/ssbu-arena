@@ -494,6 +494,7 @@ static void fs_QueryMountRomCacheSize(Ctx *c) {          /* (size_t *out) */
     RET(0);
 }
 
+#include "arcpack.c"                                   /* light archive (data.arcp) and SSBU_ARC_LOG */
 static void fs_OpenFile(Ctx *c) {                     /* (FileHandle *out, const char *path, int mode) */
     char rel[MAX_PATH], path[MAX_PATH];
     Mount *m = NULL;
@@ -504,6 +505,7 @@ static void fs_OpenFile(Ctx *c) {                     /* (FileHandle *out, const
     if (!r && write && m->kind == MK_ROM) r = RESULT_PERMISSION_DENIED;
     if (!r) {
         int found = view_path(m, rel, path) && !is_dir(path);
+        if (!found && !write && m->kind == MK_ROM && (h = arcp_open(path)) != INVALID_HANDLE_VALUE) found = 2;      /* data.arcp for data.arc */
         if (!found) r = RESULT_PATH_NOT_FOUND;
         else if (write && m->work[0]) {                    /* copy-on-write: the committed file is never opened for writing */
             char w[MAX_PATH];
@@ -513,9 +515,10 @@ static void fs_OpenFile(Ctx *c) {                     /* (FileHandle *out, const
         }
     }
     fs_unlock();
-    if (!r) {
+    if (!r && h == INVALID_HANDLE_VALUE) {
         h = CreateFileA(path, GENERIC_READ | (write ? GENERIC_WRITE : 0), FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
         if (h == INVALID_HANDLE_VALUE) r = RESULT_PATH_NOT_FOUND;
+        else arc_opened(h, path);
     }
     if (InterlockedIncrement(&g_open_log) <= 200 || r)     /* D2: every failed open is logged, not only the first 200 */
         trace_printf("     fs open \"%s\" mode %d -> %s\n", STR(1), (int)A2, r == RESULT_NOT_MOUNTED ? "NOT MOUNTED" : r ? "NOT FOUND" : "ok");
@@ -526,10 +529,12 @@ static void fs_OpenFile(Ctx *c) {                     /* (FileHandle *out, const
     wr64(A0, (uint64_t)h);
     RET(0);
 }
-static void fs_CloseFile(Ctx *c) { if (A0) { open_mode((HANDLE)A0, 1); CloseHandle((HANDLE)A0); } }
+static void fs_CloseFile(Ctx *c) { if (A0) { open_mode((HANDLE)A0, 1); arc_closed((HANDLE)A0); CloseHandle((HANDLE)A0); } }
 extern int g_hitch_ms; void hitch_note(const char *s);      /* hitch.c: SSBU_HITCH */
 static uint64_t read_at(HANDLE h, int64_t offset, void *buf, uint64_t size) {
     uint64_t total = 0;
+    arc_read_logged(h, offset, size);
+    if (arcp_read(h, offset, buf, size, &total)) { void r1_wrote(uint64_t, uint64_t); r1_wrote((uint64_t)(uintptr_t)buf, size); return total; }
     if (g_hitch_ms) { char note[80]; snprintf(note, sizeof note, "read of %llu KB", (unsigned long long)(size >> 10)); hitch_note(note); }
     { void r1_wrote(uint64_t, uint64_t); r1_wrote((uint64_t)(uintptr_t)buf, size); }   /* R1 (r1_state.c): the kernel's write into guest memory is marked (nothing without SSBU_R1_MARK) */
     while (total < size) {
@@ -574,6 +579,7 @@ static void fs_WriteFile(Ctx *c) {                    /* (handle, offset, buffer
 }
 static void fs_GetFileSize(Ctx *c) {                  /* (s64 *out, handle) */
     LARGE_INTEGER size;
+    if (arcp_size((HANDLE)A1, &size.QuadPart)) { wr64(A0, (uint64_t)size.QuadPart); RET(0); return; }
     if (!GetFileSizeEx((HANDLE)A1, &size)) { RET(RESULT_GENERIC_FAILURE); return; }
     wr64(A0, (uint64_t)size.QuadPart);
     RET(0);

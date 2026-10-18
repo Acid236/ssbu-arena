@@ -208,6 +208,7 @@ static int vks_build(const char *dir) {
     QueryPerformanceFrequency(&fq);
     LONG64 t0 = tk(), last = t0;
     snprintf(arc, sizeof arc, "%s\\data.arc", rom && rom[0] ? rom : "..\\romfs");
+    if (GetFileAttributesA(arc) == INVALID_FILE_ATTRIBUTES) strcat(arc, "p");      /* the light archive (arcpack.c): its ranges are whole zstd frames */
     HANDLE fh = CreateFileA(arc, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, NULL);
     if (fh == INVALID_HANDLE_VALUE || !GetFileSizeEx(fh, &sz)) { printf("nvn_vk_store: %s cannot be opened: no container store\n", arc); if (fh != INVALID_HANDLE_VALUE) CloseHandle(fh); return 0; }
     memset(&VKS, 0, sizeof VKS);

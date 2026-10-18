@@ -426,7 +426,8 @@ static void check_romfs(void) {
     char probe[MAX_PATH + 16], msg[2 * MAX_PATH + 800];
     const char *dir = rom && rom[0] ? rom : "..\\romfs";
     for (size_t i = 0; i < sizeof no_data / sizeof no_data[0]; i++) if (getenv(no_data[i])) return;
-    snprintf(probe, sizeof probe, "%s\\data.arc", dir);
+    snprintf(probe, sizeof probe, "%s\\data.arcp", dir);                       /* the light archive (arcpack.c) will do */
+    if (GetFileAttributesA(probe) == INVALID_FILE_ATTRIBUTES) snprintf(probe, sizeof probe, "%s\\data.arc", dir);
     if (GetFileAttributesA(probe) == INVALID_FILE_ATTRIBUTES) {
         static const char how[] = "Start the game with  python scripts\\run.py --userdata <folder>  from the repository, "
                                   "or set SSBU_ROMFS to the RomFS folder of your dump (the one that holds data.arc).";

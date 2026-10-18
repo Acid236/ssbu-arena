@@ -2358,6 +2358,7 @@ static DWORD WINAPI prep_main(void *arg) {
         char arc[400];
         WIN32_FILE_ATTRIBUTE_DATA fa;
         snprintf(arc, sizeof arc, "%s\\data.arc", rom && rom[0] ? rom : "..\\romfs");
+        if (GetFileAttributesA(arc) == INVALID_FILE_ATTRIBUTES) strcat(arc, "p");      /* the light archive (arcpack.c) */
         if (GetFileAttributesExA(arc, GetFileExInfoStandard, &fa)) snprintf(stamp, sizeof stamp, "data.arc size %llu time %08lx%08lx\n", (unsigned long long)(((uint64_t)fa.nFileSizeHigh << 32) | fa.nFileSizeLow), (unsigned long)fa.ftLastWriteTime.dwHighDateTime, (unsigned long)fa.ftLastWriteTime.dwLowDateTime);
         snprintf(spath, sizeof spath, "%s/store_source.txt", dir);
         FILE *sf = fopen(spath, "rb");

@@ -324,7 +324,7 @@ function Test-All([switch]$Quiet) {
     foreach ($x in $files) { if (-not (Test-Path $x[0])) { Say ('[NO] manca ' + $x[1] + ': ' + $x[0]); $bad++ } }
     $mods = @(Get-ChildItem (Join-Path $Work 'nro_bin_eh_o2') -Filter *.dll -ErrorAction SilentlyContinue).Count
     if ($mods -lt 98) { Say "[NO] moduli dei personaggi: $mods su 98"; $bad++ }
-    if (-not $RomFS -or -not (Test-Path (Join-Path $RomFS 'data.arc'))) { Say '[NO] data.arc non trovato (RomFS del dump)'; $bad++ }
+    if (-not $RomFS -or -not ((Test-Path (Join-Path $RomFS 'data.arc')) -or (Test-Path (Join-Path $RomFS 'data.arcp')))) { Say '[NO] data.arc non trovato (RomFS del dump)'; $bad++ }
     if (-not (Test-Path "$env:WINDIR\System32\vulkan-1.dll")) { Say '[NO] Vulkan non trovato: aggiorna il driver della scheda video'; $bad++ }
     foreach ($c in @(@('Microsoft.WebMediaExtensions', 'Web Media Extensions', '9N5TDP8VCMHS'), @('Microsoft.VP9VideoExtensions', 'VP9 Video Extensions', '9N4D0MSMP0PT'))) {
         if (-not (Get-AppxPackage $c[0] -ErrorAction SilentlyContinue)) {

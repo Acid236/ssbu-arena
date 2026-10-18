@@ -2,6 +2,7 @@
 # Coverage campaign for the reduced competitive build: CPU matches with every fighter on the 6 stages, competitive mode
 # on, SSBU_COVERAGE adding the lifted functions each run executes to one file (runtime/coverage.c).
 #   bash tools/competitive/coverage_runs.sh <userdata folder with a save> <coverage file> [seconds per fight, default 45]
+# COVER=arc: the file is an SSBU_ARC_LOG instead (the reads of data.arc, for tools/competitive/pack_arc.py).
 # Uses the debug match (tests/DEBUG_MODE.md): p1 human (stands), p2..p4 CPU level 9. One process per match, 200 s
 # of wall time (the fights restart until then). The save must have seen the DLC notices (a copy of your own
 # saves\save); the menus are walked by tools/competitive/seq_real_save.txt (timed steps, title to fight).
@@ -24,7 +25,7 @@ for ((i = 0; i < n; i += 4)); do
   timeout 600 python -u scripts/run.py --userdata "$SAVE" --exe ssbu_cov.exe --refresh --log "../coverage/run_$k.log" \
     --seq tools/competitive/seq_real_save.txt --seconds 200 \
     --env SSBU_SPEED=0 --env SSBU_SKIP_MOVIES=1 --env SSBU_AUDIO_MUTE=1 --env SSBU_PAIR_WARM=0 \
-    --env SSBU_LOOSE_FILES=1 --env SSBU_COMPETITIVE=1 --env "SSBU_COVERAGE=$WCOV" \
+    --env SSBU_LOOSE_FILES=1 --env SSBU_COMPETITIVE=1 --env "$( [ "${COVER:-}" = arc ] && echo SSBU_ARC_LOG || echo SSBU_COVERAGE )=$WCOV" \
     --env "SSBU_DEBUG_MATCH=p1=$f1,p2=$f2,p3=$f3,p4=$f4,stage=$st,cpu=9,p2=cpu,stock=3" --env "SSBU_DEBUG_END=${SECS}s" \
     > "../coverage/run_$k.out" 2>&1
   echo "    $(tail -1 "../coverage/run_$k.out")  $(grep -c "" "$COV" 2>/dev/null) functions"
