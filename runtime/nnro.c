@@ -40,15 +40,10 @@
 #define RO_INVALID_NRO 0x816u                  /* module 22, description 4: the SDK's own magic check */
 #define RO_INVALID_NRR 0xc16u                  /* module 22, description 6 */
 
-/* generated table of every module of the game (nro_registry.c, from ro_study\nro_map.json) */
-typedef struct {
-    const char *name;
-    uint64_t base;
-    uint32_t image_size, file_size;            /* file_size = text + rodata + data as stored in data.arc */
-    uint8_t build_id[20];
-} NroInfo;
-extern const NroInfo nro_registry[];
-extern const int nro_registry_count;
+/* generated table of every module of the game (nro_registry.c, from ro_study\nro_map.json): NroInfo is in game_data.h,
+ * the table itself in the game DLL (game_data.c), bound before main() (gamedll.c) */
+#define nro_registry (game_data.nro_tab)
+#define nro_registry_count (game_data.nro_n)
 
 /* interface of nro_bin\<module>.dll (nro_shim.c) */
 typedef struct {

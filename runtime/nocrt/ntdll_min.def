@@ -1,0 +1,7 @@
+; From ntdll.dll for the RECOMP_NOCRT build: the stack probe the compiler calls for frames over 4 KB, and the setjmp /
+; longjmp pair of the lifted SDK code (sdklift.h SDK_SETJMP, game_data.c sdk_longjmp), both from the same module.
+LIBRARY ntdll.dll
+EXPORTS
+    __chkstk
+    _setjmp
+    longjmp

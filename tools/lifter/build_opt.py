@@ -24,10 +24,13 @@ Flags: -fno-strict-aliasing as in the -O0 build; -ffp-contract=off (no fused mul
 never formed one either; fused operations the game asks for are explicit fma() calls); no fast-math; the default x86-64
 target (SSE2), so no FMA / AVX instructions are selected.
 """
+import hashlib
+import json
 import os
 import re
 import subprocess
 import sys
+import threading
 import time
 
 os.environ.setdefault('RECOMP_GEN', 'gen_eh_o2')
@@ -94,11 +97,50 @@ def run_limited(cmd, limit):
         return None, '', time.time() - t
 
 
+_ladder_lock = threading.Lock()
+_ladders = {}
+
+
+def ladder(objdir):
+    """<obj dir>\\_ladder.json: for each file that needed the fallback ladder, the step that succeeded and a hash of what was
+    compiled (source, flags, limits). The same file compiled again starts at that step, skipping the time limits it is known
+    to exceed (up to 3 x TIME_LIMIT per file); the object is the one the full ladder makes."""
+    with _ladder_lock:
+        if objdir not in _ladders:
+            p = os.path.join(objdir, '_ladder.json')
+            try:
+                with open(p) as f:
+                    _ladders[objdir] = json.load(f)
+            except (OSError, ValueError):
+                _ladders[objdir] = {}
+        return _ladders[objdir]
+
+
+def ladder_save(objdir, name, key, step):
+    with _ladder_lock:
+        d = _ladders.setdefault(objdir, {})
+        if d.get(name) == [key, step]:
+            return
+        if step:
+            d[name] = [key, step]
+        else:
+            d.pop(name, None)
+        with open(os.path.join(objdir, '_ladder.json'), 'w') as f:
+            json.dump(d, f, indent=0, sort_keys=True)
+
+
 def compile_file(src, obj, base_flags, time_limit=None):
     """Compile with the fallback ladder. Returns (exit code, output, seconds, description of the fallback or '')."""
     time_limit = time_limit or TIME_LIMIT
     total = 0.0
+    objdir, name = os.path.dirname(obj), os.path.basename(obj)
+    with open(src, 'rb') as f:
+        key = hashlib.sha1(f.read() + repr((OPT, EXTRA, base_flags, OPTNONE_LINES, time_limit)).encode()).hexdigest()
+    known = ladder(objdir).get(name)
+    first = known[1] if known and known[0] == key else 0
     for step, limit in enumerate((OPTNONE_LINES, OPTNONE_LINES // 4, OPTNONE_LINES // 16)):
+        if step < first:
+            continue
         hdr, count, lines = optnone_header(src, obj, limit)
         if step and not count:
             continue
@@ -109,9 +151,13 @@ def compile_file(src, obj, base_flags, time_limit=None):
             note = ''
             if count:
                 note = '%d function(s) over %d statements unoptimised (%d statements)' % (count, limit, lines)
-            return code, out, total, note
+            if code == 0:
+                ladder_save(objdir, name, key, step)
+            return code, out, total, note + (' (step known from _ladder.json)' if first else '')
     cmd = [CLANG, '-c', '-O0'] + EXTRA + base_flags + [src, '-o', obj]
     r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode == 0:
+        ladder_save(objdir, name, key, 3)
     return r.returncode, (r.stdout + r.stderr)[-2000:], total, 'WHOLE FILE at -O0 (time limit %.0fs exceeded three times)' % time_limit
 
 
@@ -131,7 +177,7 @@ def report(objdir):
 def compile_one_main(name):
     src = os.path.join(build.GEN, name)
     obj = os.path.join(build.OBJ, name[:-2] + '.obj')
-    code, out, secs, note = compile_file(src, obj, ['-w', '-fno-strict-aliasing', '-I', HERE, '-I', build.GEN])
+    code, out, secs, note = compile_file(src, obj, ['-w', '-fno-strict-aliasing', '-I', HERE, '-I', build.GEN] + build.NOCRT_FLAGS)
     if note or secs > 60:
         line = '%-12s %6.0fs  %s' % (name, secs, note)
         _report.append(line)

@@ -64,6 +64,9 @@ trace_*.txt
 # everything scripts/setup.py produces from your dump, and tools you put in deps/
 build/
 deps/
+# scripts/make_release.py: its scratch folder and the runtime package (a Release asset, never committed)
+build_release/
+dist/
 
 # local configuration
 config/

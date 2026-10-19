@@ -1,32 +1,65 @@
 #!/usr/bin/env python3
-"""One-click install: from your own game files to a playable build. Started by `Install SSBU.bat` (double click).
+"""One-click install: from your own game files to a playable build. Started by `Install SSBU.bat` (through the installer window).
 
-    python scripts/install.py [--no-gui] [--base <file>] [--update <file>] [--keys <prod.keys>] [--dump <folder>] [--jobs N]
+    python scripts/install.py [--no-gui] [--progress-json] [--dry-run] [--base F] [--update F] [--dlc F ...] [--keys F]
+                              [--dump DIR] [--firmware DIR] [--runtime ZIP | --no-runtime] [--jobs N]
+                              [--no-shortcuts] [--no-self-update] [--prepare-only]
 
-What it does, in order (every step is skipped when its result is already there, so it can be started again after a stop):
- 1. Python packages (requirements: numpy lz4 zstandard Pillow unicorn capstone pycryptodome) through pip.
- 2. Your game files: a window asks for the base game (.nsp / .xci / .nsz), the 13.0.4 update (.nsp / .nsz) and your
-    prod.keys, or for a dump folder you already have (exefs\\ and romfs\\). Packages are turned into build\\dump with
-    tools/extract (nsz_to_nsp.py, dump_folder.py). Nothing is sent anywhere; nothing of the game goes into the repository.
- 3. Tools: LLVM/clang 9, SDL3, Vulkan-Headers, glslang and libopus are looked for (deps\\, the usual folders); a missing
-    one is downloaded from its official release URL into deps\\ and checked against the SHA-256 listed below before it is
-    unpacked (an archive whose hash is not listed is refused). The MSVC Build Tools cannot be installed silently: if
-    they are missing, the window gives the one command to install them (winget) and stops.
- 4. scripts/setup.py --dump build\\dump: the long build (lift, compile, link), resumable.
- 5. `Play SSBU.bat` at the top of the repository starts the game.
+Every step is skipped when its result is already there, so the installer can be started again after a stop (what is done is
+also written to build\\install_state.json; scripts/setup.py keeps its own build\\state.json). Steps, in order:
+ 1. update    scripts/update.py brings this folder to the newest version of the repository (--no-self-update skips it). If
+              files changed, install.py starts itself again once so the new code runs. setup.py then rebuilds only what
+              changed: its `stage` step copies only changed files (copy_if_changed) and the compilers redo only what is older
+              than its sources; update.py names the earliest setup step to repeat and it is passed as `setup.py --from`.
+ 2. precheck  scripts/precheck.py: Windows, CPU, RAM, disk, Vulkan, codecs, build tools.
+ 3. packages  Python packages (requirements.txt) through pip (no --user inside the private deps\\python).
+ 4. inputs    scripts/find_inputs.py looks for what you did not give: prod.keys (emulator folders), firmware, the base game,
+              its update 13.0.4 / 13.0.5 and DLC next to it. A prod.keys outside ~/.switch is not copied: the tools get its
+              path in SSBU_PROD_KEYS. Key values are never printed.
+ 5. dump      build\\dump from base + update (tools/extract/dump_folder.py; .nsz and .nca are read by romfs_extract.py), or the
+              dump folder you have. DLC paths are recorded in install_state.json.
+              The system fonts are required (firmware).
+ 6. tools     LLVM/clang 9 and the prebuilt runtime (or SDL3, Vulkan-Headers, glslang, suyu, MSVC to build everything).
+ 7. dlc       build\\config\\dlc.txt from the DLC file names (the runtime unlocks that content; names only).
+ 7. media     libopus (music) into deps\\opus; the Store codecs for the movies are checked (links printed when missing).
+ 8. build     scripts/setup.py: deps stage convert modules tables lift sdk compile nro link check.
+ 9. shortcuts "SSBU native" on the desktop and in the Start menu, "SSBU native - Installer" in the Start menu (scripts/shortcuts.py).
+10. unblock   Unblock-File over tools, scripts and the built exe / dlls (cheap, idempotent).
+
+--dry-run says what each step would do ("would ...") and changes nothing: no downloads, no writes outside build\\logs.
+
+--progress-json adds, besides the plain lines, lines that start with "##ssbu " followed by one JSON object (for the window):
+  {"ev":"plan","steps":[{"id","title","est_s"}]}                           first
+  {"ev":"step","id","state":"start|done|skip|fail|dry","secs","msg"}       per step (setup.py's steps have their own ids)
+  {"ev":"progress","id","done","total"[,"est":true]}                        optional; est:true = elapsed / expected seconds
+  {"ev":"done","ok":true|false,"msg"} or {"ev":"error","msg","hint"}        last
+After a self-update the second run does not repeat the plan and the update step.
+
+Ideas (a one-click installer that updates itself, finds the user's keys / dumps in emulator folders, makes shortcuts and unblocks
+files) after WindowSmash's tools/install_windowsmash.ps1 by SNO2207 (no licence file; nothing copied); this is a separate
+implementation.
 """
 import argparse
+import collections
 import hashlib
+import json
 import os
+import queue
+import re
 import shutil
 import subprocess
 import sys
+import threading
+import time
 import urllib.request
 import zipfile
 
-REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+HERE = os.path.dirname(os.path.abspath(__file__))
+REPO = os.path.dirname(HERE)
 DEPS = os.path.join(REPO, 'deps')
 BUILD = os.path.join(REPO, 'build')
+STATE_FILE = os.path.join(BUILD, 'install_state.json')
+sys.path.insert(0, HERE)        # the python.org embeddable package does not put the script's folder on sys.path
 PKGS = ['numpy', 'lz4', 'zstandard', 'Pillow', 'unicorn', 'capstone', 'pycryptodome']
 # name -> (url, sha256 or None, folder in deps, file that proves the folder is complete). A None hash refuses the download
 # until the maintainer has checked the archive and written its hash here.
@@ -47,13 +80,127 @@ TOOLS = {   # checked 2026-10-19: SDL3 and glslang equal GitHub's own asset dige
               'fd37507c8476a6d14cc7c4b352401f31bcbd0f0d995d35390811e968c466f46e', 'imgui', 'imgui.h'),
 }
 
+# The prebuilt runtime package of the GitHub Release of this version (scripts/make_release.py): (URL, SHA-256 of the zip).
+# (None, None) until the maintainer has uploaded the package made from this commit and written its hash here; the
+# download is refused when the hash does not match, and setup.py uses the package only with the tree it was built from.
+RUNTIME_RELEASE = (None, None)
 
-def say(s):
-    print(s, flush=True)
+SETUP_STEPS = ['deps', 'stage', 'convert', 'modules', 'tables', 'lift', 'sdk', 'compile', 'nro', 'link', 'check']
+# expected seconds, measured 2026-10-19 on a PC with 12 jobs and 32 threads (compile and nro scale with 12 / jobs)
+EST = {'update': 10, 'precheck': 10, 'packages': 30, 'inputs': 10, 'dump': 600, 'tools': 30, 'media': 20, 'dlc': 1,
+       'deps': 5, 'stage': 3, 'convert': 3, 'modules': 4, 'tables': 1, 'lift': 20, 'sdk': 2, 'compile': 2217, 'nro': 880,
+       'link': 60, 'check': 30, 'shortcuts': 3, 'unblock': 5}
+TITLES = {'update': 'Update this program', 'precheck': 'Check this PC', 'packages': 'Python packages',
+          'inputs': 'Find your game files', 'dump': 'Prepare the game files', 'dlc': 'Add-on contents (DLC)', 'tools': 'Build tools', 'media': 'Music and movies',
+          'deps': 'Check tools and game files', 'stage': 'Lay out the sources', 'convert': 'Convert the game code',
+          'modules': 'Script modules', 'tables': 'Tables', 'lift': 'Translate the game code', 'sdk': 'System library',
+          'compile': 'Compile the game', 'nro': 'Compile the script modules', 'link': 'Link the game', 'check': 'Self-tests',
+          'shortcuts': 'Shortcuts', 'unblock': 'Unblock files'}
 
 
+class Stop(Exception):
+    """A step cannot go on: msg says why, hint says what to do."""
+    def __init__(self, msg, hint=''):
+        Exception.__init__(self, msg)
+        self.msg, self.hint = msg, hint
+
+
+def say(s=''):
+    print(str(s).encode('ascii', 'replace').decode('ascii'), flush=True)
+
+
+class Prog:
+    """The `##ssbu {json}` lines of --progress-json."""
+    def __init__(self, on):
+        self.on, self.t0 = on, {}
+
+    def emit(self, **kw):
+        if self.on:
+            print('##ssbu ' + json.dumps(kw), flush=True)
+
+    def start(self, sid):
+        self.t0[sid] = time.time()
+        self.emit(ev='step', id=sid, state='start', secs=0, msg='')
+
+    def end(self, sid, state, msg='', secs=None):
+        if secs is None:
+            secs = time.time() - self.t0.get(sid, time.time())
+        self.emit(ev='step', id=sid, state=state, secs=round(secs, 1), msg=msg)
+
+
+class State:
+    """build\\install_state.json: what finished (so a second start skips it), the inputs used, DLC paths. Not written in a dry run."""
+    def __init__(self, dry):
+        self.dry, self.d = dry, {'done': {}, 'inputs': {}}
+        try:
+            with open(STATE_FILE) as f:
+                self.d.update(json.load(f))
+        except (OSError, ValueError):
+            pass
+
+    def save(self):
+        if self.dry:
+            return
+        os.makedirs(BUILD, exist_ok=True)
+        tmp = STATE_FILE + '.tmp'
+        with open(tmp, 'w') as f:
+            json.dump(self.d, f, indent=1)
+        os.replace(tmp, STATE_FILE)
+
+    def done(self, sid, secs, msg):
+        self.d['done'][sid] = {'secs': round(secs, 1), 'at': time.strftime('%Y-%m-%d %H:%M'), 'msg': msg[:200]}
+        self.save()
+
+
+def secs_of(text):
+    """'19.3s' or '3m05s' (setup.py's fmt) -> seconds."""
+    m = re.fullmatch(r'(?:(\d+)m)?(\d+(?:\.\d+)?)s', text.strip())
+    return (int(m.group(1) or 0) * 60 + float(m.group(2))) if m else 0.0
+
+
+def stream(cmd, env=None, cwd=None, on_line=None, hb=None, prefix=''):
+    """Run a child, print its output line by line as it comes. hb() -> (id, done, total) | None is called every ~15 s with no
+    output, for the estimated-progress events. Returns (exit code, last lines)."""
+    e = dict(os.environ if env is None else env)
+    e.setdefault('PYTHONUNBUFFERED', '1')
+    e.setdefault('PYTHONIOENCODING', 'utf-8')
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=e, cwd=cwd, text=True, encoding='utf-8',
+                         errors='replace', bufsize=1)
+    q = queue.Queue()
+
+    def reader():
+        for line in p.stdout:
+            q.put(line)
+        q.put(None)
+    threading.Thread(target=reader, daemon=True).start()
+    tail, last = collections.deque(maxlen=40), time.time()
+    while True:
+        try:
+            line = q.get(timeout=5)
+        except queue.Empty:
+            if hb and time.time() - last >= 15:
+                last = time.time()
+                h = hb()
+                if h:
+                    PROG.emit(ev='progress', id=h[0], done=int(h[1]), total=int(h[2]), est=True)
+            continue
+        if line is None:
+            break
+        line = line.rstrip('\r\n')
+        say(prefix + line)
+        tail.append(line)
+        if on_line:
+            on_line(line)
+    return p.wait(), list(tail)
+
+
+PROG = Prog(False)
+
+
+# ------------------------------------------------------------------------------------------------------ window (old dialogs)
 def ask_files(a):
-    """Fill a.base / a.update / a.keys / a.dump from a small window (tkinter), unless given or --no-gui."""
+    """Fill a.base / a.update / a.keys / a.dump from a small window (tkinter), unless given or --no-gui. Without tkinter
+    (the embeddable Python) nothing is asked: the installer goes on with what find_inputs found."""
     if a.dump or (a.base and a.update) or a.no_gui:
         return
     try:
@@ -66,15 +213,69 @@ def ask_files(a):
                            'Yes = choose that folder.\nNo = choose your package files (.nsp / .xci / .nsz) and your prod.keys.'):
         a.dump = filedialog.askdirectory(title='The dump folder (exefs\\ and romfs\\ inside)') or None
     else:
-        pk = [('Switch packages', '*.nsp *.xci *.nsz'), ('All files', '*.*')]
+        pk = [('Switch packages', '*.nsp *.xci *.nsz *.nca'), ('All files', '*.*')]
         a.base = filedialog.askopenfilename(title='The BASE game (v0): .nsp, .xci or .nsz', filetypes=pk) or None
-        a.update = filedialog.askopenfilename(title='The UPDATE 13.0.4: .nsp or .nsz', filetypes=pk) or None
-        if not os.path.exists(os.path.join(os.path.expanduser('~'), '.switch', 'prod.keys')):
+        a.update = filedialog.askopenfilename(title='The UPDATE 13.0.4 or 13.0.5: .nsp or .nsz', filetypes=pk) or None
+        if not a.keys and not os.path.exists(os.path.join(os.path.expanduser('~'), '.switch', 'prod.keys')):
             a.keys = filedialog.askopenfilename(title='Your prod.keys', filetypes=[('keys', '*.keys'), ('All files', '*.*')]) or None
     root.destroy()
 
 
-def step_packages():
+# ------------------------------------------------------------------------------------------------------ 1. update
+def step_update(cx):
+    a = cx.a
+    if a.no_self_update:
+        return 'skip', 'self-update is off (--no-self-update)'
+    if a.dry_run:
+        return 'dry', 'would ask GitHub for a newer version (scripts/update.py) and start again if files changed'
+    lines = []
+    rc, _ = stream([sys.executable, os.path.join(HERE, 'update.py')], on_line=lines.append, prefix='   ')
+    if rc:
+        return 'skip', 'could not update (no internet?); going on with this version'
+    if any(l.startswith('Updated ') for l in lines):
+        m = next((re.search(r'--from (\w+)', l) for l in lines if '--from' in l and 'setup.py' in l), None)
+        cx.restart_from = m.group(1) if m else '-'
+        return 'done', 'updated: starting again with the new files' + (' (rebuild from %s)' % m.group(1) if m else '')
+    return 'done', 'up to date'
+
+
+# ------------------------------------------------------------------------------------------------------ 2. precheck
+def runtime_local(a):
+    """Is a prebuilt runtime package at hand (no download, no writes)? Then the MSVC Build Tools are not needed."""
+    if a.no_runtime:
+        return False
+    if a.runtime:
+        return os.path.exists(a.runtime)
+    if RUNTIME_RELEASE[0] and RUNTIME_RELEASE[1]:
+        return True
+    if os.path.isfile(os.path.join(DEPS, 'runtime', 'manifest.json')):
+        return True
+    return os.path.isdir(DEPS) and any(n.startswith('ssbu-runtime-') and n.endswith('.zip') for n in os.listdir(DEPS))
+
+
+def step_precheck(cx):
+    import precheck
+    dump = cx.a.dump or (os.path.join(BUILD, 'dump') if dump_ok(os.path.join(BUILD, 'dump')) else None)
+    res = precheck.checks(BUILD, need_msvc=not runtime_local(cx.a), dump_dir=dump)
+    for c in res:
+        say('   %-4s %s: %s' % (c['level'].upper(), c['what'], c['msg']))
+    fails = ['%s: %s' % (c['what'], c['msg']) for c in res if c['level'] == 'fail']
+    warns = [c['what'] for c in res if c['level'] == 'warn']
+    if fails:
+        if cx.a.dry_run:
+            cx.blockers.append('PC check: ' + '; '.join(fails))
+            return 'dry', 'would stop: ' + '; '.join(fails)
+        raise Stop('this PC cannot run the installer: ' + '; '.join(fails), 'Fix the point above (or use another PC) and start the installer again.')
+    return 'done', 'all fine' + (' (warnings: %s)' % ', '.join(warns) if warns else '')
+
+
+# ------------------------------------------------------------------------------------------------------ 3. packages
+def in_private_python():
+    deps_py = os.path.normcase(os.path.join(DEPS, 'python')) + os.sep
+    return (os.path.normcase(os.path.abspath(sys.prefix)) + os.sep).startswith(deps_py)
+
+
+def step_packages(cx):
     missing = []
     for p in PKGS:
         mod = {'Pillow': 'PIL', 'pycryptodome': 'Crypto'}.get(p, p)
@@ -82,60 +283,212 @@ def step_packages():
             __import__(mod)
         except ImportError:
             missing.append(p)
-    if missing:
-        say('1. Python packages: installing %s' % ' '.join(missing))
-        subprocess.run([sys.executable, '-m', 'pip', 'install', '--user'] + missing, check=True)
-    else:
-        say('1. Python packages: all there')
+    if not missing:
+        return 'skip', 'all there'
+    if cx.a.dry_run:
+        return 'dry', 'would install with pip: ' + ' '.join(missing)
+    req = os.path.join(REPO, 'requirements.txt')
+    cmd = [sys.executable, '-m', 'pip', 'install'] + ([] if in_private_python() else ['--user'])
+    cmd += ['-r', req] if os.path.isfile(req) else missing
+    say('   installing %s' % ' '.join(missing))
+    rc, tail = stream(cmd, prefix='   ')
+    if rc:
+        raise Stop('pip could not install %s (code %d)' % (' '.join(missing), rc), 'Check the internet connection and start again.')
+    return 'done', 'installed ' + ' '.join(missing)
 
 
-def step_dump(a):
+# ------------------------------------------------------------------------------------------------------ 4. inputs
+def dump_ok(d):
+    return all(os.path.isdir(os.path.join(d, s)) for s in ('exefs', 'romfs')) and os.path.isfile(os.path.join(d, 'romfs', 'data.arc'))
+
+
+def has_fonts(folder):
+    fonts = os.path.join(folder, 'fonts')
+    return os.path.isdir(fonts) and any(n.lower().endswith('.ttf') for n in os.listdir(fonts))
+
+
+def under(path, folder):
+    p, f = os.path.normcase(os.path.abspath(path)), os.path.normcase(os.path.abspath(folder))
+    return p == f or p.startswith(f + os.sep)
+
+
+def step_inputs(cx):
+    a, st = cx.a, cx.st
+    notes = []
+    ready = os.path.join(BUILD, 'dump')
     if a.dump:
         for sub in ('exefs', 'romfs'):
             if not os.path.isdir(os.path.join(a.dump, sub)):
-                sys.exit('the dump folder %s has no %s\\ inside' % (a.dump, sub))
-        need_fonts(a.dump)
-        say('2. Game files: the dump folder %s' % a.dump)
-        return a.dump
-    dump = os.path.join(BUILD, 'dump')
-    if os.path.isdir(os.path.join(dump, 'romfs')) and os.path.isdir(os.path.join(dump, 'exefs')):
-        need_fonts(dump)
-        say('2. Game files: build\\dump is already there')
-        return dump
-    if not (a.base and a.update):
-        sys.exit('no game files chosen: start again and choose the base game and the update (or a dump folder)')
-    if a.keys:
-        kd = os.path.join(os.path.expanduser('~'), '.switch')
-        os.makedirs(kd, exist_ok=True)
-        shutil.copyfile(a.keys, os.path.join(kd, 'prod.keys'))
+                raise Stop('the dump folder %s has no %s\\ inside' % (a.dump, sub), 'Choose the folder that holds exefs\\ and romfs\\.')
+        cx.dump = a.dump
+        notes.append('dump folder given with --dump: %s' % a.dump)
+    elif dump_ok(ready) and not (a.base or a.update):
+        cx.dump = ready
+        notes.append('build\\dump is already there')
+    cx.dlc = [p for p in a.dlc]
+    if cx.dump and has_fonts(os.path.join(cx.dump, 'sysdata')):
+        for n in notes:
+            say('   ' + n)
+        say('   system fonts: in the dump')
+        _record_inputs(cx)
+        return 'skip', '; '.join(notes) + '; fonts there, nothing else to look for'
+
+    import find_inputs
+    extras = [p for p in (a.base, a.update, a.firmware) + tuple(a.dlc) if p and os.path.exists(p)]
+    r = find_inputs.scan(extras)
+    say(find_inputs.summary(r))
+    best = r['best']
+
+    def choose(kind, given, items, label):
+        if given:
+            if os.path.isfile(given):
+                return given, 'given'
+            if os.path.isdir(given):
+                sub = [x['path'] for x in items if under(x['path'], given)]
+                if sub:
+                    return sub[0], 'found inside the folder you gave'
+            cx.blockers.append('%s %s not found' % (label, given))
+            return None, ''
+        return None, ''
+
+    # firmware (fonts): given, or the best one found
+    fw = a.firmware or best.get('firmware')
+    cx.firmware = fw
+    hit = next((x for x in r['firmware'] if fw and os.path.normcase(os.path.abspath(x['path'])) == os.path.normcase(os.path.abspath(fw))), None)
+    cx.firmware_kind = hit['kind'] if hit else None
+    if fw:
+        notes.append('firmware: %s (%s)' % (fw, 'given' if a.firmware else 'found on this PC'))
+
+    if not cx.dump and not (a.base or a.update) and best.get('dump'):
+        cx.dump = best['dump']
+        notes.append('dump: %s (a complete extracted dump found on this PC)' % cx.dump)
+    if not cx.dump:
+        base, why_b = choose('base', a.base, r['base'], 'base game')
+        if not base and not a.base:
+            base, why_b = best.get('base'), 'best match found on this PC (plain package preferred)'
+        upd, why_u = choose('update', a.update, r['updates'], 'update')
+        if not upd and not a.update:
+            ups = [u for u in r['updates'] if u['build']]
+            near = [u for u in ups if base and os.path.dirname(u['path']) == os.path.dirname(base)]
+            pick = (near or ups or [None])[0]
+            if pick:
+                upd, why_u = pick['path'], 'game %s, the newest found%s' % (pick['build'], ' next to the base game' if near else '')
+        keys = a.keys or best.get('prod_keys')
+        for what, v in (('the base game (.xci / .nsp / .nsz)', base), ('the update 13.0.4 or 13.0.5', upd), ('prod.keys', keys)):
+            if not v:
+                cx.blockers.append('missing: ' + what)
+        if base:
+            notes.append('base game: %s (%s)' % (base, why_b))
+        if upd:
+            notes.append('update: %s (%s)' % (upd, why_u))
+        cx.base, cx.update, cx.keys = base, upd, keys
+        if keys:
+            notes.append('prod.keys: %s (%s)' % (keys, 'given' if a.keys else 'found on this PC'))
+            home_keys = os.path.join(os.path.expanduser('~'), '.switch', 'prod.keys')
+            if os.path.normcase(os.path.abspath(keys)) != os.path.normcase(home_keys):
+                os.environ['SSBU_PROD_KEYS'] = os.path.abspath(keys)   # read by tools/extract/romfs_extract.py; no copy is made
+                notes.append('(not in ~/.switch: the tools are told its place with SSBU_PROD_KEYS; no copy is made)')
+            tk = best.get('title_keys')
+            if tk and 'SSBU_TITLE_KEYS' not in os.environ and os.path.normcase(os.path.abspath(tk)) != os.path.normcase(
+                    os.path.join(os.path.expanduser('~'), '.switch', 'title.keys')):
+                os.environ['SSBU_TITLE_KEYS'] = os.path.abspath(tk)
+    if not cx.dlc and best.get('dlc'):
+        cx.dlc = list(best['dlc'])
+    for n in notes:
+        say('   ' + n)
+    if cx.dlc:
+        say('   DLC: %d package(s) noted; the base roster needs none' % len(cx.dlc))
+    if cx.blockers and not a.dry_run:
+        # the old dialogs: only now, when something is still missing, and only with a window available
+        if not a.no_gui:
+            ask_files(a)
+            if a.dump or a.base or a.update:
+                cx.blockers[:] = []
+                a.firmware = a.firmware or cx.firmware
+                return step_inputs(cx)
+        raise Stop('missing: ' + '; '.join(cx.blockers), 'Give them with --base / --update / --keys, or put the game files in Downloads / Documents and your '
+                   'prod.keys in %USERPROFILE%\\.switch, then start again.')
+    _record_inputs(cx)
+    return 'done', '; '.join(notes) if notes else 'nothing found'
+
+
+def _record_inputs(cx):
+    cx.st.d['inputs'] = {'dump': cx.dump, 'base': cx.base, 'update': cx.update, 'firmware': cx.firmware, 'dlc': cx.dlc,
+                         'keys_file': cx.keys}          # paths only, never key values
+    cx.st.save()
+
+
+# ------------------------------------------------------------------------------------------------------ 5. dump
+def ensure_fonts(cx, dump):
+    """The runtime stops (code 7) without the system fonts. -> extra setup.py arguments (--sysdata), [] if the dump has them."""
+    if has_fonts(os.path.join(dump, 'sysdata')):
+        return []
+    mine = os.path.join(BUILD, 'sysdata')
+    if has_fonts(mine):
+        return ['--sysdata', mine]
+    fw = cx.firmware
+    if fw and os.path.isdir(fw):
+        out = os.path.join(mine, 'fonts')
+        if cx.firmware_kind == 'fonts' or (not cx.firmware_kind and any(n.lower().endswith(('.ttf', '.bfttf', '.otf')) for n in os.listdir(fw))):
+            os.makedirs(out, exist_ok=True)
+            for n in os.listdir(fw):
+                if n.lower().endswith(('.ttf', '.otf')):
+                    shutil.copyfile(os.path.join(fw, n), os.path.join(out, n))
+        else:
+            say('   system fonts: extracting from the firmware %s' % fw)
+            rc, _ = stream([sys.executable, os.path.join(REPO, 'tools', 'extract', 'fw_fonts.py'), fw, out], prefix='   ')
+            if rc:
+                raise Stop('the system fonts could not be extracted from %s (code %d)' % (fw, rc), 'Check that prod.keys is the one of the same console.')
+        if has_fonts(mine):
+            return ['--sysdata', mine]
+    raise Stop('no system fonts: the game needs them (it stops at start without)',
+               'Give your firmware folder (--firmware, the .nca files of your console firmware) and start again.')
+
+
+def step_dump(cx):
+    a = cx.a
+    if cx.dump:
+        if a.dry_run:
+            fonts = has_fonts(os.path.join(cx.dump, 'sysdata'))
+            return 'dry', 'would use the dump %s%s' % (cx.dump, '' if fonts else ' and add the system fonts from the firmware')
+        cx.setup_args += ensure_fonts(cx, cx.dump)
+        return 'skip', 'using the dump %s' % cx.dump
+    if not (cx.base and cx.update):
+        return 'dry', 'would stop: no base game / update'
     ext = os.path.join(REPO, 'tools', 'extract')
+    out, part = os.path.join(BUILD, 'dump'), os.path.join(BUILD, 'dump.part')
+    if a.dry_run:
+        return 'dry', 'would make build\\dump (about 17 GB, ~10 min) from %s + %s with dump_folder.py%s' % (
+            os.path.basename(cx.base), os.path.basename(cx.update), '; .nsz are read as they are' if cx.base.lower().endswith('.nsz') or
+            cx.update.lower().endswith('.nsz') else '')
     os.makedirs(BUILD, exist_ok=True)
+    env = dict(os.environ)
+    own_cache = 'SSBU_TMP' not in env
+    if own_cache:
+        env['SSBU_TMP'] = os.path.join(BUILD, 'nsz_cache')      # romfs_extract.py unpacks an .nsz here (our own folder, removed after)
+    say('   making build\\dump (about 17 GB, several minutes)')
+    cmd = [sys.executable, os.path.join(ext, 'dump_folder.py'), cx.base, cx.update, part]
+    if cx.firmware and os.path.isdir(cx.firmware) and cx.firmware_kind == 'nca-folder':
+        cmd += ['--firmware', cx.firmware]
+    rc, tail = stream(cmd, env=env, hb=lambda: ('dump', time.time() - PROG.t0.get('dump', time.time()), EST['dump']), prefix='   ')
+    if rc:
+        raise Stop('the game files could not be unpacked (code %d): %s' % (rc, (tail or [''])[-1]),
+                   'Check that prod.keys belongs to the same console as the game files, and that base and update are the same game.')
+    if os.path.isdir(out) and not dump_ok(out):
+        os.replace(out, out + '.old_%d' % int(time.time()))      # an unfinished dump of an older run: kept aside, not deleted
+    if not os.path.isdir(out):
+        os.replace(part, out)
+    if own_cache:
+        shutil.rmtree(env['SSBU_TMP'], ignore_errors=True)
+    cx.dump = out
+    cx.setup_args += ensure_fonts(cx, out)
+    return 'done', 'build\\dump made'
 
-    def plain(p, tag):
-        if p.lower().endswith('.nsz'):
-            out = os.path.join(BUILD, tag + '.nsp')
-            if not os.path.exists(out):
-                say('2. Game files: unpacking %s' % os.path.basename(p))
-                subprocess.run([sys.executable, os.path.join(ext, 'nsz_to_nsp.py'), p, out], check=True)
-            return out
-        return p
-    base, upd = plain(a.base, 'base'), plain(a.update, 'update')
-    say('2. Game files: making build\\dump (about 17 GB, several minutes)')
-    subprocess.run([sys.executable, os.path.join(ext, 'dump_folder.py'), base, upd, dump] + (['--firmware', a.firmware] if a.firmware else []), check=True)
-    need_fonts(dump)
-    return dump
 
-
-def need_fonts(dump):
-    """The runtime stops (code 7) without the system fonts, as a console always has them."""
-    fonts = os.path.join(dump, 'sysdata', 'fonts')
-    if not (os.path.isdir(fonts) and any(n.lower().endswith('.ttf') for n in os.listdir(fonts))):
-        sys.exit('no system fonts in %s: the game needs them. Choose your firmware dump folder (Firmware) and start again, or put the fonts there with tools/extract/fw_fonts.py' % fonts)
-
-
+# ------------------------------------------------------------------------------------------------------ 6. tools
+SUYU_BASE = 'https://raw.githubusercontent.com/suyu-emu/suyu-v0.0.4/c0dd2ff554327657f0c6318f29b740ac7e329ea0/'
 # the two files of a yuzu-family source tree that tools/lifter/gen_sdktest.py reads (default Miis for the self-test), from a
 # pinned commit of suyu (GPL-3.0); hashes of the files as GitHub serves them (LF line ends)
-SUYU_BASE = 'https://raw.githubusercontent.com/suyu-emu/suyu-v0.0.4/c0dd2ff554327657f0c6318f29b740ac7e329ea0/'
 SUYU_FILES = {'src/core/hle/service/mii/types/raw_data.cpp': '0f5b10dcde4038024fffd6079d75cd4bad8d72486efcf1ffa06e6c779803c486',
               'src/core/hle/service/mii/mii_types.h': 'cf2e0c990b881c238f5b7fd823f33fe2c0a8d0846cdbf012ec6f702b1647f3e1'}
 
@@ -148,7 +501,7 @@ def fetch_suyu():
             continue
         data = urllib.request.urlopen(SUYU_BASE + rel).read()
         if hashlib.sha256(data).hexdigest() != sha:
-            sys.exit('suyu %s: the download does not match its SHA-256: refused' % rel)
+            raise Stop('suyu %s: the download does not match its SHA-256: refused' % rel)
         os.makedirs(os.path.dirname(out), exist_ok=True)
         open(out, 'wb').write(data)
     return dst
@@ -160,16 +513,16 @@ def fetch(name):
     if os.path.exists(os.path.join(dst, probe)):
         return dst
     if not sha:
-        sys.exit('%s is missing and its download is not verified yet (no SHA-256 listed in scripts/install.py): install it by hand '
-                 '(BUILDING.md) or give its folder to setup.py' % name)
+        raise Stop('%s is missing and its download is not verified yet (no SHA-256 listed in scripts/install.py)' % name,
+                   'Install it by hand (BUILDING.md) or give its folder to setup.py.')
     os.makedirs(DEPS, exist_ok=True)
     arc = os.path.join(DEPS, os.path.basename(url))
-    say('3. Tools: downloading %s' % url)
+    say('   downloading %s' % url)
     urllib.request.urlretrieve(url, arc)
     h = hashlib.sha256(open(arc, 'rb').read()).hexdigest()
     if h != sha:
         os.remove(arc)
-        sys.exit('%s: the download does not match its SHA-256 (got %s): refused' % (name, h))
+        raise Stop('%s: the download does not match its SHA-256 (got %s): refused' % (name, h))
     if arc.endswith('.zip'):
         tmp = dst + '.tmp'
         with zipfile.ZipFile(arc) as z:
@@ -183,62 +536,385 @@ def fetch(name):
         except OSError as e:                    # 740: it asks for administrator rights; Windows shows its Yes/No prompt
             if getattr(e, 'winerror', None) != 740:
                 raise
-            say('3. Tools: the LLVM installer asks for administrator rights: answer Yes in the Windows prompt')
+            say('   the LLVM installer asks for administrator rights: answer Yes in the Windows prompt')
             ps = "Start-Process -FilePath '%s' -ArgumentList '/S','/D=%s' -Verb RunAs -Wait" % (arc.replace("'", "''"), dst.replace("'", "''"))
             subprocess.run(['powershell', '-NoProfile', '-Command', ps], check=True)
         if not os.path.exists(os.path.join(dst, 'bin', 'clang.exe')):
-            sys.exit('LLVM was not installed into %s (was the Windows prompt answered No?): start the installer again' % dst)
+            raise Stop('LLVM was not installed into %s (was the Windows prompt answered No?)' % dst, 'Start the installer again.')
     os.remove(arc)
     return dst
 
 
-def step_tools(dump):
+def find_runtime(a):
+    """The runtime package to use: --runtime, the pinned GitHub Release asset (downloaded into deps/ and checked), or a
+    ssbu-runtime-*.zip / runtime folder already in deps/. None: build everything here."""
+    if a.no_runtime:
+        return None
+    if a.runtime:
+        if not os.path.exists(a.runtime):
+            raise Stop('--runtime %s: not found' % a.runtime)
+        return os.path.abspath(a.runtime)
+    url, sha = RUNTIME_RELEASE
+    if url and sha:
+        dst = os.path.join(DEPS, os.path.basename(url))
+        if not (os.path.isfile(dst) and hashlib.sha256(open(dst, 'rb').read()).hexdigest() == sha):
+            os.makedirs(DEPS, exist_ok=True)
+            say('   downloading the prebuilt runtime %s' % url)
+            try:
+                urllib.request.urlretrieve(url, dst + '.part')
+            except OSError as e:
+                say('   the prebuilt runtime could not be downloaded (%s): everything is built here instead' % e)
+                return None
+            got = hashlib.sha256(open(dst + '.part', 'rb').read()).hexdigest()
+            if got != sha:
+                os.remove(dst + '.part')
+                raise Stop('the prebuilt runtime does not match its SHA-256 (got %s): refused' % got)
+            os.replace(dst + '.part', dst)
+        return dst
+    if os.path.isfile(os.path.join(DEPS, 'runtime', 'manifest.json')):
+        return os.path.join(DEPS, 'runtime')
+    zips = sorted((os.path.join(DEPS, n) for n in os.listdir(DEPS) if n.startswith('ssbu-runtime-') and n.endswith('.zip')),
+                  key=os.path.getmtime) if os.path.isdir(DEPS) else []
+    return zips[-1] if zips else None
+
+
+def tools_args(dump, runtime=None):
+    if runtime:                                  # only LLVM is needed: no MSVC, no SDL3 / Vulkan-Headers / glslang / suyu
+        probe = [sys.executable, os.path.join(HERE, 'setup.py'), '--only', 'deps', '--dump', dump, '--runtime', runtime]
+        r = subprocess.run(probe, capture_output=True, text=True, errors='replace')
+        if r.returncode == 0:
+            say('   LLVM found; prebuilt runtime %s (no MSVC Build Tools needed)' % os.path.basename(runtime))
+            return ['--runtime', runtime]
+        if 'runtime package' not in r.stdout:
+            llvm = fetch('llvm')
+            say('   LLVM there; prebuilt runtime %s (no MSVC Build Tools needed)' % os.path.basename(runtime))
+            return ['--runtime', runtime, '--llvm', llvm]
+        why = next((l for l in r.stdout.splitlines() if 'runtime package' in l), '').strip()
+        say('   the prebuilt runtime cannot be used (%s): everything is built here' % why[:300])
     vsw = os.path.join(os.environ.get('ProgramFiles(x86)', r'C:\Program Files (x86)'), 'Microsoft Visual Studio', 'Installer', 'vswhere.exe')
     ok = os.path.exists(vsw) and subprocess.run([vsw, '-latest', '-products', '*', '-requires', 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64',
                                                  '-property', 'installationPath'], capture_output=True, text=True).stdout.strip()
     if not ok:
-        say('3. Tools: the MSVC Build Tools are missing.')
-        sys.exit('3. Tools: the MSVC Build Tools are missing. Install them with this command (it asks for administrator rights), then '
-                 'start the installer again:\n\n  winget install Microsoft.VisualStudio.2022.BuildTools --override "--quiet --wait '
-                 '--add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"\n')
+        raise Stop('the MSVC Build Tools are missing (they cannot be installed silently)',
+                   'Install them with this command (it asks for administrator rights), then start the installer again:  winget install '
+                   'Microsoft.VisualStudio.2022.BuildTools --override "--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"')
     extra = []                                  # Dear ImGui is optional (the F1 menu): setup.py --only deps passes without it
     try:
         extra = ['--imgui', fetch('imgui')]
     except (Exception, SystemExit) as e:        # fetch() exits on a bad hash; only the menu is lost
-        say('3. Tools: WARNING: Dear ImGui not available (%s): the settings menu (F1) is left out of the build' % e)
-    if subprocess.run([sys.executable, os.path.join(REPO, 'scripts', 'setup.py'), '--only', 'deps', '--dump', dump], capture_output=True).returncode == 0:
-        say('3. Tools: all found where setup.py looks')
+        say('   WARNING: Dear ImGui not available (%s): the settings menu (F1) is left out of the build' % e)
+    if subprocess.run([sys.executable, os.path.join(HERE, 'setup.py'), '--only', 'deps', '--dump', dump], capture_output=True).returncode == 0:
+        say('   all found where setup.py looks')
         return extra
     args = []
     for name, flag in (('llvm', '--llvm'), ('sdl3', '--sdl3'), ('vulkan-headers', '--vulkan-headers'), ('glslang', '--glslang')):
         args += [flag, fetch(name)]
     args += ['--suyu', fetch_suyu()]
-    say('3. Tools: all there')
+    say('   all there')
     return args + extra
 
 
-def main():
-    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument('--no-gui', action='store_true')
-    ap.add_argument('--base'), ap.add_argument('--update'), ap.add_argument('--keys'), ap.add_argument('--dump'), ap.add_argument('--firmware')
-    ap.add_argument('--jobs', type=int)
-    ap.add_argument('--prepare-only', action='store_true', help='stop before the build (steps 1-3 only)')
-    a = ap.parse_args()
-    step_packages()
-    ask_files(a)
-    dump = step_dump(a)
-    tool_args = step_tools(dump)
-    if a.prepare_only:
-        say('prepared: the build itself is not started (--prepare-only)')
-        return 0
-    say('4. Build: scripts/setup.py (30 minutes to a few hours the first time; it can be stopped and started again)')
-    cmd = [sys.executable, os.path.join(REPO, 'scripts', 'setup.py'), '--dump', dump] + tool_args
+def step_tools(cx):
+    a = cx.a
+    if a.dry_run:
+        have = runtime_local(a)
+        return 'dry', ('would check LLVM/clang 9 (download it into deps\\llvm, SHA-256 checked, if missing); prebuilt runtime at hand: no MSVC needed'
+                       if have else 'would check LLVM, SDL3, Vulkan-Headers, glslang, suyu (download what is missing, SHA-256 checked) and the MSVC Build Tools')
+    cx.setup_args += tools_args(cx.dump, find_runtime(a))
+    return 'done', 'tools ready'
+
+
+# ------------------------------------------------------------------------------------------------------ 7. media
+def step_media(cx):
+    a = cx.a
+    import fetch_media
+    dll = os.path.join(DEPS, 'opus', 'libopus-0.dll')
+    if a.dry_run:
+        msg = 'libopus is already in deps\\opus' if os.path.isfile(dll) else 'would download libopus (music) into deps\\opus, SHA-256 checked'
+    else:
+        got = fetch_media.fetch_opus(DEPS)
+        msg = 'libopus ready' if got else 'no music (libopus could not be fetched; the game runs silent)'
+    codecs = fetch_media.check_codecs()
+    missing = [k for k, v in codecs.items() if v is not True]
+    if missing:
+        msg += '; movie codecs missing or unknown (Store links printed above): ' + ', '.join(missing)
+    return ('dry' if a.dry_run else 'done'), msg
+
+
+# ------------------------------------------------------------------------------------------------------ 7b. dlc
+def dlc_rows(paths):
+    """{index: label} from the add-on content ids [01006A800016Fxxx] in the file names of DLC packages / folders of them
+    (same rule as tools/audit/dlc_list.py: id = application id + 0x1000 + index). Only names are read."""
+    app = 0x01006A800016E000
+    names = []
+    for p in paths:
+        if os.path.isdir(p):
+            names += sorted(os.listdir(p))
+        else:
+            names.append(os.path.basename(p))
+    rows = {}
+    for name in names:
+        for m in re.finditer(r'\[([0-9A-Fa-f]{16})\]', name):
+            index = int(m.group(1), 16) - app - 0x1000
+            if 0 < index < 0x1000:
+                rows[index] = ' '.join(re.sub(r'\[[^\]]*\]', ' ', os.path.splitext(name)[0]).split())
+    return rows
+
+
+def step_dlc(cx):
+    """build\\config\\dlc.txt, which the runtime reads (nnmisc.c aoc_load; SSBU_DLC_LIST overrides the path). The DLC
+    fighters, stages and costumes are data of the game update: an owned add-on content only unlocks them, so the DLC packages
+    themselves are never opened or read by the runtime (checked in runtime/nnmisc.c: nothing in nnfs.c touches add-on data)."""
+    out = os.environ.get('SSBU_DLC_LIST') or os.path.join(BUILD, 'config', 'dlc.txt')
+    rows = dlc_rows(cx.dlc)
+    if not rows:
+        return 'skip', 'no DLC package named (give --dlc, or put them next to the game); nothing is unlocked'
+    old = {}
+    try:
+        for line in open(out, encoding='utf-8'):
+            m = re.match(r'\s*(0x[0-9a-fA-F]+|\d+)\s*(?:#\s*(.*))?$', line)
+            if m:
+                old[int(m.group(1), 0)] = (m.group(2) or '').strip()
+    except OSError:
+        pass
+    merged = dict(old)
+    merged.update(rows)
+    msg = '%d add-on contents listed (they unlock their content)' % len(merged)
+    if merged == old:
+        return 'skip', msg + '; %s is already up to date' % out
+    if cx.a.dry_run:
+        return 'dry', 'would write %s: %s' % (out, msg)
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    with open(out, 'w', encoding='utf-8') as f:
+        f.write('# add-on contents owned (index = add-on content id - application id - 0x1000); written by scripts/install.py\n')
+        for index in sorted(merged):
+            f.write('0x%03x   # %s\n' % (index, merged[index]))
+    say('   the data of the DLC fighters is part of the game update; the game does not read the DLC packages, only this list')
+    return 'done', msg
+
+
+# ------------------------------------------------------------------------------------------------------ 8. build
+def step_build(cx, P):
+    """setup.py, its "[k/11] name ..." lines forwarded as step events with the ids of setup.py's steps."""
+    a, st = cx.a, cx.st
+    if a.dry_run:
+        done = {}
+        try:
+            with open(os.path.join(BUILD, 'state.json')) as f:
+                done = json.load(f).get('done', {})
+        except (OSError, ValueError):
+            pass
+        for s in SETUP_STEPS:
+            P.start(s)
+            if s in done and s not in ('deps', 'stage'):
+                P.end(s, 'skip', 'done earlier (build\\state.json)')
+            else:
+                P.end(s, 'dry', 'would run scripts/setup.py step %s' % s)
+        return
+    cmd = [sys.executable, os.path.join(HERE, 'setup.py'), '--dump', cx.dump] + cx.setup_args
     if a.jobs:
         cmd += ['--jobs', str(a.jobs)]
-    r = subprocess.run(cmd)
-    if r.returncode:
-        sys.exit('the build stopped (code %d): see build\\logs, then start the installer again: it goes on from there' % r.returncode)
-    say('5. Done: double-click "Play SSBU.bat"')
+    if cx.rebuild_from and cx.rebuild_from in SETUP_STEPS:
+        cmd += ['--from', cx.rebuild_from]
+        say('   after the update, setup.py repeats from step %s (the compilers redo only what changed)' % cx.rebuild_from)
+    say('   scripts/setup.py (30 minutes to a few hours the first time; it can be stopped and started again)')
+    cur = {'id': None}
+    scale = 12.0 / cx.jobs
+
+    def est(s):
+        return int(EST[s] * scale) if s in ('compile', 'nro') else EST[s]
+
+    def on_line(line):
+        m = re.match(r'\[(\d+)/(\d+)\] (\w+)(.*)$', line)
+        if not m or m.group(3) not in SETUP_STEPS:
+            m2 = re.match(r'FAILED at step (\w+): (.*)', line)
+            if m2 and cur['id']:
+                P.end(cur['id'], 'fail', m2.group(2)[:300])
+                cur['id'] = None
+            return
+        s, rest = m.group(3), m.group(4).strip()
+        if rest == '...':
+            if cur['id'] and cur['id'] != s:
+                P.end(cur['id'], 'done')
+            cur['id'] = s
+            P.start(s)
+        elif rest.startswith(': ok'):
+            P.t0.setdefault(s, time.time())
+            P.end(s, 'done', '', secs=secs_of(rest[4:]) or None)
+            st.done(s, secs_of(rest[4:]), '')
+            cur['id'] = None
+        elif 'skipped' in rest:
+            P.start(s)
+            P.end(s, 'skip', rest.lstrip(': '))
+        elif 'would run' in rest:
+            P.start(s)
+            P.end(s, 'dry', 'would run')
+
+    def hb():
+        s = cur['id']
+        return (s, time.time() - P.t0.get(s, time.time()), est(s)) if s in ('compile', 'nro', 'lift', 'link') else None
+    rc, tail = stream(cmd, on_line=on_line, hb=hb, prefix='   ')
+    if rc:
+        if cur['id']:
+            P.end(cur['id'], 'fail', 'see build\\logs')
+        raise Stop('the build stopped (code %d): %s' % (rc, next((l for l in reversed(tail) if l.strip()), '')[:300]),
+                   'See build\\logs, then start the installer again: it goes on from there.')
+    if cur['id']:
+        P.end(cur['id'], 'done')
+
+
+# ------------------------------------------------------------------------------------------------------ 9. shortcuts, 10. unblock
+def step_shortcuts(cx):
+    import shortcuts
+    res = shortcuts.create_all(REPO, dry=cx.a.dry_run)
+    for l in res:
+        say('   ' + l)
+    bad = [l for l in res if l.startswith('fail')]
+    if bad:
+        return 'skip', 'shortcuts not made: ' + bad[0]       # not worth stopping a finished install
+    if cx.a.dry_run:
+        return 'dry', 'would make %d shortcut(s)' % len(res)
+    return 'done', '%d shortcut(s): %s' % (len(res), ', '.join(l.split(' ', 1)[0] for l in res))
+
+
+_UNBLOCK_PS = r"""
+$ErrorActionPreference = 'SilentlyContinue'
+$dirs = @($env:SSBU_UNBLOCK -split '\|' | Where-Object { $_ -and (Test-Path -LiteralPath $_) })
+if ($dirs.Count) {
+  Get-ChildItem -LiteralPath $dirs -Recurse -File |
+    Where-Object { $_.Extension -in '.exe','.dll','.ps1','.bat','.cmd','.py','.pyd' } | Unblock-File
+}
+Get-ChildItem -LiteralPath $env:SSBU_REPO -File -Filter *.bat | Unblock-File
+"""
+
+
+def step_unblock(cx):
+    dirs = [os.path.join(REPO, 'tools'), os.path.join(REPO, 'scripts'), os.path.join(BUILD, 'work')]
+    if cx.a.dry_run:
+        return 'dry', 'would run Unblock-File over tools, scripts, build\\work and the .bat files'
+    if os.name != 'nt':
+        return 'skip', 'Windows only'
+    env = dict(os.environ, SSBU_UNBLOCK='|'.join(dirs), SSBU_REPO=REPO)
+    r = subprocess.run(['powershell', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', _UNBLOCK_PS],
+                       capture_output=True, text=True, errors='replace', env=env, timeout=600)
+    return ('done', 'files unblocked') if r.returncode == 0 else ('skip', 'Unblock-File did not run (code %d)' % r.returncode)
+
+
+# ------------------------------------------------------------------------------------------------------ main
+class Ctx:
+    def __init__(self, a, st):
+        self.a, self.st = a, st
+        self.dump = self.base = self.update = self.keys = self.firmware = self.firmware_kind = None
+        self.dlc, self.setup_args, self.blockers = [], [], []
+        self.restart_from = None
+        self.rebuild_from = a.reexec if a.reexec and a.reexec != '-' else None
+        self.jobs = a.jobs or min(24, os.cpu_count() or 4)
+
+
+def make_plan(cx):
+    a = cx.a
+    ids = ['update', 'precheck', 'packages', 'inputs', 'dump', 'tools', 'media', 'dlc']
+    if not a.prepare_only:
+        ids += SETUP_STEPS
+        if not a.no_shortcuts:
+            ids.append('shortcuts')
+        ids.append('unblock')
+    plan = []
+    for s in ids:
+        e = EST[s]
+        if s in ('compile', 'nro'):
+            e = int(e * 12.0 / cx.jobs)
+        if s == 'dump' and (a.dump or dump_ok(os.path.join(BUILD, 'dump'))):
+            e = 5
+        if s == 'update' and a.no_self_update:
+            e = 0
+        plan.append({'id': s, 'title': TITLES[s], 'est_s': e})
+    return plan
+
+
+def parse(argv):
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0], allow_abbrev=False)
+    ap.add_argument('--no-gui', action='store_true', help='never open a dialog (the installer window passes this)')
+    ap.add_argument('--progress-json', action='store_true', help='also print "##ssbu {json}" progress lines')
+    ap.add_argument('--dry-run', action='store_true', help='say what each step would do ("would ..."), change nothing')
+    ap.add_argument('--base', help='the base game: .xci / .nsp / .nsz / .nca, or a folder holding it')
+    ap.add_argument('--update', help='the update 13.0.4 or 13.0.5: .nsp / .nsz / .nca, or a folder holding it')
+    ap.add_argument('--dlc', action='append', default=[], help='a DLC package (repeatable); its add-on id is read from the file name and listed in build/config/dlc.txt')
+    ap.add_argument('--keys', help='your prod.keys (used where it is, never copied)')
+    ap.add_argument('--dump', help='a dump folder you already have (exefs\\ and romfs\\ inside)')
+    ap.add_argument('--firmware', help='your firmware folder (.nca files) or the extracted system fonts')
+    ap.add_argument('--jobs', type=int, help='parallel compiler jobs')
+    ap.add_argument('--prepare-only', action='store_true', help='stop before the build (steps 1-7 only)')
+    ap.add_argument('--runtime', help='prebuilt runtime package (zip or folder) to use instead of the one of the GitHub Release')
+    ap.add_argument('--no-runtime', action='store_true', help='build everything here, the exe too (needs the MSVC Build Tools)')
+    ap.add_argument('--no-shortcuts', action='store_true', help='do not make the desktop / Start menu shortcuts')
+    ap.add_argument('--no-self-update', action='store_true', help='do not look for a newer version of this program first')
+    ap.add_argument('--reexec', help=argparse.SUPPRESS)       # internal: started again after a self-update (earliest setup step to repeat)
+    return ap.parse_args(argv)
+
+
+def run_step(cx, P, sid, fn):
+    P.start(sid)
+    t0 = time.time()
+    say('== %s' % TITLES[sid])
+    try:
+        state, msg = fn(cx)
+    except Stop:
+        P.end(sid, 'fail', sys.exc_info()[1].msg[:300])
+        raise
+    except Exception as e:                       # a bug or a missing module: reported like a stop
+        P.end(sid, 'fail', '%s: %s' % (type(e).__name__, e))
+        raise Stop('%s failed: %s: %s' % (sid, type(e).__name__, e), 'See build\\logs; start the installer again, or report this message.')
+    secs = time.time() - t0
+    say('   -> %s: %s' % (state, msg))
+    P.end(sid, state, msg[:300], secs)
+    if state == 'done' and not cx.a.dry_run:
+        cx.st.done(sid, secs, msg)
+
+
+def main(argv=None):
+    global PROG
+    argv = list(sys.argv[1:] if argv is None else argv)
+    a = parse(argv)
+    PROG = P = Prog(a.progress_json)
+    st = State(a.dry_run)
+    cx = Ctx(a, st)
+    try:
+        if not a.reexec:
+            P.emit(ev='plan', steps=make_plan(cx))
+            run_step(cx, P, 'update', step_update)
+            if cx.restart_from:                  # new files: start again once with them
+                rc = subprocess.run([sys.executable, os.path.abspath(__file__)] + argv + ['--no-self-update', '--reexec', cx.restart_from]).returncode
+                return rc
+        run_step(cx, P, 'precheck', step_precheck)
+        run_step(cx, P, 'packages', step_packages)
+        run_step(cx, P, 'inputs', step_inputs)
+        run_step(cx, P, 'dump', step_dump)
+        run_step(cx, P, 'tools', step_tools)
+        run_step(cx, P, 'media', step_media)
+        run_step(cx, P, 'dlc', step_dlc)
+        if a.prepare_only:
+            say('prepared: the build itself is not started (--prepare-only)')
+            P.emit(ev='done', ok=not cx.blockers, msg='prepared; the build is not started (--prepare-only)')
+            return 0
+        say('== Build the game')
+        step_build(cx, P)
+        if not a.no_shortcuts:
+            run_step(cx, P, 'shortcuts', step_shortcuts)
+        run_step(cx, P, 'unblock', step_unblock)
+    except Stop as e:
+        say('STOPPED: %s' % e.msg)
+        if e.hint:
+            say(e.hint)
+        P.emit(ev='error', msg=e.msg, hint=e.hint)
+        return 1
+    if a.dry_run:
+        msg = 'dry run finished, nothing was changed' + ('; it would stop: ' + '; '.join(cx.blockers) if cx.blockers else '')
+        say(msg)
+        P.emit(ev='done', ok=not cx.blockers, msg=msg)
+        return 0
+    say('Done: double-click "Play SSBU.bat" (or the SSBU native shortcut)')
+    P.emit(ev='done', ok=True, msg='Ready: double-click "Play SSBU.bat"')
     return 0
 
 

@@ -9,16 +9,23 @@ tables, the script-module libraries) is **generated on your PC from your own dum
 Nothing has to be installed first.
 
 1. Download this repository (Code, Download ZIP) and unpack it, or `git clone` it.
-2. Double-click **`Install SSBU.bat`**. If Python 3.10 or newer is not on the PC, it offers to install it (the official
-   python.org installer, checked against its published SHA-256, for your user only). If the Microsoft C++ Build Tools are
-   missing, the window offers to install them through winget (Windows asks for administrator rights), and the LLVM 9
-   installer does the same once. The installer window opens: choose your own files (the base game as `.nsp`,
-   `.xci` or `.nsz`, the 13.0.4 or 13.0.5 update as `.nsp` or `.nsz`, your `prod.keys`, and your firmware dump for the system
-   fonts, which the game needs) or a dump folder you already have, and press **Install**. It shows each step, a progress bar and the log. The installer makes the dump,
-   downloads the missing tools from their official pages (each archive is checked against the SHA-256 written in
-   `scripts/install.py` before it is used), then builds. The first build takes 30 minutes to a few hours; if it stops,
-   double-click it again and it goes on from there.
-3. Double-click **`Play SSBU.bat`** (your saves go to `build\saves`).
+2. Double-click **`Install SSBU.bat`**. It puts a private Python into `deps\python` (the python.org embeddable package,
+   checked against its SHA-256, plus pip and `requirements.txt`; nothing is installed system-wide, PATH and the registry
+   are not touched, deleting `deps\` removes it), clears the downloaded-file mark (Unblock-File) and opens the installer
+   window (`scripts\installer_window.ps1`). The window has already looked for your files: `prod.keys` and firmware in
+   `%USERPROFILE%\.switch` and in the folders of yuzu, Ryujinx, suyu, sudachi and eden (also portable `user\` folders and
+   their game folders), the base game (`.xci`, `.nsp`, `.nsz`, `.nca` or an extracted dump folder), the 13.0.4 or 13.0.5
+   update and the DLC `.nsp` beside it (`scripts\find_inputs.py`; key files are checked by key name only, no key value
+   is read into anything). It also checks the PC (64-bit Windows 10/11, CPU, RAM, free disk measured against what a build
+   takes, Vulkan, the movie codecs: `scripts\precheck.py`). Change what it found if needed and press **Install**. It shows
+   each step, a progress bar with the time left, and the log. **Dry run** shows what would happen and changes nothing.
+   The installer (`scripts\install.py`) first updates this folder from GitHub (`scripts\update.py`: a git pull, or for a
+   ZIP copy only the changed files; the build then redoes only what changed), makes the dump, lists your DLC for the game
+   (`build\config\dlc.txt`), downloads libopus for the music (`scripts\fetch_media.py`), uses the **prebuilt runtime** of the
+   GitHub Release when there is one for this version (below: then only LLVM 9 is needed, no Visual Studio), downloads
+   the missing tools from their official pages (each archive checked against the SHA-256 written in `scripts/install.py`),
+   builds, and makes a desktop and Start menu shortcut. If it stops, double-click it again: it goes on from there (Resume).
+3. Double-click **`Play SSBU.bat`** or the **SSBU native** shortcut (your saves go to `build\saves`).
 
 The rest of this page is the same build done by hand, step by step.
 
@@ -31,6 +38,38 @@ python scripts/setup.py --dump <your dump folder> --suyu <folder> [--llvm ... --
 ```
 
 One command, eleven resumable steps. When it ends it prints how to start the game.
+
+## With the prebuilt runtime (no MSVC Build Tools)
+
+A GitHub Release can carry `ssbu-runtime-<commit>.zip`: this project's own runtime, prebuilt (`ssbu_native.exe`,
+`SDL3.dll`, `ssbu_glslang.dll`, their licences and a `manifest.json` with the SHA-256 of each file). Nothing of the game
+is in it: since `runtime/game_data.h`, everything the exe needs that is derived from a dump (the SDK data symbols, the
+module list, the lifted SDK functions, the exception-table test vectors) lives in the game DLL, which is built on your
+PC. With the package, your PC builds only the game DLL and the script-module DLLs, with **LLVM/clang 9 alone**: no MSVC
+Build Tools, no Windows SDK, no SDL3 / Vulkan-Headers / glslang / suyu.
+
+```
+python scripts/setup.py --dump <your dump folder> --runtime <ssbu-runtime-....zip>
+```
+
+`scripts/install.py` does this by itself when `RUNTIME_RELEASE` in it names the Release asset of this version (the zip is
+downloaded into `deps/` and checked against the SHA-256 written there), or when a `ssbu-runtime-*.zip` is in `deps/`
+(`--runtime <zip>` names one, `--no-runtime` builds everything as above). A package is used only by the version of the
+sources it was built from (`manifest.json` holds a digest of the tree; `--runtime-any-tree` overrides).
+
+How the game libraries are built without MSVC (`RECOMP_NOCRT=1`, `tools/lifter/build.py`): the lifted code includes only
+`<stdint.h>` (clang's own), `<string.h>`, `<math.h>` and `<setjmp.h>`, which come from `runtime/nocrt/` with the same
+declarations as the Universal CRT's (objects compiled both ways are byte-identical but for the COFF time stamp); the
+functions they call (`memcpy`, `memset`, `sqrt`, `fma`, `floor`, ... and `__chkstk`, `_setjmp`, `longjmp`) come from
+`ucrtbase.dll` and `ntdll.dll`, which every Windows 10 and 11 has, through import libraries `lld-link` makes from the
+`.def` files in `runtime/nocrt/`; the DLLs are linked by `lld-link` with no C runtime and no entry point. `--nocrt` builds
+the game libraries this way while still building the exe with MSVC.
+
+Making the package (maintainers; needs the MSVC Build Tools and the tools of the table below, no dump):
+`python scripts/make_release.py [--opus <opus.dll>]`. It builds the exe with `tools/lifter/build.py host` (linked against
+`runtime/nocrt/ssbu_game.def`, not against a game DLL), audits the package (only the listed files; the exe's linker map
+names only the runtime's own objects; no path or name of the PC; with `--against <build\work>` none of a dump build's
+tables is in any file), writes `dist/ssbu-runtime-<commit>.zip` and prints its SHA-256 for `RUNTIME_RELEASE`.
 
 ## What you need
 

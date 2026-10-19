@@ -232,7 +232,9 @@ void sdk_jmp_restore(Ctx *c, SdkJmpRec *r) {
     for (int i = 0; i < 8; i++) { c->v[8 + i].d[0] = r->d[i]; c->v[8 + i].d[1] = 0; }
     c->x[0] = (uint64_t)(r->value ? r->value : 1);
 }
-void sdk_longjmp(Ctx *c) {
+/* The longjmp itself is made in the game DLL (game_data.c sdk_longjmp), by the C library whose setjmp filled r->host:
+ * the lifted SDK code lives there since the exe holds nothing of the game (game_data.h). */
+SdkJmpRec *sdk_longjmp_target(Ctx *c) {
     SdkJmpRec *r = NULL;
     for (int i = 0; t_jmp && i < SDK_JMP_SLOTS; i++) if (t_jmp[i].key == c->x[0] && t_jmp[i].stamp) r = &t_jmp[i];
     if (!r) {
@@ -240,7 +242,7 @@ void sdk_longjmp(Ctx *c) {
         guest_trap("lifted SDK longjmp without setjmp", c->x[30] - 4);
     }
     r->value = (int)c->x[1];
-    longjmp(r->host, 1);
+    return r;
 }
 
 /* ---------------------------------------------------------------- registration

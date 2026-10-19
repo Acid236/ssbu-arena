@@ -26,6 +26,12 @@ libopus (the music) is optional: --opus, OPUS_DLL or <repo>/deps/opus; without i
 game's Opus streams are silent.
 Dear ImGui v1.91.9b (the in-game settings menu, F1) is optional too: --imgui, IMGUI_ROOT or <repo>/deps/imgui (a folder holding
 imgui.h and imgui.cpp); without it the build works and the menu is left out.
+
+With a prebuilt runtime package (--runtime <zip or folder>, made by scripts/make_release.py; scripts/install.py downloads
+the one of a GitHub Release) the exe, SDL3.dll and ssbu_glslang.dll come from the package and only the parts made from the
+dump are built here, with LLVM/clang 9 alone: no MSVC Build Tools, no Windows SDK, no SDL3 / Vulkan-Headers / glslang /
+suyu (RECOMP_NOCRT, tools/lifter/build.py). The package is used only by the tree it was built from (manifest.json).
+--nocrt builds the game libraries the same way without a package (the exe is then still linked here, with MSVC).
 """
 import argparse
 import json
@@ -43,6 +49,12 @@ STEPS = ['deps', 'stage', 'convert', 'modules', 'tables', 'lift', 'sdk', 'compil
 GAME_BUILDS = {0x39c7e90: '13.0.4', 0x39c8440: '13.0.5'}
 SDK_TEXT_SIZE = 0x540950
 EXE = 'ssbu_native.exe'
+# what step_stage copies into build/work: (repository folder, folder in work, only files ending with)
+STAGE_PLAN = [('runtime', '', None), ('tools/lifter', '', None), ('tools/nro', 'ro_study', '.py'), ('tools/audit', 'tools_audit', '.py'),
+              ('fighter_sdk', 'fighter_sdk', None), ('tests', 'tests', None), ('mods', '', None)]
+# files the build writes that may sit in a source folder of an in-tree build (all ignored by git): not part of the tree
+GENERATED_NAMES = {'sdklift_gen.c', 'sdkdata.c', 'sdklift_install.h', 'zstd_gen.c', 'nro_registry.c', 'fake_whitelist.h', 'fake_openlist.h',
+                   'difftest_gen.c', 'eh_tests.h', 'quad_tests.h', 'sdktest_data.h', 'imports_all.txt', 'sdklift_report.txt'}
 
 
 # ---------------------------------------------------------------------------------------------- helpers
@@ -82,6 +94,8 @@ class Ctx:
                 self.state = json.load(f)
         self.jobs = a.jobs or min(24, os.cpu_count() or 8)
         self.tools = {}                          # located tools, filled by deps
+        self.runtime_dir = None                  # the checked runtime package (load_runtime), or None: the exe is built here
+        self.nocrt = bool(a.nocrt or a.runtime)  # the game libraries with LLVM alone (tools/lifter/build.py RECOMP_NOCRT)
 
     @property
     def bin(self):                               # the converted dump of the build found by the convert step
@@ -110,6 +124,8 @@ class Ctx:
             env['SUYU_ROOT'] = t['suyu']
         if 'imgui' in t:
             env['IMGUI_ROOT'] = t['imgui']
+        if self.nocrt:
+            env['RECOMP_NOCRT'] = '1'
         env.update(extra)
         return env
 
@@ -131,6 +147,86 @@ class Ctx:
         return tail
 
 
+def tree_digest():
+    """SHA-256 over the sources the build stages (STAGE_PLAN without tests/), line ends normalised: a runtime package
+    (scripts/make_release.py) records the digest of the tree its exe was built from, and is used only by that tree."""
+    import hashlib
+    h = hashlib.sha256()
+    for src, _, ext in STAGE_PLAN:
+        if src == 'tests':
+            continue
+        rows = []
+        for root, dirs, files in os.walk(os.path.join(REPO, src)):
+            dirs[:] = [d for d in dirs if d not in ('__pycache__', 'out')]
+            for f in files:
+                if (ext and not f.endswith(ext)) or f in GENERATED_NAMES or f.endswith(('.pyc', '.obj', '.lib', '.dll', '.exe', '.pdb', '.map', '.exp')):
+                    continue
+                rows.append(os.path.relpath(os.path.join(root, f), REPO).replace(os.sep, '/'))
+        for rel in sorted(rows):
+            with open(os.path.join(REPO, rel), 'rb') as fh:
+                h.update(rel.encode() + b'\0' + fh.read().replace(b'\r\n', b'\n') + b'\0')
+    return h.hexdigest()
+
+
+def game_data_version():
+    import re
+    with open(os.path.join(REPO, 'runtime', 'game_data.h')) as f:
+        return int(re.search(r'#define GAME_DATA_VERSION (\d+)', f.read()).group(1))
+
+
+def sha256_file(path):
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, 'rb') as f:
+        for block in iter(lambda: f.read(1 << 20), b''):
+            h.update(block)
+    return h.hexdigest()
+
+
+def load_runtime(cx, where):
+    """The runtime package (folder or zip) -> its folder (a zip is unpacked into build/runtime), checked: every file against
+    manifest.json, the tree digest and the game-data interface against this tree. Returns the manifest."""
+    import zipfile
+    where = os.path.abspath(where)
+    if os.path.isfile(where):
+        dst = os.path.join(cx.build, 'runtime')
+        stamp = os.path.join(dst, '.from')
+        key = '%s %d %d' % (where, os.path.getsize(where), int(os.path.getmtime(where)))
+        if not os.path.exists(stamp) or open(stamp).read() != key:
+            shutil.rmtree(dst, ignore_errors=True)
+            with zipfile.ZipFile(where) as z:
+                for n in z.namelist():
+                    if '/' in n or '\\' in n or n.startswith('.') or ':' in n:
+                        raise Fail('the runtime package %s holds an unexpected path %r' % (where, n))
+                z.extractall(dst)
+            with open(stamp, 'w') as f:
+                f.write(key)
+        where = dst
+    mf = os.path.join(where, 'manifest.json')
+    if not os.path.isfile(mf):
+        raise Fail('%s is not a runtime package (no manifest.json)' % where)
+    with open(mf) as f:
+        m = json.load(f)
+    for name, info in m.get('files', {}).items():
+        p = os.path.join(where, name)
+        if not os.path.isfile(p) or sha256_file(p) != info['sha256']:
+            raise Fail('runtime package: %s is missing or does not match its SHA-256 in manifest.json' % name)
+    for need in (EXE, 'SDL3.dll', 'ssbu_glslang.dll'):
+        if need not in m.get('files', {}):
+            raise Fail('runtime package: %s is not in it' % need)
+    if m.get('game_data_version') != game_data_version():
+        raise Fail('runtime package: game-data interface %s, this tree has %d: use the package made from this version of the '
+                   'tree, or build everything here without --runtime (needs the MSVC Build Tools)' % (m.get('game_data_version'), game_data_version()))
+    if m.get('tree_digest') != tree_digest():
+        if not cx.a.runtime_any_tree:
+            raise Fail('runtime package: it was built from another version of the sources (commit %s): use the package of this '
+                       'version (scripts/install.py fetches it), or build everything here without --runtime (needs the MSVC Build '
+                       'Tools). --runtime-any-tree uses it anyway (only if the runtime sources did not change).' % str(m.get('source_commit'))[:10])
+        say('  WARNING: the runtime package was built from another version of the sources (--runtime-any-tree)')
+    cx.runtime_dir = where
+    return m
+
+
 def find_first(cands, probe):
     for c in cands:
         if c and os.path.isdir(c) and probe(c):
@@ -142,15 +238,30 @@ def find_first(cands, probe):
 def step_deps(cx):
     a = cx.a
     say('  python %s' % sys.version.split()[0])
+    if a.runtime:
+        m = load_runtime(cx, a.runtime)
+        say('  runtime package: %s (commit %s, built %s): the exe is not built here' % (cx.runtime_dir, str(m.get('source_commit'))[:10], m.get('built')))
+    mode = 'package' if a.runtime else 'nocrt' if cx.nocrt else 'msvc'
+    if cx.state.get('mode', mode) != mode:               # linked another way than this build folder was: link and check again
+        for s in ('link', 'check'):
+            cx.state.setdefault('done', {}).pop(s, None)
+    cx.state['mode'] = mode
+    if a.runtime:                                         # another package than the one linked last time (an update): link and check again
+        exe_sha = m.get('files', {}).get(EXE, {}).get('sha256')
+        if cx.state.get('runtime_exe') != exe_sha:
+            for s in ('link', 'check'):
+                cx.state.setdefault('done', {}).pop(s, None)
+        cx.state['runtime_exe'] = exe_sha
     missing = []
-    for mod, pkg in (('numpy', 'numpy'), ('lz4.block', 'lz4'), ('zstandard', 'zstandard'), ('PIL', 'Pillow'), ('unicorn', 'unicorn')):
+    # Pillow (gen_sdktest.py) and unicorn (the differential test) are needed only when the exe is built here
+    for mod, pkg in (('numpy', 'numpy'), ('lz4.block', 'lz4'), ('zstandard', 'zstandard')) + ((('PIL', 'Pillow'), ('unicorn', 'unicorn')) if not a.runtime else ()):
         try:
             __import__(mod)
         except ImportError:
             missing.append(pkg)
     if missing:
         raise Fail('missing Python packages: %s   (pip install %s)' % (', '.join(missing), ' '.join(missing)))
-    say('  python packages: numpy lz4 zstandard Pillow unicorn: ok')
+    say('  python packages: numpy lz4 zstandard%s: ok' % ('' if a.runtime else ' Pillow unicorn'))
 
     deps = os.path.join(REPO, 'deps')
     llvm = find_first([a.llvm, os.environ.get('LLVM_ROOT'), r'C:\llvm-9.0.0', r'C:\Program Files\LLVM', os.path.join(deps, 'llvm')],
@@ -165,11 +276,20 @@ def step_deps(cx):
     cx.tools['clang'] = clang
     probe = os.path.join(cx.build, 'probe')
     os.makedirs(probe, exist_ok=True)
-    with open(os.path.join(probe, 'p.c'), 'w') as f:
-        f.write('#include <windows.h>\n#include <stdio.h>\nint main(void){puts("ok");return 0;}\n')
-    r = subprocess.run([clang, os.path.join(probe, 'p.c'), '-o', os.path.join(probe, 'p.exe'), '-luser32'], capture_output=True, text=True)
-    if r.returncode or subprocess.run([os.path.join(probe, 'p.exe')], capture_output=True, text=True).stdout.strip() != 'ok':
-        raise Fail('clang cannot compile and link a Windows program: install the MSVC Build Tools (C++ x64 tools) and a Windows 10/11 SDK\n' + r.stderr[-800:])
+    if cx.nocrt:
+        probe_nocrt(clang, probe)
+        say('  clang + lld-link without the C runtime (the game libraries): ok')
+    cx.tools['msvc'] = probe_msvc(clang, probe)
+    if a.runtime:
+        say('  MSVC Build Tools / Windows SDK: %s (not needed with the runtime package%s)' % (
+            'found' if cx.tools['msvc'] else 'not found', '' if cx.tools['msvc'] else '; the check step skips the differential test'))
+        cx.tools['opus'] = next((os.path.join(cx.runtime_dir, n) for n in ('opus.dll', 'libopus-0.dll') if os.path.isfile(os.path.join(cx.runtime_dir, n))), None)
+        dump_checks(cx, a)
+        cx.state['tools'] = cx.tools
+        return
+    if not cx.tools['msvc']:
+        raise Fail('clang cannot compile and link a Windows program: install the MSVC Build Tools (C++ x64 tools) and a Windows 10/11 SDK, '
+                   'or use a prebuilt runtime package (--runtime, scripts/install.py)')
     say('  clang + MSVC linker + Windows SDK: ok')
 
     for key, opt, envv, sub, probe_rel in (
@@ -224,6 +344,46 @@ def step_deps(cx):
         say('  WARNING: Dear ImGui not found: the settings menu (F1) will be left out of the build (--imgui <folder with imgui.h>, '
             'IMGUI_ROOT, deps\\imgui, or scripts/install.py fetches it; BUILDING.md)')
 
+    dump_checks(cx, a)
+    cx.state['tools'] = cx.tools
+
+
+def probe_msvc(clang, probe):
+    """True when clang can build a Windows program with the MSVC linker and the Windows SDK."""
+    with open(os.path.join(probe, 'p.c'), 'w') as f:
+        f.write('#include <windows.h>\n#include <stdio.h>\nint main(void){puts("ok");return 0;}\n')
+    r = subprocess.run([clang, os.path.join(probe, 'p.c'), '-o', os.path.join(probe, 'p.exe'), '-luser32'], capture_output=True, text=True)
+    return not r.returncode and subprocess.run([os.path.join(probe, 'p.exe')], capture_output=True, text=True).stdout.strip() == 'ok'
+
+
+def probe_nocrt(clang, probe):
+    """The game libraries' way (build.py RECOMP_NOCRT): the headers of runtime/nocrt, lld-link, ucrtbase.dll / ntdll.dll."""
+    lld = os.path.join(os.path.dirname(clang), 'lld-link.exe')
+    if not os.path.isfile(lld):
+        raise Fail('%s not found: the LLVM 9.0.0 package has it (bin\\lld-link.exe)' % lld)
+    nocrt = os.path.join(REPO, 'runtime', 'nocrt')
+    src = os.path.join(probe, 'nocrt_probe.c')
+    with open(src, 'w') as f:
+        f.write('#include <stdint.h>\n#include <string.h>\n#include <math.h>\n#include <setjmp.h>\nint _fltused;\n'
+                '__declspec(dllexport) double probe(double *d, const double *s, float x) { char big[8192]; memset(big, 1, sizeof big);'
+                ' memcpy(d, s, 8); return sqrt(*d) + fmaf(x, x, x) + trunc(*d) + big[(int)x & 8191]; }\n')
+    obj, dll = os.path.join(probe, 'nocrt_probe.obj'), os.path.join(probe, 'nocrt_probe.dll')
+    r = subprocess.run([clang, '-c', '-O1', '-nostdlibinc', '-isystem', nocrt, '-DGAME_NOCRT', src, '-o', obj], capture_output=True, text=True)
+    if r.returncode:
+        raise Fail('clang cannot compile with the headers of runtime/nocrt:\n' + (r.stdout + r.stderr)[-800:])
+    libs = []
+    for n in ('ucrtbase_min', 'ntdll_min'):
+        lib = os.path.join(probe, n + '.lib')
+        r = subprocess.run([lld, '/machine:x64', '/def:' + os.path.join(nocrt, n + '.def'), '/out:' + lib], capture_output=True, text=True)
+        if r.returncode:
+            raise Fail('lld-link cannot make an import library from %s.def:\n%s' % (n, (r.stdout + r.stderr)[-800:]))
+        libs.append(lib)
+    r = subprocess.run([lld, '/dll', '/noentry', '/nodefaultlib', '/machine:x64', obj, '/out:' + dll] + libs, capture_output=True, text=True)
+    if r.returncode:
+        raise Fail('lld-link cannot link a DLL without the C runtime:\n' + (r.stdout + r.stderr)[-800:])
+
+
+def dump_checks(cx, a):
     # the dump
     dump = a.dump
     exefs = a.exefs or (os.path.join(dump, 'exefs') if dump else None)
@@ -248,7 +408,6 @@ def step_deps(cx):
         cx.state['sdk_roots'] = os.path.abspath(a.sdk_roots)
     elif not cx.state.get('sdk_roots'):
         cx.state['sdk_roots'] = os.path.join(REPO, 'tools', 'lifter', 'sdklift_roots.txt')
-    cx.state['tools'] = cx.tools
 
 
 def copy_if_changed(src, dst):
@@ -264,10 +423,8 @@ def copy_if_changed(src, dst):
 def step_stage(cx):
     """The sources are laid out the way the tools expect them (one folder, ro_study\\, tools_audit\\, fighter_sdk\\, tests\\),
     next to binaries\\ and romfs: the tools address the dump by relative paths."""
-    plan = [('runtime', '', None), ('tools/lifter', '', None), ('tools/nro', 'ro_study', '.py'), ('tools/audit', 'tools_audit', '.py'),
-            ('fighter_sdk', 'fighter_sdk', None), ('tests', 'tests', None), ('mods', '', None)]
     n = changed = 0
-    for src, dst, ext in plan:
+    for src, dst, ext in STAGE_PLAN:
         for root, dirs, files in os.walk(os.path.join(REPO, src)):
             dirs[:] = [d for d in dirs if d != '__pycache__']
             for f in files:
@@ -279,6 +436,12 @@ def step_stage(cx):
     for d in ('obj_host', os.path.join('tests', 'logs')):
         os.makedirs(os.path.join(cx.work, d), exist_ok=True)
     say('  %d source files, %d copied into %s' % (n, changed, cx.work))
+    if changed and getattr(cx, 'state', {}).get('done', {}).get('stage'):     # (make_release.py stages with a bare context)
+        # sources changed since the last build (scripts/update.py, an edit): the incremental steps run again and redo only
+        # what is older than its sources (objects, module DLLs, the links). A changed lifter still needs --from lift.
+        for s in ('compile', 'nro', 'link', 'check'):
+            cx.state['done'].pop(s, None)
+        say('  sources changed: compile, nro, link and check run again (only what changed is rebuilt)')
 
 
 def step_convert(cx):
@@ -340,8 +503,9 @@ def step_tables(cx):
     py = sys.executable
     cx.run('tables', [py, 'gen_imports.py'])
     cx.run('tables', [py, 'gen_sdkdata.py'])
-    cx.run('tables', [py, 'gen_sdktest.py'])
-    cx.run('tables', [py, 'gen_quad_tests.py'])
+    if not cx.runtime_dir:                    # host-only headers (the self-tests' reference data): not needed with a prebuilt exe
+        cx.run('tables', [py, 'gen_sdktest.py'])
+        cx.run('tables', [py, 'gen_quad_tests.py'])
     cx.run('tables', [py, 'gen_eh_tests.py'])
     for name, var in (('fake_whitelist.h', 'audit_whitelist'), ('fake_openlist.h', 'audit_openlist')):
         if not os.path.exists(os.path.join(w, name)):
@@ -401,6 +565,24 @@ def step_nro(cx):
 
 
 def step_link(cx):
+    if cx.runtime_dir:                        # the prebuilt runtime: copied and checked; only the game DLL is linked here
+        cx.run('link', [sys.executable, 'build.py', 'gamedll'], env=cx.env(**{k: v for k, v in build_env(cx).items() if k != 'RECOMP_NRO_SUFFIX'}))
+        with open(os.path.join(cx.runtime_dir, 'manifest.json')) as f:
+            files = json.load(f)['files']
+        for name in files:
+            if name.lower().endswith(('.exe', '.dll')):
+                shutil.copy2(os.path.join(cx.runtime_dir, name), os.path.join(cx.work, name))
+                if sha256_file(os.path.join(cx.work, name)) != files[name]['sha256']:
+                    raise Fail('%s does not match the runtime package after copying' % name)
+        for f in (EXE, 'SDL3.dll', 'ssbu_glslang.dll', 'ssbu_game_eh_o1.dll'):
+            if not os.path.exists(os.path.join(cx.work, f)):
+                raise Fail('%s was not produced' % f)
+        opus = [n for n in files if n.lower() in ('opus.dll', 'libopus-0.dll')]
+        say('  %s, SDL3.dll, ssbu_glslang.dll%s from the runtime package; ssbu_game_eh_o1.dll %.0f MB linked here' % (
+            EXE, ', ' + opus[0] if opus else '', os.path.getsize(os.path.join(cx.work, 'ssbu_game_eh_o1.dll')) / 1048576.0))
+        if not opus:
+            say('  WARNING: the runtime package has no libopus: music and the other Opus sounds will be silent')
+        return
     cx.run('link', [os.environ.get('COMSPEC', 'cmd.exe'), '/c', os.path.join(cx.work, 'build_glslang.bat')], env=cx.env())
     cx.run('link', [sys.executable, 'build.py', 'link'], env=cx.env(**{k: v for k, v in build_env(cx).items() if k != 'RECOMP_NRO_SUFFIX'}, RECOMP_EXE=EXE))
     exe = os.path.join(cx.work, EXE)
@@ -441,8 +623,17 @@ def step_check(cx):
     out = cx.run('check', [exe, main_elf, '5'], env=game_env(cx, SSBU_PAD_SELFTEST='1', SSBU_USERDATA=scratch), log='check_pad')
     line = next((l for l in reversed(out.splitlines()) if 'pad' in l.lower() and '/' in l), out.strip().splitlines()[-1] if out.strip() else '')
     say('  SSBU_PAD_SELFTEST: ' + line.strip())
+    out = cx.run('check', [exe, main_elf, '5'], env=game_env(cx, SSBU_CXXRT_SELFTEST='1', SSBU_USERDATA=scratch), log='check_cxxrt')
+    line = next((l for l in reversed(out.splitlines()) if l.startswith('=== self-test:')), '')
+    # the exception tables of main among the checks (eh_tests.h, read from the game DLL)
+    say('  SSBU_CXXRT_SELFTEST: ' + (line.strip() or 'no result line (logs/check_cxxrt.log)'))
+    if not line.rstrip().endswith(' 0 failed'):
+        say('  WARNING: the C++ runtime self-test reports failures (logs/check_cxxrt.log)')
     # the lifter's differential test against the Unicorn emulator, on a sample of the instruction shapes of main
     py, w = sys.executable, cx.work
+    if not cx.tools.get('msvc', True):
+        say('  differential test: skipped (it needs the MSVC Build Tools and the Windows SDK, which this PC does not have)')
+        return
     cx.run('check', [py, 'difftest.py', 'sample'], log='check_difftest')
     cx.run('check', [py, 'difftest.py', 'gen'], log='check_difftest')
     cx.run('check', [cx.tools['clang'], '-O0', '-w', '-fno-strict-aliasing', '-I', '.', 'difftest_gen.c', 'difftest_host.c', '-o', 'difftest.exe'], log='check_difftest')
@@ -484,9 +675,14 @@ def main():
     ap.add_argument('--imgui', help='Dear ImGui v1.91.9b source folder (imgui.h, imgui.cpp): the in-game settings menu (optional; BUILDING.md)')
     ap.add_argument('--sdk-roots', help='another list of SDK functions to lift (default: tools/lifter/sdklift_roots.txt)')
     ap.add_argument('--modules', help='script modules to build: all (default) or a comma list, e.g. lua2cpp_common,lua2cpp_mario')
+    ap.add_argument('--runtime', help='prebuilt runtime package (zip or folder, scripts/make_release.py): the exe is not built here, '
+                                      'and neither MSVC, the Windows SDK, SDL3, Vulkan-Headers, glslang nor suyu is needed')
+    ap.add_argument('--runtime-any-tree', action='store_true', help='use a runtime package made from another version of the sources')
+    ap.add_argument('--nocrt', action='store_true', help='build the game libraries with LLVM alone (the exe is still built here)')
     ap.add_argument('--redo', help='repeat this step')
     ap.add_argument('--from', dest='from_step', help='repeat this step and all after it')
     ap.add_argument('--only', help='run only this step')
+    ap.add_argument('--dry-run', action='store_true', help='check the tools and the dump (step deps), then list what would run')
     ap.add_argument('--status', action='store_true'), ap.add_argument('--steps', action='store_true'), ap.add_argument('--run', action='store_true')
     a = ap.parse_args()
     if a.steps:
@@ -521,6 +717,9 @@ def main():
             continue
         if s in done and s not in force and s not in ALWAYS:
             say('[%d/%d] %s: done earlier (%s), skipped' % (i + 1, len(STEPS), s, fmt(done[s]['secs'])))
+            continue
+        if a.dry_run and s != 'deps':
+            say('[%d/%d] %s: would run' % (i + 1, len(STEPS), s))
             continue
         say('[%d/%d] %s ...' % (i + 1, len(STEPS), s))
         t0 = time.time()
