@@ -333,14 +333,14 @@ static int lf_tables(uint64_t service, uint64_t *fsinfo, uint64_t *arc) {
     for (int k = 0; k < 4; k++) {
         LfTablesMemo *m = &g_lf_tmemo[k];
         if (!m->ok || m->service != service) continue;
-        uint64_t f = lf_r64(service ? service + 0xd0 : 0x7105331f20ull);
+        uint64_t f = lf_r64(service ? service + 0xd0 : GA(0x7105331f20ull));
         if (f != m->fsinfo || lf_r64(f + 0x78) != m->pi || lf_r64(m->pi) != m->arc) break;
         if (!lf_r64(m->arc + 0x60) || !lf_r64(m->arc + 0x40)) return 0;
         *fsinfo = f; *arc = m->arc;
         return 1;
     }
     if (service) { if (!lf_readable(service + 0xd0, 8)) return 0; *fsinfo = lf_r64(service + 0xd0); }
-    else { if (!lf_readable(0x7105331f20ull, 8)) return 0; *fsinfo = lf_r64(0x7105331f20ull); }
+    else { if (!lf_readable(GA(0x7105331f20ull), 8)) return 0; *fsinfo = lf_r64(GA(0x7105331f20ull)); }
     if (!lf_readable(*fsinfo + 0x78, 8)) return 0;
     uint64_t pi = lf_r64(*fsinfo + 0x78);
     if (!lf_readable(pi, 16)) return 0;
@@ -1124,7 +1124,7 @@ static void lf_grow(uint64_t fsinfo, uint64_t arc) {
     {   /* does any of the game's objects hold a second pointer into an old array? */
         uint64_t olds[6] = { paths, ind, infos, lfp, ld, dirs }, sizes[6] = { 0x20ull * n_path, 8ull * n_ind, 16ull * n_info, 8ull * n_lfp, 0x18ull * n_ld, 0x34ull * n_dir };
         const char *names[6] = { "file paths", "file info indices", "file infos", "loaded file paths", "loaded datas", "directories" };
-        uint64_t objs[3] = { lf_r64(0x7105331f28ull), fsinfo, arc }; const char *onames[3] = { "resource service", "filesystem info", "archive tables" };
+        uint64_t objs[3] = { lf_r64(GA(0x7105331f28ull)), fsinfo, arc }; const char *onames[3] = { "resource service", "filesystem info", "archive tables" };
         size_t lens[3] = { 0x2000, 0x100, 0x130 };
         int hits = 0;
         for (int o = 0; o < 3; o++)
@@ -1301,7 +1301,7 @@ static void lf_serve(uint64_t fsinfo, uint32_t info_index, int raw);
 static void lf_inflate(Ctx *c, void *user) {
     (void)user;
     uint64_t lr = c->x[30], service = c->x[19], index = c->x[27];
-    int from_thread = lr >= 0x71035444c0ull && lr < 0x71035456d8ull;
+    int from_thread = lr >= GA(0x71035444c0ull) && lr < GA(0x71035456d8ull);
     if (from_thread && !g_lf_resolved) lf_ready(service);
     g_lf_orig_inflate(c);
     if (!from_thread || c->x[0] != 0) return;
@@ -1390,7 +1390,7 @@ static void lf_rawcopy(Ctx *c, void *user) {
     /* N10: a VIRTUAL record (SSBU_LOOSE_TEMPLATE=3) arrives at the one-call site with x2 = the folder file's size and
      * x1 = the running pointer into the read window, where no bytes of this file are: the copy itself is NOT run (it
      * would read the file's size from the window, possibly past its end); the folder's file is written instead. */
-    if (lr == 0x7103545198ull && g_lf_virtual && g_lf_grown && g_lf_resolved) {
+    if (lr == GA(0x7103545198ull) && g_lf_virtual && g_lf_grown && g_lf_resolved) {
         uint64_t fsinfo, arc;
         uint32_t ii = lf_tables(service, &fsinfo, &arc) ? lf_r32(service + 0x230) + (uint32_t)index : 0;
         if (ii >= g_lf_first_new_info && ii < g_lf_first_new_info + (uint32_t)g_lf_plan_count) {
@@ -1402,7 +1402,7 @@ static void lf_rawcopy(Ctx *c, void *user) {
     /* 0x7103545198: THE USUAL CASE, found by reading after run n8b1 had shown 0 calls from the other two: a file that
      * lies completely inside the current read window is copied by ONE call at 0x7103545194 and goes straight to the
      * common end 0x7103545438; the other two sites are the pieces of a file that spans windows. In ssbu_n8g.exe; NOT RUN. */
-    if (lr != 0x7103544d88ull && lr != 0x7103544e18ull && lr != 0x7103545198ull) return;
+    if (lr != GA(0x7103544d88ull) && lr != GA(0x7103544e18ull) && lr != GA(0x7103545198ull)) return;
     uint64_t fsinfo, arc;
     if (!g_lf_resolved || !lf_tables(service, &fsinfo, &arc)) return;
     lf_trace_batch("raw copy", service, arc, lf_r32(service + 0x230) + (uint32_t)index, lr);
@@ -1453,7 +1453,7 @@ static int loose_files_scan(void (*log)(const char *)) {
     return g_lf_count;
 }
 static int loose_files_install(int (*install)(uint64_t, HookFn, void *, HookOrig *), int quiet) {
-    int ok = install(0x71039a4040ull, lf_inflate, NULL, &g_lf_orig_inflate);
+    int ok = install(GA(0x71039a4040ull), lf_inflate, NULL, &g_lf_orig_inflate);
     if (ok || !quiet) lf_logf("[loose] hook on the per-file decompress 0x71039a4040: %s", ok ? "installed" : "FAILED");
     if (ok) {       /* N8: files stored uncompressed. OPT-IN (SSBU_LOOSE_RAW=1): run n8b1 showed 0 calls from the two
                      * call sites for the 32 folder files that are never served, so these sites are NOT the path such a
@@ -1462,7 +1462,7 @@ static int loose_files_install(int (*install)(uint64_t, HookFn, void *, HookOrig
         const char *re = getenv("SSBU_LOOSE_RAW"), *t3 = getenv("SSBU_LOOSE_TEMPLATE");
         /* N10: virtual records (SSBU_LOOSE_TEMPLATE=3) are filled at this hook: it comes with that switch */
         if ((re && re[0] == '1') || ((!t3 || !t3[0] || t3[0] == '3') && g_lf_owner_count > 0 && !(re && re[0] == '0'))) {
-            int ok2 = install(0x71039bfb30ull, lf_rawcopy, NULL, &g_lf_orig_copy);
+            int ok2 = install(GA(0x71039bfb30ull), lf_rawcopy, NULL, &g_lf_orig_copy);
             lf_logf("[loose] hook on the copy function 0x71039bfb30 (the load thread's raw copy of uncompressed files): %s", ok2 ? "installed" : "FAILED (uncompressed files keep the archive's bytes)");
         }
     }

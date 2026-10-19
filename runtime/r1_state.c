@@ -1120,7 +1120,7 @@ static int g_ra = -1, g_ra_phase, g_ra_ready, g_ra_after_quiet, g_ra_off;
 static double g_ra_park_ms = 3.0;
 static ImportFn g_orig_kick, g_orig_line;
 static long long g_ra_specs, g_ra_skips, g_ra_kicks, g_ra_fe;
-static uint64_t g_ra_site = 0x7103749b24ull;           /* SSBU_RUNAHEAD_SITE=<return address> (diagnosis) */
+static uint64_t g_ra_site;                                /* GA(13.0.4 0x7103749b24) at init; SSBU_RUNAHEAD_SITE=<return address> (diagnosis) */
 static double g_rap[3][4]; static long long g_rapn[3];  /* per pass kind (0 normal, 1 speculative, 2 real after a restore): pass start -> poll, poll -> frame end, frame end call, frame end -> next save point */
 static double g_ra_fe_end; static int g_ra_fe_kind; static double g_t_poll;
 static double g_ra_comp[2][5];static long long g_ra_ncomp[2];      /* save / restore: sweep + page copy, extras, fibers, command buffers, release */
@@ -1401,11 +1401,11 @@ static void ra_workers_hold(void) {
 static void ra_kick2(Ctx *c, void *user) {           /* hook on FUN 0x7103549170 (kick of a job group): points BEFORE the call */
     (void)user;
     uint64_t lr = c->x[30];
-    if (lr == 0x71037494fcull && g_ra_site == 0x7103749b24ull && !g_ra_off && (g_ra_phase || ra_fight_on())) ra_workers_hold();      /* H1 */
+    if (lr == GA(0x71037494fcull) && g_ra_site == GA(0x7103749b24ull) && !g_ra_off && (g_ra_phase || ra_fight_on())) ra_workers_hold();      /* H1 */
     if (lr == g_ra_site) { ra_step(c); if (g_ra_wh_on) { ra_workers_release(); SetEvent(g_ra_wd_ev); } }      /* H2 */
     if (g_ra_phase == 1 && g_ra_skip) {                  /* SSBU_RUNAHEAD_SKIP (experiment): job groups of the speculative pass whose result is thrown away */
-        int prep = c->x[30] == 0x7103749b24ull || c->x[30] == 0x710374b4f8ull || c->x[30] == 0x710374b528ull || c->x[30] == 0x710374b558ull, rend = c->x[30] == 0x710374c0d8ull;
-        int logic = c->x[30] == 0x710374c398ull || c->x[30] == 0x710374c5b8ull;
+        int prep = c->x[30] == GA(0x7103749b24ull) || c->x[30] == GA(0x710374b4f8ull) || c->x[30] == GA(0x710374b528ull) || c->x[30] == GA(0x710374b558ull), rend = c->x[30] == GA(0x710374c0d8ull);
+        int logic = c->x[30] == GA(0x710374c398ull) || c->x[30] == GA(0x710374c5b8ull);
         if (((g_ra_skip & 1) && prep) || ((g_ra_skip & 2) && rend) || ((g_ra_skip & 4) && logic)) { g_ra_skipped_kicks++; return; }
     }
     g_orig_kick2(c);
@@ -1447,14 +1447,15 @@ static void ra_report(void) {
 static void ra_init(void) {
     g_ra = 1;
     if (getenv("SSBU_RUNAHEAD_PARK_MS")) g_ra_park_ms = atof(getenv("SSBU_RUNAHEAD_PARK_MS"));
+    g_ra_site = GA(0x7103749b24ULL);
     if (getenv("SSBU_RUNAHEAD_SITE")) g_ra_site = strtoull(getenv("SSBU_RUNAHEAD_SITE"), NULL, 16);
     if (getenv("SSBU_RUNAHEAD_SKIP")) g_ra_skip = atoi(getenv("SSBU_RUNAHEAD_SKIP"));
     { const char *m = getenv("SSBU_RUNAHEAD_MODE"); g_ra_submit_mode = m && !strcmp(m, "submit"); }
-    if (g_ra_submit_mode) LOG("r1: RUN-AHEAD mode submit (no speculative pass; the submission step 71037f0590 is called at the save point): hook %s\n", hook_install(0x71037f0590ull, ra_submit_hook, NULL, &g_orig_submit) ? "installed" : "FAILED");
+    if (g_ra_submit_mode) LOG("r1: RUN-AHEAD mode submit (no speculative pass; the submission step 71037f0590 is called at the save point): hook %s\n", hook_install(GA(0x71037f0590ull), ra_submit_hook, NULL, &g_orig_submit) ? "installed" : "FAILED");
     g_ra_wd_ev = CreateEventA(NULL, FALSE, FALSE, NULL); CloseHandle(CreateThread(NULL, 0, ra_watchdog, NULL, 0, NULL));
     g_park_ms = 20;
     g_mark = mark_bind();
-    int k = hook_install(0x710354c720ull, ra_kick, NULL, &g_orig_kick) && hook_install(0x7103549170ull, ra_kick2, NULL, &g_orig_kick2);
+    int k = hook_install(GA(0x710354c720ull), ra_kick, NULL, &g_orig_kick) && hook_install(GA(0x7103549170ull), ra_kick2, NULL, &g_orig_kick2);
     int l = hook_install_name("_ZN7lua2cpp16L2CFighterCommon31sys_line_system_control_fighterEv", ra_line, NULL, &g_orig_line);
     LOG("r1: RUN-AHEAD on (one frame): marks %s; save point: the return of the job-counter wait 710354c720 called at 710374c028 (preparation done, before the render kick): %s; frame line counter: %s; park %.1f ms\n",
         g_mark > 0 ? "yes" : "NO (run-ahead will stay off)", k ? "installed" : "FAILED", l ? "installed or waiting" : "FAILED", g_ra_park_ms);
@@ -1487,7 +1488,7 @@ static void r1_frame_end(Ctx *c, void *user) {
     double te = now_ms();
     int rerun = g_phase == 2;
     g_orig_frame_end(c);         /* (round 2 tried skipping the whole frame end in re-run frames: the game crashed in the first one) */
-    if (lr != 0x7103747b7cull) return;
+    if (lr != GA(0x7103747b7cull)) return;
     if (g_ra > 0) { fls_index_find(); ra_frame_end(te); return; }         /* run-ahead (round 5): the save / restore is at the kick after the submission, not here */
     if (g_ff > 0 && g_t_poll > 0 && g_t_fe_prev > 0 && !g_fe_busy) { int k = rerun; g_st[k][0] += te - g_t_poll; g_st[k][1] += now_ms() - te; g_st[k][2] += te - g_t_fe_prev; g_stn[k]++; }
     g_t_fe_prev = te;
@@ -1550,7 +1551,7 @@ void r1_init(void) {
     g_fast = getenv("SSBU_R1_FAST") != NULL; g_fcheck = getenv("SSBU_R1_FAST_CHECK") != NULL; if (getenv("SSBU_R1_LEARN")) g_learn = atoi(getenv("SSBU_R1_LEARN"));
     g_r1_keep_fibers = 1; g_wait_idle = getenv("SSBU_R1_WAIT_IDLE") != NULL; g_busy_log = g_wait_idle ? 3 : 0;
     if (ra_wanted()) ra_init(); else g_ra = 0;
-    int id = hook_install(0x710386fc30ull, r1_frame_end, NULL, &g_orig_frame_end);
+    int id = hook_install(GA(0x710386fc30ull), r1_frame_end, NULL, &g_orig_frame_end);
     LOG("r1: SSBU_R1 save at fight frame %d, %d frames, every %d frames, %d cycles; hook on the frame end 710386fc30: %s\n", g_n, g_k, g_p, g_c, id ? "installed" : "FAILED");
 }
 

@@ -622,7 +622,7 @@ void display_l1_poll(uint64_t buttons, long long fight_ticks, long long poll) {
     if (g_l1_trace_left > 0) printf("l1-trace: %+8.2f %-26s POLL player 1 buttons %llx, fight ticks %lld%c", display_l1_ms(), "(poll)", (unsigned long long)buttons, fight_ticks, 10);
     if (g_l1 && fight_ticks > 0 && buttons && !(prev & buttons)) {
         unsigned long nvn_front_present_tid(void);
-        printf("l1-press: game frame counter [0x710593a440] %llu, window refresh count %llu; player 1 poll %lld (fight-frame ticks %lld, presented frames %lld, poll thread %lu, presenting thread %lu): buttons %llx, %.2f ms after the game's release%c", (unsigned long long)rd64(0x710593a440ull), (unsigned long long)(g_wnd_count_addr ? rd64(g_wnd_count_addr) : 0), poll, fight_ticks, (long long)g_frames, GetCurrentThreadId(), nvn_front_present_tid(),
+        printf("l1-press: game frame counter [0x710593a440] %llu, window refresh count %llu; player 1 poll %lld (fight-frame ticks %lld, presented frames %lld, poll thread %lu, presenting thread %lu): buttons %llx, %.2f ms after the game's release%c", (unsigned long long)rd64(GA(0x710593a440ull)), (unsigned long long)(g_wnd_count_addr ? rd64(g_wnd_count_addr) : 0), poll, fight_ticks, (long long)g_frames, GetCurrentThreadId(), nvn_front_present_tid(),
                (unsigned long long)buttons, g_lat_release ? (double)(now.QuadPart - g_lat_release) * 1000.0 / (double)g_freq.QuadPart : -1.0, 10);
         g_l1_press_qpc = now.QuadPart; g_l1_press_left = 6; g_l1_press_n = 0;
         if (!g_l1_trace_done && getenv("SSBU_L1_TRACE")) { g_l1_trace_done = 1; g_l1_trace_t0 = now.QuadPart; InterlockedExchange(&g_l1_trace_left, 7); }
