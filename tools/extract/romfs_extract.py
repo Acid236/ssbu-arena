@@ -144,7 +144,7 @@ def nsz_cache_dir():
 
 
 def decompress_nsz(path):
-    """.nsz -> a plain .nsp in the cache folder (SSBU_TMP, default %TEMP%\ssbu_nsz_cache), reused when it is already there.
+    r""".nsz -> a plain .nsp in the cache folder (SSBU_TMP, default %TEMP%\ssbu_nsz_cache), reused when it is already there.
     Needs: pip install zstandard pycryptodome. The .nsp is about as big as the original game file (the base is 13+ GB)."""
     st = os.stat(path)
     out = os.path.join(nsz_cache_dir(), '%s_%d_%d.nsp' % (os.path.splitext(os.path.basename(path))[0][:60].replace(' ', '_'),
@@ -185,6 +185,14 @@ class Nca:
     def __init__(self, nsp):
         need_keys()
         self.nsp, self.name = nsp, nsp.program_nca()
+        if getattr(nsp, 'files', None) and 'program_nca' not in vars(nsp):
+            # 2026-10-20: the largest NCA is not always the Program one (some dump tools add big delta fragments to an
+            # update package): take the largest NCA whose header says content type 0 (Program)
+            for n in sorted((n for n in nsp.files if n.endswith('.nca')), key=lambda n: -nsp.files[n][1]):
+                hh = xts_decrypt(KEYS['header_key'], nsp.read(n, 0, 0xC00), 0)
+                if hh[0x200:0x204] == b'NCA3' and hh[0x205] == 0:
+                    self.name = n
+                    break
         h = xts_decrypt(KEYS['header_key'], nsp.read(self.name, 0, 0xC00), 0)
         assert h[0x200:0x204] == b'NCA3'
         self.header = h
@@ -232,7 +240,12 @@ class PatchedRomfs:
         self.base, self.update = base, update
         self.bsec = base.section(0)
         self.usec = update.section(0)
-        assert self.usec['crypto'] == 4, 'update RomFS section is not BKTR'
+        if self.usec['crypto'] != 4:
+            t = lambda n: struct.unpack('<Q', n.header[0x210:0x218])[0]
+            raise SystemExit('the file given as the update is not an update of the game (its program NCA %s, title %016x, has '
+                             'no patch RomFS): choose the update package (its name usually has [01006A800016E800] and a '
+                             'version such as v1966080 = 13.0.4 or v2031616 = 13.0.5) as "Update" and the game itself '
+                             '([01006A800016E000][v0]) as "Base game"' % (update.name, t(update)))
         fs = self.usec['fs']
         assert fs[0x8:0xC] == b'IVFC'
         self.level6 = struct.unpack('<Q', fs[0x8 + 0x10 + 5 * 0x18:0x8 + 0x18 + 5 * 0x18])[0]

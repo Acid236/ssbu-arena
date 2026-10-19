@@ -48,6 +48,14 @@ def main():
     base_path, update_path, out = args[:3]
     firmware = sys.argv[sys.argv.index('--firmware') + 1] if '--firmware' in sys.argv else None
     base, update = rx.Nca(rx.open_package(base_path)), rx.Nca(rx.open_package(update_path))
+    def patch(n):                                     # an update's program NCA has a patch (BKTR) RomFS; the game's has not
+        try:
+            return n.section(0)['crypto'] == 4
+        except StopIteration:
+            return False
+    if patch(base) and not patch(update):            # given the other way round (both carry the game's program id)
+        print('base and update were given the other way round: swapped')
+        base, update = update, base
     for label, nca in (('base', base), ('update', update)):
         print('%-6s %s  program NCA %s, title %016x' % (label, type(nca.nsp).__name__.upper(), nca.name,
                                                        struct.unpack('<Q', nca.header[0x210:0x218])[0]))
