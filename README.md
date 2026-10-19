@@ -201,6 +201,15 @@ the Microsoft Store.
 
 **Which game versions?** 13.0.4 and 13.0.5 ([docs/VERSIONS.md](docs/VERSIONS.md)).
 
+**How do I use my own save file?** With the game closed: the game keeps its saves in `build\saves\save\` (or
+`<your install location>\saves\save\` if you chose one in the installer), as a `save_data` folder holding
+`system_data.bin`, `mii`, `spirits` and `stage`. Get your save as a folder that contains `save_data`: from your Switch
+with JKSV or Checkpoint, from yuzu / Eden / suyu (right-click the game, "Open Save Data Location") or from Ryujinx
+(right-click the game, "Open User Save Directory"). Rename `build\saves\save` to `save_old` as a backup, create a new
+empty `build\saves\save` and copy your `save_data` folder into it (you should have
+`build\saves\save\save_data\system_data.bin`), then start the game. Folders named `save.work.<number>` are temporary
+session files: leave them or delete them while the game is closed.
+
 **Mods and new fighters?** Mods through the function hook table and C++ fighter source work today; new fighters are in
 progress ([docs/NEW_FIGHTER.md](docs/NEW_FIGHTER.md)).
 
