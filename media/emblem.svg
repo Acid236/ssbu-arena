@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" role="img" aria-label="OpenSmash-Ultimate emblem">
+  <!-- Original OpenSmash-Ultimate mark: a slanted "O" frame cut by a diagonal slash. GPL-3.0, part of the site. -->
+  <defs>
+    <mask id="cut">
+      <rect width="100" height="100" fill="#fff"/>
+      <polygon points="55,-4 71,-4 45,104 29,104" fill="#000"/>
+    </mask>
+  </defs>
+  <path mask="url(#cut)" fill="#fff" fill-rule="evenodd" d="M18 88 L40 12 H92 L70 88 Z M35 74 H59 L73 26 H49 Z"/>
+  <polygon points="63,0 68,0 42,100 37,100" fill="#ff3b30"/>
+</svg>
