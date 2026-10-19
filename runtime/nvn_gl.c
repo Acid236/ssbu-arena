@@ -490,6 +490,62 @@ static void *hnew(uint64_t g, uint32_t kind, size_t size) {
 
 static SRWLOCK g_pool_lock = SRWLOCK_INIT;
 static Tex *volatile g_all_tex;            /* every texture, newest first (never unlinked: host records of textures are not freed) */
+/* PR #30 (v1Ta44): flush notifications query only live texture ranges. History remains intact for renderer references and
+ * prewarming. Sorted starts plus prefix maxima include overlapping/aliased textures without scanning every historical record. */
+typedef struct { Tex *tex; uint64_t begin, end, prefix_end; } TexRange;
+static SRWLOCK g_tex_range_lock = SRWLOCK_INIT;
+static TexRange *g_tex_ranges;
+static size_t g_tex_range_count, g_tex_range_cap;
+static int g_tex_range_fallback;
+static uint64_t tex_range_end(uint64_t begin, uint64_t size) { return size > UINT64_MAX - begin ? UINT64_MAX : begin + size; }
+static size_t tex_range_lower(uint64_t addr) {
+    size_t lo = 0, hi = g_tex_range_count;
+    while (lo < hi) { size_t mid = lo + (hi - lo) / 2; if (g_tex_ranges[mid].begin < addr) lo = mid + 1; else hi = mid; }
+    return lo;
+}
+static void tex_range_prefix(size_t first) {
+    uint64_t end = first ? g_tex_ranges[first - 1].prefix_end : 0;
+    for (size_t i = first; i < g_tex_range_count; i++) {
+        if (g_tex_ranges[i].end > end) end = g_tex_ranges[i].end;
+        g_tex_ranges[i].prefix_end = end;
+    }
+}
+static void tex_range_add(Tex *t) {
+    if (!t->mem || !t->storage) return;
+    AcquireSRWLockExclusive(&g_tex_range_lock);
+    if (g_tex_range_fallback) { ReleaseSRWLockExclusive(&g_tex_range_lock); return; }
+    if (g_tex_range_count == g_tex_range_cap) {
+        size_t cap = g_tex_range_cap ? g_tex_range_cap * 2 : 256;
+        TexRange *r = realloc(g_tex_ranges, cap * sizeof *r);
+        if (!r) {                         /* never drop invalidations because the optional index could not grow */
+            free(g_tex_ranges); g_tex_ranges = NULL; g_tex_range_count = g_tex_range_cap = 0; g_tex_range_fallback = 1;
+            ReleaseSRWLockExclusive(&g_tex_range_lock);
+            printf("nvn_gl: the live-texture range index could not grow: flush notifications walk every texture again\n");
+            return;
+        }
+        g_tex_ranges = r; g_tex_range_cap = cap;
+    }
+    uint64_t begin = (uint64_t)(uintptr_t)t->mem;
+    size_t i = tex_range_lower(begin);
+    memmove(g_tex_ranges + i + 1, g_tex_ranges + i, (g_tex_range_count - i) * sizeof *g_tex_ranges);
+    g_tex_ranges[i].tex = t; g_tex_ranges[i].begin = begin; g_tex_ranges[i].end = tex_range_end(begin, t->storage);
+    g_tex_range_count++; tex_range_prefix(i);
+    ReleaseSRWLockExclusive(&g_tex_range_lock);
+}
+static void tex_range_remove(Tex *t) {
+    if (!t->mem || !t->storage) return;
+    AcquireSRWLockExclusive(&g_tex_range_lock);
+    uint64_t begin = (uint64_t)(uintptr_t)t->mem;
+    for (size_t i = tex_range_lower(begin); i < g_tex_range_count && g_tex_ranges[i].begin == begin; i++) {
+        if (g_tex_ranges[i].tex != t) continue;
+        g_tex_range_count--;
+        memmove(g_tex_ranges + i, g_tex_ranges + i + 1, (g_tex_range_count - i) * sizeof *g_tex_ranges);
+        tex_range_prefix(i);
+        break;
+    }
+    if (!g_tex_range_count) { free(g_tex_ranges); g_tex_ranges = NULL; g_tex_range_cap = 0; }
+    ReleaseSRWLockExclusive(&g_tex_range_lock);
+}
 void nvn_label_set(uint64_t obj, const char *text);
 const char *nvn_label_get(uint64_t obj);
 void nvn_label_drop(uint64_t obj);
@@ -614,6 +670,25 @@ static void tex_put(Tex *t, const Fmt *f, int level, int layer, int x, int y, in
     }
 }
 
+/* PR #41: this renderer consumes packaged texels once, at the deferred first upload. Capture its source before publishing
+ * the texture so that later hashing and upload do not depend on the caller keeping the original storage mapped. */
+static int tex_capture_packaged(Tex *t) {
+    if (!t->b.packaged || !t->data_size) return 1;
+    t->packaged_copy = malloc(t->data_size);
+    if (!t->packaged_copy) return 0;
+    SIZE_T got = 0;
+    if (!ReadProcessMemory(GetCurrentProcess(), P(t->b.packaged), t->packaged_copy, t->data_size, &got) || got != t->data_size) {
+        free(t->packaged_copy); t->packaged_copy = NULL; return 0;
+    }
+    return 1;
+}
+static const uint8_t *tex_source(const Tex *t) {
+    return t->packaged_copy ? t->packaged_copy : t->b.packaged ? (const uint8_t *)P(t->b.packaged) : t->mem;
+}
+static void tex_release_packaged(Tex *t) {
+    free(t->packaged_copy); t->packaged_copy = NULL;
+}
+
 static uint64_t mem_hash(const uint8_t *p, size_t n, int full) {
     uint64_t h = 0x9E3779B97F4A7C15ULL ^ n, w;
     size_t words = n / 8, step = full || words <= 8192 ? 1 : words / 4096;
@@ -675,7 +750,7 @@ static void tex_upload_memory(Tex *t, const Fmt *f) {
     static size_t tmp_cap;
     static int nlog;
     TexBuilder *b = &t->b;
-    const uint8_t *src = b->packaged ? P(b->packaged) : t->mem;
+    const uint8_t *src = tex_source(t);
     if (b->flags & 0x10) {                         /* linear: plain rows with a stride */
         int64_t stride = b->stride ? b->stride : (int64_t)b->width * f->bpb;
         if (f->kind == 4) return;
@@ -716,7 +791,7 @@ static void tex_sync(Tex *t) {
     if (t->label_dirty && t->o.gl) { t->label_dirty = 0; if (glObjectLabel) glObjectLabel(0x1702 /* TEXTURE */, t->o.gl, -1, nvn_label_get(t->guest)); }
     if (t->checked == g_serial) return;
     t->checked = g_serial;
-    const uint8_t *src = t->b.packaged ? P(t->b.packaged) : t->mem;
+    const uint8_t *src = tex_source(t);
     if (t->gpu_written || !src || t->b.samples > 1 || !fmt_get(t->b.format, &f) || (f.kind >= 1 && f.kind <= 3)) return;
     if (!t->b.packaged && t->limit && src + t->data_size > t->limit) return;
     if (t->b.packaged && t->uploaded) return;      /* packaged data is consumed once at creation */
@@ -742,6 +817,7 @@ static void tex_sync(Tex *t) {
     static int nlog;
     if (e) logf_limited(&nlog, 20, "nvn_gl: upload of texture %dx%d format 0x%x target %d failed with GL error 0x%x\n", t->b.width, t->b.height, t->b.format, t->b.target, e);
     t->hash = h; t->uploaded = 1; t->dirty = 0;
+    tex_release_packaged(t);
     g_st.tex_uploads++;
 }
 
@@ -811,6 +887,7 @@ static void tex_free_gl(Tex *t) {
     for (VNode *n = t->views, *next; n; n = next) { next = n->next; texobj_free(&n->o); free(n); }
     t->views = NULL;
     texobj_free(&t->o);
+    tex_release_packaged(t);
 }
 
 /* GL sampler objects are shared by value and never deleted. */
@@ -4136,7 +4213,13 @@ static void tex_initialize(Ctx *c) {                   /* (texture, builder) */
     memcpy(&t->b, P(A1), sizeof t->b);
     if (t->b.pool && nvn_pool_range(t->b.pool, &mem, &size) && mem) { t->mem = (uint8_t *)P(mem) + t->b.offset; t->limit = (uint8_t *)P(mem) + size; }
     t->storage = tex_storage_size2(&t->b, &t->data_size);
+    if (!tex_capture_packaged(t)) {                /* PR #41, changed: no copy = the old behaviour (the game's own storage is read) */
+        static int said;
+        if (said++ < 5) printf("nvn: packaged texture %dx%d format 0x%x: its source %llx + %llu could not be copied: read in place as before\n",
+                               t->b.width, t->b.height, t->b.format, (unsigned long long)t->b.packaged, (unsigned long long)t->data_size);
+    }
     t->guest = A0;
+    tex_range_add(t);
     do { t->all_next = g_all_tex; } while (InterlockedCompareExchangePointer((void *volatile *)&g_all_tex, t, t->all_next) != t->all_next);
     RET(1);
 }
@@ -4144,6 +4227,7 @@ static void tex_finalize(Ctx *c) {
     gl_barrier();
     Tex *t = hobj(A0, K_TEX);
     if (!t) return;
+    if (!t->dead) tex_range_remove(t);
     InterlockedExchange(&t->dead, 1);
     wr32(A0 + 8, 0);
     nvn_label_drop(A0);
@@ -5299,6 +5383,13 @@ static void dev_finalize_command_handle(Ctx *c) {       /* (device, handle): the
  * of this file's (nvn_vk.c's own, through nvn_render_run) runs as it is. Step S2 replaces this table by the RBackend
  * interface. */
 void nvn_render_run(void (*fn)(void *), void *arg) { gl_run(fn, arg); }
+/* PR #41: pool / buffer finalization may be followed at once by a decommit or reuse of the guest's storage. A queue barrier
+ * alone is not enough on Vulkan: kept compute buffers and asynchronous landings outlive the jobs that used them. */
+void nvn_front_memory_retire(uint64_t addr, uint64_t size) {
+    if (!addr || !size || !g_render_tid) return;
+    if (g_rb == &rb_vk) { Range range = {addr, size}; gl_run(nvn_vk_memory_retire, &range); }
+    else gl_barrier();
+}
 /* Seam step S2: the OpenGL back end as an RBackend (nvn_front.h); rb_vk is in nvn_vk_draw.c. */
 static void rb_gl_idle(void) { gl_housekeeping(); }
 const RBackend rb_gl = {"gl", job_submit, job_submit_async, job_present, job_present_movie, job_fence, job_sync_wait, job_server_wait, job_sync_drop, job_flush, job_finish,
@@ -5329,7 +5420,7 @@ int nvn_front_tex_changed(Tex *t) {
     Fmt f;
     if (t->checked == g_serial) return 0;
     t->checked = g_serial;
-    const uint8_t *src = t->b.packaged ? P(t->b.packaged) : t->mem;
+    const uint8_t *src = tex_source(t);
     if (t->gpu_written || !src || t->b.samples > 1 || !fmt_get(t->b.format, &f) || (f.kind >= 1 && f.kind <= 3)) return 0;
     if (!t->b.packaged && t->limit && src + t->data_size > t->limit) return 0;
     if (t->b.packaged && t->uploaded) return 0;
@@ -5355,13 +5446,14 @@ int nvn_front_tex_read(Tex *t, int decode, nvn_front_put_fn *put) {
     static size_t tmp_cap;
     Fmt f;
     TexBuilder *b = &t->b;
-    const uint8_t *src = b->packaged ? P(b->packaged) : t->mem;
+    const uint8_t *src = tex_source(t);
     if (!src || !fmt_get(b->format, &f)) return 0;
     if (b->flags & 0x10) {                         /* linear: plain rows with a stride */
         int64_t stride = b->stride ? b->stride : (int64_t)b->width * f.bpb;
         if (f.kind == 4) return 0;
         put(t, 0, 0, b->width, b->height, 1, src, (size_t)stride * (size_t)b->height, 0, stride);
         g_st.tex_bytes += stride * b->height;
+        tex_release_packaged(t);
         return 1;
     }
     TexLayout L;
@@ -5381,6 +5473,7 @@ int nvn_front_tex_read(Tex *t, int decode, nvn_front_put_fn *put) {
             g_st.tex_bytes += (LONG64)lin;
         }
     }
+    tex_release_packaged(t);
     return 1;
 }
 int nvn_front_handle(TexPool *tp, SamplerPool *sp, uint64_t nh, Tex **t, View *v, SamplerParams *p) {
@@ -5471,6 +5564,7 @@ void nvn_front_take_dead(void (*drop)(int kind, void *host)) {
     EnterCriticalSection(&g_dead_lock);
     for (int i = 0; i < g_dead_n; i++) {
         drop(g_dead[i].kind, g_dead[i].p);
+        if (g_dead[i].kind == K_TEX) tex_release_packaged(g_dead[i].p);
         if (g_dead[i].kind == K_PROG) { Prog *p = g_dead[i].p; for (int s = 0; s < 6; s++) { free(p->st[s].text); memset(&p->st[s], 0, sizeof p->st[s]); } }
     }
     g_dead_n = 0;
@@ -5509,8 +5603,19 @@ static void vk_shutdown_at_exit(void) {
 /* nvnBufferFlushMappedRange / nvnMemoryPoolFlushMappedRange (nvn_stub.c): the CPU wrote this memory. Textures stored there are read again. */
 Tex *nvn_front_tex_first(void) { return g_all_tex; }
 void nvn_gl_memory_written(uint64_t addr, uint64_t size) {
-    for (Tex *t = g_all_tex; t; t = t->all_next)
-        if (!t->dead && t->mem && (uint64_t)(uintptr_t)t->mem < addr + size && addr < (uint64_t)(uintptr_t)t->mem + t->storage) t->dirty = 1;
+    if (!size) return;
+    uint64_t end = tex_range_end(addr, size);
+    AcquireSRWLockShared(&g_tex_range_lock);
+    if (g_tex_range_fallback) {
+        for (Tex *t = g_all_tex; t; t = t->all_next)
+            if (!t->dead && t->mem && (uint64_t)(uintptr_t)t->mem < end && addr < tex_range_end((uint64_t)(uintptr_t)t->mem, t->storage)) t->dirty = 1;
+    } else {
+        size_t lo = 0, hi = g_tex_range_count;
+        while (lo < hi) { size_t mid = lo + (hi - lo) / 2; if (g_tex_ranges[mid].prefix_end <= addr) lo = mid + 1; else hi = mid; }
+        for (size_t i = lo; i < g_tex_range_count && g_tex_ranges[i].begin < end; i++)
+            if (g_tex_ranges[i].end > addr) g_tex_ranges[i].tex->dirty = 1;
+    }
+    ReleaseSRWLockShared(&g_tex_range_lock);
 }
 
 static const struct { const char *name; ImportFn fn; } k_nvn[] = {

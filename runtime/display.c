@@ -252,7 +252,12 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
         if (!oe_exit_request()) report_and_exit(0);
         return 0;
     }
-    if (m == WM_ERASEBKGND) return 1;
+    if (m == WM_ERASEBKGND) {
+        /* 2026-10-16: black, not white, until the game's first frame reaches the window (the boot and the shader loading);
+         * from then on the swapchain owns every pixel and nothing is erased (no flicker) */
+        if (!g_frames) { RECT rc; GetClientRect(h, &rc); FillRect((HDC)w, &rc, (HBRUSH)GetStockObject(BLACK_BRUSH)); }
+        return 1;
+    }
     return DefWindowProcA(h, m, w, l);
 }
 

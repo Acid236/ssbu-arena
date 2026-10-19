@@ -15,6 +15,7 @@ typedef struct {
     int shader_skip;         /* shader_wait: 0 hold (a draw waits for its shader or pipeline: the frame is late), 1 skip (near a fight the draw is left out until they are ready; nvn_vk_m4.c skip_on; env SSBU_VK_NOHOLD wins) */
     int profile;            /* 0 custom (the keys as written), 1 low: scale, aniso and present are set by the profile (gfx_options.c) */
     int shader_prepare;     /* track V session 14 (appended: older objects keep their offsets): 0 first_run (the game is held at its first frame until every shader of the game's data is prepared, once per GPU + driver), 1 background (as before), 2 off;  env SSBU_VK_PREPARE wins */
+    int shader_load;        /* 2026-10-16 (appended): 0 start (on a prepared PC every shader of the game's data is loaded into memory before the first frame, behind a "LOADING SHADERS" screen: no shader work at the loading screens before a fight), 1 loading (as before: each at its loading screen);  env SSBU_VK_LOAD_AT_START=0/1 wins */
 } GfxOptions;
 const GfxOptions *gfx_options(void);      /* any thread; read once (the file is written with defaults when it does not exist) */
 #endif

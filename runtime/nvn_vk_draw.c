@@ -1907,6 +1907,24 @@ static void cb_sync(void) {                        /* guest memory must hold wha
     }
     cb_land(mid);
 }
+/* PR #41 (v1Ta44): finalization runs in queue order, while the guest storage still exists. Drain every overlapping CB,
+ * including state 4 (an asynchronous landing). Never use the per-batch kept index here: cb_sync can add entries to it
+ * after that index was built. Unrelated kept buffers retain their GPU-side contents and their reuse opportunity. */
+static int cb_in_range(const CB *c, const Range *r) {
+    if (!c->size || !r->size) return 0;
+    return c->addr >= r->addr ? c->addr - r->addr < r->size : r->addr - c->addr < c->size;
+}
+void nvn_vk_memory_retire(void *arg) {
+    const Range *range = arg;
+    for (int i = 0; i < 256; i++) {
+        if (g_cb[i].state && g_cb[i].state <= 2 && cb_in_range(&g_cb[i], range)) { cb_sync(); break; }
+    }
+    for (int i = 0; i < 256; i++) {
+        CB *c = &g_cb[i];
+        if (c->state < 3 || !cb_in_range(c, range)) continue;
+        if (c->state == 3) cb_kept_land(c, 3); else cb_land_force(c, 3);
+    }
+}
 static void cb_batch_end(void) {
     if (!g_cb_live) return;
     g_cb_serial = cmd_submit(NULL, NULL);
@@ -3142,13 +3160,18 @@ static void prep_first_hold(LONG64 frame) {
     static int done, mode = -1;
     if (done) return;
     if (mode < 0) { const char *e = getenv("SSBU_VK_PREPARE"); mode = e ? (!_stricmp(e, "background") ? 1 : !_stricmp(e, "off") ? 2 : 0) : gfx_options()->shader_prepare; }
-    if (mode || !g_prep_thread || g_prep_marked || g_prep_limited || !g_ovl.bar_arg) { done = 1; if (frame < 3) printf("nvn_vk_prep: first-run screen not shown: %s\n", mode == 1 ? "shader_prepare = background" : mode == 2 ? "shader_prepare = off" : !g_prep_thread ? "no preparation on this device (no stage libraries)" : g_prep_marked ? "the marker of an earlier run is there: everything was prepared for this GPU, driver and version; straight to the game" : "test limit"); return; }
-    if (g_prep_state == 2 || g_prep_state == 3) { done = 1; return; }
+    /* 2026-10-16: on a PREPARED start with shader_load = start (g_prep_loadall, nvn_vk_m4.c prep_start) the same screen
+     * says "LOADING SHADERS": the game's first present waits until every container is in memory (the work began at the
+     * device's creation, during the white screen of the game's own boot; this shows what is left) */
+    int loadall = g_prep_marked && g_prep_loadall;
+    if ((mode && !loadall) || !g_prep_thread || (g_prep_marked && !loadall) || g_prep_limited || !g_ovl.bar_arg) { done = 1; if (frame < 3) printf("nvn_vk_prep: first-run screen not shown: %s\n", mode == 1 ? "shader_prepare = background" : mode == 2 ? "shader_prepare = off" : !g_prep_thread ? "no preparation on this device (no stage libraries)" : g_prep_marked ? "the marker of an earlier run is there: everything was prepared for this GPU, driver and version; straight to the game (shader_load = loading)" : "test limit"); return; }
+    if (g_prep_state == 2 || g_prep_state == 3) { done = 1; if (loadall) printf("nvn_vk_prep: SHADERS LOADED AT START: everything was in memory before the game's first frame (%lld): no wait\n", (long long)frame); return; }
     LARGE_INTEGER fq; QueryPerformanceFrequency(&fq);
-    LONG64 t0 = tk(), tlog = t0;
-    int stopped = 0;
+    LONG64 t0 = tk(), tlog = t0, tprog = t0, dn_last = -1;
+    int stopped = 0, stuck = 0;
     done = 1;
-    printf("nvn_vk_prep: FIRST-RUN PREPARATION: no marker %s for this GPU, driver and version (first start here, a new driver, or new game data): the game is held at its first frame (%lld) until every shader is prepared; %d workers at normal priority\n", g_prep_marker, (long long)frame, g_pw_nthread);
+    if (loadall) printf("nvn_vk_prep: LOADING SHADERS: the game is held at its first frame (%lld) until every container of the game's data is in memory (%lld of %lld stage jobs done, %d of %d files read so far); %d workers at normal priority\n", (long long)frame, (long long)g_pq_done, (long long)g_pq_queued, g_prep_read, g_prep_nfiles, g_pw_nthread);
+    else printf("nvn_vk_prep: FIRST-RUN PREPARATION: no marker %s for this GPU, driver and version (first start here, a new driver, or new game data): the game is held at its first frame (%lld) until every shader is prepared; %d workers at normal priority\n", g_prep_marker, (long long)frame, g_pw_nthread);
     fflush(stdout);
     g_ovl.screen = 1;
     for (;;) {
@@ -3159,23 +3182,37 @@ static void prep_first_hold(LONG64 frame) {
         WakeAllConditionVariable(&g_jq_cv);
         LONG64 dn = g_pq_done, qd = g_pq_queued, left_files = g_prep_nfiles - g_prep_read;
         double el = (double)(tk() - t0) / (double)fq.QuadPart, f;
+        if (loadall) {   /* a safety net, never seen: no job done and no file read for 30 s = let the game go on (the loading screens make the rest) */
+            if (dn + g_prep_read != dn_last) { dn_last = dn + g_prep_read; tprog = tk(); }
+            else if (tk() - tprog > 30 * fq.QuadPart) { stuck = 1; break; }
+        }
         /* the store (reading data.arc) is the first tenth; then jobs done of jobs known + about 90 a file not read yet */
         if (st == 5 || !g_prep_nfiles) f = 0.10 * (double)g_store_pct / 100.0;
         else f = 0.10 + 0.90 * (qd > 0 ? (double)dn / (double)(qd + left_files * 90) : 0.0);
         if (f > 0.999) f = 0.999;
         int pct = (int)(f * 100.0), eta = f > 0.03 && el > 3 ? (int)(el * (1.0 - f) / f) : -1;
-        snprintf(g_ovl.text[0], sizeof g_ovl.text[0], "PREPARING SHADERS %d %%", pct);
+        if (loadall) f = qd > 0 ? (double)dn / (double)(qd + left_files * 90) : 0.0;
+        if (f > 0.999) f = 0.999;
+        pct = (int)(f * 100.0); eta = f > 0.03 && el > 3 ? (int)(el * (1.0 - f) / f) : -1;
+        snprintf(g_ovl.text[0], sizeof g_ovl.text[0], loadall ? "LOADING SHADERS %d %%" : "PREPARING SHADERS %d %%", pct);
         if (st == 5 || !g_prep_nfiles) snprintf(g_ovl.text[1], sizeof g_ovl.text[1], "READING THE GAME DATA");
         else snprintf(g_ovl.text[1], sizeof g_ovl.text[1], "%lld / %lld", (long long)dn, (long long)(qd + left_files * 90));
         if (eta >= 0) snprintf(g_ovl.text[2], sizeof g_ovl.text[2], "ABOUT %d:%02d LEFT", eta / 60, eta % 60); else snprintf(g_ovl.text[2], sizeof g_ovl.text[2], "TIME LEFT: ...");
-        snprintf(g_ovl.text[3], sizeof g_ovl.text[3], "FIRST START ONLY");
+        snprintf(g_ovl.text[3], sizeof g_ovl.text[3], loadall ? "NO SHADER LOADING BEFORE A FIGHT" : "FIRST START ONLY");
         present_progress((float)f);
-        if (tk() - tlog > 10 * fq.QuadPart) { tlog = tk(); printf("nvn_vk_prep: first-run screen: %d %%, %lld of about %lld stages, %.0f s so far, about %d s left\n", pct, (long long)dn, (long long)(qd + left_files * 90), el, eta); fflush(stdout); }
+        if (tk() - tlog > 10 * fq.QuadPart) { tlog = tk(); printf("nvn_vk_prep: %s screen: %d %%, %lld of about %lld stages, %.0f s so far, about %d s left\n", loadall ? "loading" : "first-run", pct, (long long)dn, (long long)(qd + left_files * 90), el, eta); fflush(stdout); }
         Sleep(100);
     }
     g_prep_urgent = 0;
     g_ovl.screen = 0;
     double el = (double)(tk() - t0) / (double)fq.QuadPart;
+    if (loadall) {
+        if (stopped) printf("nvn_vk_prep: LOADING SHADERS stopped after %.1f s (the window was closed)\n", el);
+        else if (stuck) printf("nvn_vk_prep: LOADING SHADERS: no progress for 30 s (%lld of %lld jobs, %d of %d files): the game goes on, the rest is made at the loading screens\n", (long long)g_pq_done, (long long)g_pq_queued, g_prep_read, g_prep_nfiles);
+        else printf("nvn_vk_prep: SHADERS LOADED AT START: the game's first frame waited %.1f s; %lld stage jobs, every container of the game's data in memory (memory: the FINISHED line above)\n", el, (long long)g_pq_done);
+        fflush(stdout);
+        return;
+    }
     if (stopped) printf("nvn_vk_prep: FIRST-RUN PREPARATION STOPPED after %.1f s (the window was closed): the pipeline cache is saved on the exit path, no marker: the next start goes on from the stage records and the cache\n", el);
     else {
         printf("nvn_vk_prep: FIRST-RUN PREPARATION FINISHED in %.1f s on %d workers (state %d): %lld stage jobs; the pipeline cache and the marker are written now; pipelines of pairs never drawn on this PC are NOT made here (linked at their first loading screen)\n", el, g_pw_nthread, g_prep_state, (long long)g_pq_done);

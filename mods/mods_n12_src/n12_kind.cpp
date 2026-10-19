@@ -1276,6 +1276,17 @@ static int own_article_agent(Ctx *c, int fi, int ai, int cat) {
         uint64_t *t = (uint64_t *)calloc(nslots[k] + 2, 8);
         for (uint32_t s = 0; s < nslots[k] + 2; s++) t[s] = *(uint64_t *)(uintptr_t)(vt - 16 + 8ull * s);
         if (!k) t[2 + 9] = mod_addr((uint32_t)inst);
+        // 2026-10-16 (owner: "the match ends, the screen stays black, then it closes"): the base classes are abstract, so
+        // their DELETING destructor (slot 1, what the game calls when it frees the weapon's agents at the end of a match)
+        // is a trap word (0xe7ffdefe at 0x7200333780, run res1). Slot 1 = the complete destructor (slot 0): the agent is
+        // destroyed as the base would, its 0x118 / 0xc8 bytes are not given back (a few KB a match).
+        {   uint64_t d1 = t[2 + 0], d0 = t[2 + 1];
+            int d0_trap = readable(d0, 4) && *(uint32_t *)(uintptr_t)d0 == 0xe7ffdefeu, d1_trap = readable(d1, 4) && *(uint32_t *)(uintptr_t)d1 == 0xe7ffdefeu;
+            if (d0_trap && !d1_trap) t[2 + 1] = d1;
+            logf("[n13] %s: article %s: %s agent destructors: complete %llx%s, deleting %llx%s%s", g_name[fi], art, k ? "animation-command" : "status",
+                 (unsigned long long)d1, d1_trap ? " (a TRAP)" : "", (unsigned long long)d0, d0_trap ? " (a TRAP)" : "",
+                 d0_trap && !d1_trap ? ": slot 1 = the complete destructor (the agent's memory is kept)" : "");
+        }
         table[k][fi][ai] = t;
         logf("[n13] %s: article %s: %s agent class table made from the base class's %llx (%u slots%s; base slot 9 was %llx)", g_name[fi], art, k ? "animation-command" : "status",
              (unsigned long long)vt, nslots[k], k ? "" : "; slot 9 = the DLL's install", (unsigned long long)*(uint64_t *)(uintptr_t)(vt + 72));

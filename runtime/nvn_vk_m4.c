@@ -24,7 +24,7 @@ typedef struct VStage {
     VkShaderModule mod; struct VStage *next, *next_h;
     VkPipeline lib, lib2; volatile LONG lib_state, lib2_state;      /* session 9 (SSBU_VK_GPL=2): the stage's pipeline library; lib2: a vertex stage with the empty fragment shader state */
 } VStage;
-#define MX_VK_VERSION 5u                         /* part of every hash: change it when mx_translate's Vulkan text or these records change */
+#define MX_VK_VERSION 6u                        /* part of every hash: change it when mx_translate's Vulkan text or these records change */
 typedef struct { uint32_t magic; int32_t stage, code_len; uint32_t key[4], fo; uint64_t spv, hb; uint32_t cbufs, ssbos, ssbo_w, images, dep, tex_units, in_attr, out_attr; int32_t uses_alpha, nsmp; VSmp smp[64]; } StageRec;
 typedef struct { uint32_t magic, key[4], fo, dep, tex; uint64_t vh; } VarRec;      /* ..\cache\vk\stage\<stage>_<hb>.var: the variants of one code */
 #define STAGEREC_MAGIC (0x52545356u + MX_VK_VERSION)
@@ -2308,6 +2308,7 @@ static LONG64 g_prep_t0, g_prep_t1, g_prep_vars, g_prep_fight_frames;
 static HANDLE g_prep_thread;
 static char g_prep_marker[240];
 static int g_prep_marked;
+static int g_prep_loadall;                          /* shader_load = start on a marked start: every container into memory before the first frame */
 static void pcache_save(void);
 static volatile int g_store_pct;
 #include "nvn_vk_store.c"                          /* session 11: the container store made by the host from data.arc */
@@ -2416,7 +2417,8 @@ static DWORD WINAPI prep_main(void *arg) {
     }
     int todo = g_prep_marked && g_prep_nfiles > g_prep_keep ? g_prep_keep : g_prep_nfiles;      /* marked: an earlier run prepared everything; only the containers kept in memory */
     if (getenv("SSBU_VK_PREP_LIMIT") && atoi(getenv("SSBU_VK_PREP_LIMIT")) > 0 && atoi(getenv("SSBU_VK_PREP_LIMIT")) < todo) { todo = atoi(getenv("SSBU_VK_PREP_LIMIT")); g_prep_limited = 1; printf("nvn_vk_prep: TEST: only the first %d containers are prepared (SSBU_VK_PREP_LIMIT): no marker will be written\n", todo); }
-    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    SetThreadPriority(GetCurrentThread(), g_prep_loadall ? THREAD_PRIORITY_NORMAL : THREAD_PRIORITY_BELOW_NORMAL);
+    if (g_prep_loadall) { g_prep_urgent = 1; WakeAllConditionVariable(&g_jq_cv); }    /* the start: no fight, every worker at normal priority */
     g_prep_t0 = tk();
     g_prep_state = 1;
     prep_line("start");
@@ -2480,7 +2482,8 @@ static DWORD WINAPI prep_main(void *arg) {
     g_prep_t1 = tk();
     printf("nvn_vk_prep: into the cache only: %lld stage variants (%lld read from a record of an earlier run, the others translated now), %lld stage libraries compiled and released, %lld met again in a later variation, %lld left to the game's own path (already handed over); worker time: %.0f s stages, %.0f s libraries; at most %d workers at a time (%d in a fight)\n",
            (long long)g_prep_stages, (long long)g_prep_fromrec, (long long)g_prep_libs, (long long)g_prep_dup, (long long)g_prep_had, (double)g_prep_tr_tk / (double)fq.QuadPart, (double)g_prep_lib_tk / (double)fq.QuadPart, g_prep_cap, g_prep_fight_cap);
-    if (whole && g_prep_marked) { g_prep_state = 2; prep_line("FINISHED (the containers kept in memory; the rest was prepared by an earlier run)"); }
+    if (g_prep_loadall) g_prep_urgent = 0;
+    if (whole && g_prep_marked) { g_prep_state = 2; prep_line(g_prep_loadall ? "FINISHED: every container of the game's data is in memory (shader_load = start)" : "FINISHED (the containers kept in memory; the rest was prepared by an earlier run)"); }
     else if (whole) {
         g_prep_state = 2;
         prep_line("FINISHED: every stage of every container of the game's data is made");
@@ -2550,7 +2553,16 @@ static void prep_start(void) {
     if (VK_KEYS_VERSION > 1) snprintf(kv, sizeof kv, "_k%d", VK_KEYS_VERSION);
     snprintf(g_prep_marker, sizeof g_prep_marker, "%s/prepared_v%u%s_s%d_%s_%04x_%04x_%08x.txt", vkc_dir(), MX_VK_VERSION, kv, RS_ON ? 1 : 0, D.has_gpl && gpl_sep() ? "lib" : "nolib" /* a pass without libraries (SSBU_VK_PREP=1, run s10n0) must not make a later run with libraries skip theirs */, (unsigned)V.props.vendorID, (unsigned)V.props.deviceID, (unsigned)V.props.driverVersion);
     if (on && GetFileAttributesA(g_prep_marker) != INVALID_FILE_ATTRIBUTES && !(e && atoi(e) == 2)) {
-        printf("nvn_vk_prep: every container of the game's data was prepared for this GPU and driver by an earlier run (%s): only the %d container(s) kept in memory are made again, from their records (SSBU_VK_PREP=2 does everything again)\n", g_prep_marker, g_prep_keep > 0 ? g_prep_keep : 0);
+        /* 2026-10-16, the owner's order ("all of them during the white screen at the start, with a small loading screen"):
+         * graphics.ini shader_load = start (default; SSBU_VK_LOAD_AT_START=0/1 wins, SSBU_VK_PREP_KEEP=<n> too): EVERY
+         * container is made into memory from the records of the earlier run (stage + library kept, the libraries are
+         * pipeline-cache hits), all of them marked announced, so a pool laid at a loading screen queues nothing; the game's
+         * first present waits for the end behind the "LOADING SHADERS" screen (prep_first_hold). */
+        const char *la = getenv("SSBU_VK_LOAD_AT_START");
+        g_prep_loadall = la ? atoi(la) != 0 : gfx_options()->shader_load == 0;
+        if (g_prep_loadall && !getenv("SSBU_VK_PREP_KEEP")) g_prep_keep = 1024; else g_prep_loadall = 0;
+        printf("nvn_vk_prep: every container of the game's data was prepared for this GPU and driver by an earlier run (%s): %s (SSBU_VK_PREP=2 does everything again)\n", g_prep_marker,
+               g_prep_loadall ? "shader_load = start: ALL of them are made into memory now, from their records, before the game's first frame" : g_prep_keep > 0 ? "only the container(s) kept in memory (SSBU_VK_PREP_KEEP) are made again, from their records" : "shader_load = loading: each is made at its loading screen");
         g_prep_marked = 1;
         /* session 11: the thread still runs: it makes the INDEX (hashing, under a second), so that a container is announced
          * whole at its loading screen on every start; it queues nothing (before: no thread, so no index, on a marked start) */

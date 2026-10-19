@@ -1,0 +1,20 @@
+# userdata_completo flow up to the fight (as seq_completo.txt), then player 1 walks off the left edge (use stock=1: the
+# match ends) and A is pressed through the results until the loading screen back to the character select (2026-10-16)
+@movie
+@draws:22-26/30
+@draws:36-44/30
+30:Z
+@draws:700-800/40 30:Z
+150:Z
+@draws:370-400/40 30:Z
+@draws:270-330/40 30:Z
+@draws:540-680/40
+30:u/30 20:l/18 30:Z
+90:Z
+90:Z
+@fight
+200
+1:l/900
+@until:38-50/30:Z/45
+@draws:175-205/60
+600
