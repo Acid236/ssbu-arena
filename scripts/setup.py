@@ -43,7 +43,9 @@ import sys
 import time
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-STEPS = ['deps', 'stage', 'convert', 'modules', 'tables', 'lift', 'sdk', 'compile', 'nro', 'link', 'check']
+sys.path.insert(0, os.path.join(REPO, 'scripts'))
+import build_location  # noqa: E402  (the install location chosen in the installer window)
+STEPS =['deps', 'stage', 'convert', 'modules', 'tables', 'lift', 'sdk', 'compile', 'nro', 'link', 'check']
 # The game builds this port handles, told apart by the size of main's code (the first segment of the converted dump).
 # 13.0.4 is the reference build: the game addresses written in the runtime are 13.0.4 addresses, and GA() (runtime/hostrt.c)
 # gives their 13.0.5 counterparts (docs/VERSIONS.md says how they were found). sdk is the same module in both builds.
@@ -85,7 +87,8 @@ def disk_mb(path):
 class Ctx:
     def __init__(self, a):
         self.a = a
-        self.build = os.path.abspath(a.build or os.path.join(REPO, 'build'))
+        # --build, else the install location chosen in the installer window (build_location.txt), else <repo>/build
+        self.build = os.path.abspath(a.build or build_location.get())
         self.work = os.path.join(self.build, 'work')
         self.logs = os.path.join(self.build, 'logs')
         self.state_file = os.path.join(self.build, 'state.json')
@@ -148,11 +151,10 @@ class Ctx:
         return tail
 
 
-def tree_digest():
-    """SHA-256 over the sources the build stages (STAGE_PLAN without tests/), line ends normalised: a runtime package
-    (scripts/make_release.py) records the digest of the tree its exe was built from, and is used only by that tree."""
-    import hashlib
-    h = hashlib.sha256()
+def _tree_rows(only=None):
+    """[(staged folder, sorted repo-relative paths)] of the sources the build stages (STAGE_PLAN without tests/).
+    only: a set of repo-relative paths to keep (the files git tracks), or None for every file on disk."""
+    out = []
     for src, _, ext in STAGE_PLAN:
         if src == 'tests':
             continue
@@ -162,11 +164,117 @@ def tree_digest():
             for f in files:
                 if (ext and not f.endswith(ext)) or f in GENERATED_NAMES or f.endswith(('.pyc', '.obj', '.lib', '.dll', '.exe', '.pdb', '.map', '.exp')):
                     continue
-                rows.append(os.path.relpath(os.path.join(root, f), REPO).replace(os.sep, '/'))
-        for rel in sorted(rows):
-            with open(os.path.join(REPO, rel), 'rb') as fh:
-                h.update(rel.encode() + b'\0' + fh.read().replace(b'\r\n', b'\n') + b'\0')
+                rel = os.path.relpath(os.path.join(root, f), REPO).replace(os.sep, '/')
+                if only is None or rel in only:
+                    rows.append(rel)
+        out.append((src, sorted(rows)))
+    return out
+
+
+def _norm_bytes(rel):
+    with open(os.path.join(REPO, rel), 'rb') as fh:
+        return fh.read().replace(b'\r\n', b'\n')
+
+
+def tree_digest(only=None):
+    """SHA-256 over the sources the build stages (STAGE_PLAN without tests/), line ends normalised: a runtime package
+    (scripts/make_release.py) records the digest of the tree its exe was built from, and is used only by that tree.
+    (A git checkout and GitHub's "Download ZIP" of the same commit give the same digest: checked 2026-10-20.)"""
+    import hashlib
+    h = hashlib.sha256()
+    for _, rows in _tree_rows(only):
+        for rel in rows:
+            h.update(rel.encode() + b'\0' + _norm_bytes(rel) + b'\0')
     return h.hexdigest()
+
+
+def tree_files():
+    """{repo-relative path: SHA-256 of its line-end-normalised content} of the same files (manifest 'tree_files', since
+    2026-10-20): setup.py then names the files that differ and ignores files that are only added (a mod of your own)."""
+    import hashlib
+    return {rel: hashlib.sha256(_norm_bytes(rel)).hexdigest() for _, rows in _tree_rows() for rel in rows}
+
+
+def _git_tracked():
+    """The files git tracks in this tree, or None (no git, or not a checkout: a ZIP copy)."""
+    if not os.path.isdir(os.path.join(REPO, '.git')):
+        return None
+    try:
+        r = subprocess.run(['git', '-C', REPO, 'ls-files', '-z'], capture_output=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return set(r.stdout.decode('utf-8', 'replace').split('\0')) - {''} if r.returncode == 0 else None
+
+
+def _relation(commit):
+    """'newer' / 'older' / 'other' / None: this tree against the package's source commit (needs git and the commit)."""
+    if not commit or not os.path.isdir(os.path.join(REPO, '.git')):
+        return None
+    try:
+        def anc(a, b):
+            return subprocess.run(['git', '-C', REPO, 'merge-base', '--is-ancestor', a, b], capture_output=True, timeout=60).returncode
+        up = anc(commit, 'HEAD')
+        if up == 0:
+            return 'newer'
+        if up == 1:
+            return 'older' if anc('HEAD', commit) == 0 else 'other'
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return None
+
+
+def runtime_mismatch(m):
+    """None when the package manifest m fits this tree, else the reason in plain words (for people who are not
+    programmers: what is different and what to do). Reads only, writes nothing."""
+    commit = str(m.get('source_commit') or '')[:7] or '?'
+    made = 'the version of the project of commit %s (%s)' % (commit, m.get('built') or 'date unknown')
+    rel = _relation(m.get('source_commit'))
+    if rel == 'newer':
+        what = ('your copy of the project is NEWER than the prebuilt runtime (made from %s), and the newer runtime is not '
+                'published yet. Use the copy of that version (GitHub: Releases), or wait for the next runtime package' % made)
+    elif rel in ('older', 'other'):
+        what = ('your copy of the project is %s the prebuilt runtime (made from %s). Download the latest ZIP of the project '
+                '(GitHub: Code > Download ZIP), unpack it into a new folder and start "Install SSBU.bat" there'
+                % ('OLDER than' if rel == 'older' else 'a different version from', made))
+    else:
+        what = ('your copy of the project is older or newer than the prebuilt runtime (made from %s). Download the latest '
+                'ZIP of the project (GitHub: Code > Download ZIP), unpack it into a NEW folder (not over the old one) and '
+                'start "Install SSBU.bat" there' % made)
+    if m.get('game_data_version') != game_data_version():
+        return 'runtime package refused: %s (game-data interface %s, this copy has %d)' % (what, m.get('game_data_version'), game_data_version())
+    want = m.get('tree_files')
+    if isinstance(want, dict) and want:
+        have = tree_files()
+        missing = sorted(p for p in want if p not in have)
+        changed = sorted(p for p in want if p in have and have[p] != want[p])
+        if not missing and not changed:
+            return None                         # files only added (a mod of your own): the prebuilt exe is not affected
+        names = ', '.join((missing + changed)[:4]) + (' ...' if len(missing) + len(changed) > 4 else '')
+        if missing and not changed:
+            return ('runtime package refused: %d file(s) of the project are missing from your copy (%s): the copy is '
+                    'incomplete (an unpacking that stopped, an antivirus, a file deleted by hand). Unpack the ZIP of the '
+                    'project again into a new folder and start "Install SSBU.bat" there' % (len(missing), names))
+        return 'runtime package refused: %s (%d file(s) differ: %s)' % (what, len(missing) + len(changed), names)
+    if m.get('tree_digest') == tree_digest():
+        return None
+    tracked = _git_tracked()                    # a git checkout with files of your own in the source folders
+    if tracked is not None and m.get('tree_digest') == tree_digest(tracked):
+        return None
+    return ('runtime package refused: %s. (If you added or changed files in runtime, tools\\lifter, tools\\nro, '
+            'tools\\audit, fighter_sdk or mods, take them out.)' % what)
+
+
+def read_manifest(where):
+    """manifest.json of a runtime package (zip or folder) without unpacking anything; None if there is none."""
+    import zipfile
+    try:
+        if os.path.isfile(where):
+            with zipfile.ZipFile(where) as z:
+                return json.loads(z.read('manifest.json').decode('utf-8'))
+        with open(os.path.join(where, 'manifest.json'), encoding='utf-8') as f:
+            return json.load(f)
+    except (OSError, KeyError, ValueError, zipfile.BadZipFile):
+        return None
 
 
 def game_data_version():
@@ -195,34 +303,39 @@ def load_runtime(cx, where):
         key = '%s %d %d' % (where, os.path.getsize(where), int(os.path.getmtime(where)))
         if not os.path.exists(stamp) or open(stamp).read() != key:
             shutil.rmtree(dst, ignore_errors=True)
-            with zipfile.ZipFile(where) as z:
-                for n in z.namelist():
-                    if '/' in n or '\\' in n or n.startswith('.') or ':' in n:
-                        raise Fail('the runtime package %s holds an unexpected path %r' % (where, n))
-                z.extractall(dst)
+            try:
+                with zipfile.ZipFile(where) as z:
+                    for n in z.namelist():
+                        if '/' in n or '\\' in n or n.startswith('.') or ':' in n:
+                            raise Fail('runtime package refused: %s holds an unexpected path %r' % (where, n))
+                    z.extractall(dst)
+            except (zipfile.BadZipFile, OSError) as e:
+                raise Fail('runtime package refused: %s cannot be read (%s): the download is broken. Delete it and start '
+                           'the installer again (it downloads it again)' % (where, e))
             with open(stamp, 'w') as f:
                 f.write(key)
         where = dst
     mf = os.path.join(where, 'manifest.json')
     if not os.path.isfile(mf):
-        raise Fail('%s is not a runtime package (no manifest.json)' % where)
+        raise Fail('runtime package refused: %s is not a runtime package (no manifest.json)' % where)
     with open(mf) as f:
         m = json.load(f)
     for name, info in m.get('files', {}).items():
         p = os.path.join(where, name)
         if not os.path.isfile(p) or sha256_file(p) != info['sha256']:
-            raise Fail('runtime package: %s is missing or does not match its SHA-256 in manifest.json' % name)
+            raise Fail('runtime package refused: %s is missing or damaged in it (an antivirus may have removed or changed '
+                       'it; allow the project folder in the antivirus and start the installer again)' % name)
     for need in (EXE, 'SDL3.dll', 'ssbu_glslang.dll'):
         if need not in m.get('files', {}):
-            raise Fail('runtime package: %s is not in it' % need)
-    if m.get('game_data_version') != game_data_version():
-        raise Fail('runtime package: game-data interface %s, this tree has %d: use the package made from this version of the '
-                   'tree, or build everything here without --runtime (needs the MSVC Build Tools)' % (m.get('game_data_version'), game_data_version()))
-    if m.get('tree_digest') != tree_digest():
+            raise Fail('runtime package refused: %s is not in it' % need)
+    # every refusal below says "runtime package refused:" (scripts/install.py looks for it) and what to do, in plain words
+    why = runtime_mismatch(m)
+    if why and m.get('game_data_version') != game_data_version():
+        raise Fail(why + '. Building everything here instead needs the MSVC Build Tools (--no-runtime)')
+    if why:
         if not cx.a.runtime_any_tree:
-            raise Fail('runtime package: it was built from another version of the sources (commit %s): use the package of this '
-                       'version (scripts/install.py fetches it), or build everything here without --runtime (needs the MSVC Build '
-                       'Tools). --runtime-any-tree uses it anyway (only if the runtime sources did not change).' % str(m.get('source_commit'))[:10])
+            raise Fail(why + '. Building everything here instead needs the MSVC Build Tools (--no-runtime); '
+                       '--runtime-any-tree uses the package anyway (only if the runtime sources did not change)')
         say('  WARNING: the runtime package was built from another version of the sources (--runtime-any-tree)')
     cx.runtime_dir = where
     return m
@@ -684,7 +797,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--dump', help='folder with exefs\\ and romfs\\ (and optionally sysdata\\) dumped from your console')
     ap.add_argument('--exefs'), ap.add_argument('--romfs'), ap.add_argument('--sysdata')
-    ap.add_argument('--build', help='build folder (default <repo>/build)')
+    ap.add_argument('--build', help='build folder (default: the install location of build_location.txt, else <repo>/build)')
     ap.add_argument('--jobs', type=int, help='parallel compiler jobs (default min(24, cpus))')
     ap.add_argument('--llvm', help='LLVM 9.0.0 folder (bin\\clang.exe)')
     ap.add_argument('--sdl3', help='SDL3 development package (VC) folder: include\\, lib\\x64\\')

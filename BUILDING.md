@@ -17,7 +17,15 @@ Nothing has to be installed first.
    their game folders), the base game (`.xci`, `.nsp`, `.nsz`, `.nca` or an extracted dump folder), the 13.0.4 or 13.0.5
    update and the DLC `.nsp` beside it (`scripts\find_inputs.py`; key files are checked by key name only, no key value
    is read into anything). It also checks the PC (64-bit Windows 10/11, CPU, RAM, free disk measured against what a build
-   takes, Vulkan, the movie codecs: `scripts\precheck.py`). Change what it found if needed and press **Install**. It shows
+   takes, Vulkan, the movie codecs: `scripts\precheck.py`). **Install location** says where the big files go: the
+   unpacked game (about 17 GB; with `.nsz` packages about as much again for a while, to decompress them), the build
+   (about 8 GB), the logs and your saves. It is `build\` inside this folder unless you choose another folder (Choose...,
+   for example on a drive with more space); the field shows the free space of that drive and what is needed as you
+   type. The choice is remembered in `build_location.txt` in this folder, and Resume, `Play SSBU.bat`, the shortcuts,
+   `scripts\setup.py`, `scripts\run.py` and `scripts\precheck.py` all use it (`scripts\build_location.py` prints it;
+   `install.py --build-dir <folder>` sets it). Only a few small files stay in `build\` here (`python_path.txt`, the
+   downloads of the bootstrap, the update record), and `deps\` (the private Python, LLVM, the runtime package) stays in
+   this folder. Change what it found if needed and press **Install**. It shows
    each step, a progress bar with the time left, and the log. **Dry run** shows what would happen and changes nothing.
    The installer (`scripts\install.py`) first updates this folder from GitHub (`scripts\update.py`: a git pull, or for a
    ZIP copy only the changed files; the build then redoes only what changed), makes the dump, lists your DLC for the game
@@ -25,7 +33,8 @@ Nothing has to be installed first.
    GitHub Release when there is one for this version (below: then only LLVM 9 is needed, no Visual Studio), downloads
    the missing tools from their official pages (each archive checked against the SHA-256 written in `scripts/install.py`),
    builds, and makes a desktop and Start menu shortcut. If it stops, double-click it again: it goes on from there (Resume).
-3. Double-click **`Play SSBU.bat`** or the **SSBU native** shortcut (your saves go to `build\saves`).
+3. Double-click **`Play SSBU.bat`** or the **SSBU native** shortcut (your saves go to `saves\` in the install location,
+   `build\saves` by default).
 
 Online play (experimental: Local Wireless over a LAN, a room code or a lobby server): [docs/ONLINE.md](docs/ONLINE.md).
 
@@ -57,7 +66,12 @@ python scripts/setup.py --dump <your dump folder> --runtime <ssbu-runtime-....zi
 `scripts/install.py` does this by itself when `RUNTIME_RELEASE` in it names the Release asset of this version (the zip is
 downloaded into `deps/` and checked against the SHA-256 written there), or when a `ssbu-runtime-*.zip` is in `deps/`
 (`--runtime <zip>` names one, `--no-runtime` builds everything as above). A package is used only by the version of the
-sources it was built from (`manifest.json` holds a digest of the tree; `--runtime-any-tree` overrides).
+sources it was built from (`manifest.json` holds a digest of the tree; `--runtime-any-tree` overrides). The digest is
+the same for a `git clone` and for GitHub's **Download ZIP** of the same commit (line ends do not count). Packages made
+since 2026-10-20 also list the files one by one (`tree_files`): then files you only added (a mod of your own in `mods\`)
+do not count, and a refusal names the files that differ. When the package cannot be used, `setup.py` and the installer
+say why in plain words (your copy is older or newer than the package, or incomplete) and what to do, usually: download
+the latest ZIP and unpack it into a new folder.
 
 How the game libraries are built without MSVC (`RECOMP_NOCRT=1`, `tools/lifter/build.py`): the lifted code includes only
 `<stdint.h>` (clang's own), `<string.h>`, `<math.h>` and `<setjmp.h>`, which come from `runtime/nocrt/` with the same
@@ -270,6 +284,16 @@ text stays in the downloaded folder.
 
 ## Troubleshooting
 
+- `[tools] FAILED: ... the Microsoft C++ Build Tools, which are missing`: read the sentence before it first: it says why
+  the prebuilt runtime is not used (your copy of the project is older or newer than the package, an incomplete copy, the
+  download failed). Fixing that is usually enough (no Build Tools needed). Before 2026-10-20 this message also came on
+  every PC where LLVM was not installed yet, wrongly: the installer took the probe's "runtime package: ..." line for a
+  refusal. If you do need the Build Tools (about 3 GB on C:, 5-15 minutes, administrator rights), press **Install Build
+  Tools** in the installer window, or run in a Command Prompt
+  `winget install --id Microsoft.VisualStudio.2022.BuildTools -e --override "--passive --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"`
+  (`--passive` shows Microsoft's progress window; the old `--quiet` showed nothing and could wait on a hidden prompt).
+- Not enough space on C:: choose another **Install location** in the installer window (another drive); it is
+  remembered, and Resume goes on there. A build already made elsewhere is not moved: a new location starts again.
 - `"build_glslang.bat" is not recognised` / `vswhere.exe is not recognised`: Visual Studio Build Tools are missing or
   incomplete. Install "Build Tools" with the "MSVC C++ x64/x86 build tools" component and a Windows SDK. The script finds
   `vswhere.exe` at `%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\` and calls the batch file by its absolute path;

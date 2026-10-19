@@ -3,7 +3,10 @@
 
     python scripts/install.py [--no-gui] [--progress-json] [--dry-run] [--base F] [--update F] [--dlc F ...] [--keys F]
                               [--dump DIR] [--firmware DIR] [--runtime ZIP | --no-runtime] [--jobs N]
-                              [--no-shortcuts] [--no-self-update] [--prepare-only]
+                              [--no-shortcuts] [--no-self-update] [--prepare-only] [--build-dir DIR]
+
+build\\ below is the install location: <repo>\\build, or the folder chosen with --build-dir (the installer window's "Install
+location"), remembered in build_location.txt at the repository root (scripts/build_location.py) and used by every later run.
 
 Every step is skipped when its result is already there, so the installer can be started again after a stop (what is done is
 also written to build\\install_state.json; scripts/setup.py keeps its own build\\state.json). Steps, in order:
@@ -58,9 +61,24 @@ import zipfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 DEPS = os.path.join(REPO, 'deps')
-BUILD = os.path.join(REPO, 'build')
-STATE_FILE = os.path.join(BUILD, 'install_state.json')
 sys.path.insert(0, HERE)        # the python.org embeddable package does not put the script's folder on sys.path
+import build_location  # noqa: E402
+# The install location: the build folder (dump, work, logs, saves, the .nsz decompression cache). --build-dir, else the one
+# remembered in build_location.txt (the installer window's "Install location"), else <repo>\build. set_build() changes it.
+BUILD = build_location.get()
+STATE_FILE = os.path.join(BUILD, 'install_state.json')
+
+
+def set_build(path):
+    global BUILD, STATE_FILE
+    BUILD = os.path.abspath(path)
+    STATE_FILE = os.path.join(BUILD, 'install_state.json')
+
+
+# the MSVC Build Tools through winget: --passive shows Microsoft's own progress window (--quiet showed nothing at all and
+# could wait on a prompt nobody saw); 5-15 minutes, about 3 GB on C:
+MSVC_WINGET = ('winget install --id Microsoft.VisualStudio.2022.BuildTools -e --accept-package-agreements --accept-source-agreements '
+               '--override "--passive --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"')
 PKGS = ['numpy', 'lz4', 'zstandard', 'Pillow', 'unicorn', 'capstone', 'pycryptodome']
 # name -> (url, sha256 or None, folder in deps, file that proves the folder is complete). A None hash refuses the download
 # until the maintainer has checked the archive and written its hash here.
@@ -101,10 +119,11 @@ TITLES = {'update': 'Update this program', 'precheck': 'Check this PC', 'package
 
 
 class Stop(Exception):
-    """A step cannot go on: msg says why, hint says what to do."""
-    def __init__(self, msg, hint=''):
+    """A step cannot go on: msg says why, hint says what to do; action names a fix the window offers as a button
+    ('msvc': install the MSVC Build Tools in a visible console)."""
+    def __init__(self, msg, hint='', action=''):
         Exception.__init__(self, msg)
-        self.msg, self.hint = msg, hint
+        self.msg, self.hint, self.action = msg, hint, action
 
 
 def say(s=''):
@@ -242,23 +261,57 @@ def step_update(cx):
 
 
 # ------------------------------------------------------------------------------------------------------ 2. precheck
+def local_runtime_candidate(a):
+    """The runtime package already on disk that find_runtime() would use, without downloading: path or None."""
+    if a.no_runtime:
+        return None
+    if a.runtime:
+        return a.runtime if os.path.exists(a.runtime) else None
+    url, sha = RUNTIME_RELEASE
+    if url and sha:
+        p = os.path.join(DEPS, os.path.basename(url))
+        return p if os.path.isfile(p) else None
+    if os.path.isfile(os.path.join(DEPS, 'runtime', 'manifest.json')):
+        return os.path.join(DEPS, 'runtime')
+    zips = sorted((os.path.join(DEPS, n) for n in os.listdir(DEPS) if n.startswith('ssbu-runtime-') and n.endswith('.zip')),
+                  key=os.path.getmtime) if os.path.isdir(DEPS) else []
+    return zips[-1] if zips else None
+
+
+def runtime_fit(path):
+    """None if the package at path fits this copy of the project (read only: its manifest.json is read, nothing is
+    unpacked), else the reason in plain words (setup.runtime_mismatch)."""
+    import setup
+    m = setup.read_manifest(path)
+    if m is None:
+        return 'runtime package refused: %s is not a runtime package or cannot be read (a broken download?)' % path
+    return setup.runtime_mismatch(m)
+
+
 def runtime_local(a):
-    """Is a prebuilt runtime package at hand (no download, no writes)? Then the MSVC Build Tools are not needed."""
+    """Will a prebuilt runtime package be used (no download, no writes)? Then the MSVC Build Tools are not needed.
+    A package on disk is checked against this copy (runtime_fit); the pinned Release asset not downloaded yet counts."""
     if a.no_runtime:
         return False
+    p = local_runtime_candidate(a)
+    if p:
+        return runtime_fit(p) is None
     if a.runtime:
-        return os.path.exists(a.runtime)
-    if RUNTIME_RELEASE[0] and RUNTIME_RELEASE[1]:
-        return True
-    if os.path.isfile(os.path.join(DEPS, 'runtime', 'manifest.json')):
-        return True
-    return os.path.isdir(DEPS) and any(n.startswith('ssbu-runtime-') and n.endswith('.zip') for n in os.listdir(DEPS))
+        return False
+    return bool(RUNTIME_RELEASE[0] and RUNTIME_RELEASE[1])
+
+
+def nsz_temp_gb(a):
+    """Free space the .nsz decompression into <build>\\nsz_cache needs for a while (precheck.nsz_temp_gb); 0 with a dump folder."""
+    import precheck
+    return 0.0 if a.dump else precheck.nsz_temp_gb([a.base, a.update])
 
 
 def step_precheck(cx):
     import precheck
     dump = cx.a.dump or (os.path.join(BUILD, 'dump') if dump_ok(os.path.join(BUILD, 'dump')) else None)
-    res = precheck.checks(BUILD, need_msvc=not runtime_local(cx.a), dump_dir=dump)
+    say('   install location: %s%s' % (BUILD, ' (the default)' if build_location.same(BUILD, build_location.default(REPO)) else ''))
+    res = precheck.checks(BUILD, need_msvc=not runtime_local(cx.a), dump_dir=dump, temp_gb=0.0 if dump else nsz_temp_gb(cx.a))
     for c in res:
         say('   %-4s %s: %s' % (c['level'].upper(), c['what'], c['msg']))
     fails = ['%s: %s' % (c['what'], c['msg']) for c in res if c['level'] == 'fail']
@@ -328,7 +381,7 @@ def step_inputs(cx):
         # 2026-10-20: the window always passes the game files it found, so "already there" never applied and every Resume
         # unpacked the game again; now a complete dump is kept when it was made from the same files (or has no record yet)
         cx.dump = ready
-        notes.append('build\\dump is already there (delete the build\\dump folder to make it again)')
+        notes.append('%s is already there (delete that folder to make it again)' % ready)
     cx.dlc = [p for p in a.dlc]
     if cx.dump and has_fonts(os.path.join(cx.dump, 'sysdata')):
         for n in notes:
@@ -489,15 +542,15 @@ def step_dump(cx):
     ext = os.path.join(REPO, 'tools', 'extract')
     out, part = os.path.join(BUILD, 'dump'), os.path.join(BUILD, 'dump.part')
     if a.dry_run:
-        return 'dry', 'would make build\\dump (about 17 GB, ~10 min) from %s + %s with dump_folder.py%s' % (
-            os.path.basename(cx.base), os.path.basename(cx.update), '; .nsz are read as they are' if cx.base.lower().endswith('.nsz') or
-            cx.update.lower().endswith('.nsz') else '')
+        return 'dry', 'would make %s (about 17 GB, ~10 min) from %s + %s with dump_folder.py%s' % (
+            out, os.path.basename(cx.base), os.path.basename(cx.update), '; a .nsz is first decompressed into %s (removed after)'
+            % os.path.join(BUILD, 'nsz_cache') if cx.base.lower().endswith('.nsz') or cx.update.lower().endswith('.nsz') else '')
     os.makedirs(BUILD, exist_ok=True)
     env = dict(os.environ)
     own_cache = 'SSBU_TMP' not in env
     if own_cache:
         env['SSBU_TMP'] = os.path.join(BUILD, 'nsz_cache')      # romfs_extract.py unpacks an .nsz here (our own folder, removed after)
-    say('   making build\\dump (about 17 GB, several minutes)')
+    say('   making %s (about 17 GB, several minutes)' % out)
     cmd = [sys.executable, os.path.join(ext, 'dump_folder.py'), cx.base, cx.update, part]
     if cx.firmware and os.path.isdir(cx.firmware) and cx.firmware_kind == 'nca-folder':
         cmd += ['--firmware', cx.firmware]
@@ -518,7 +571,7 @@ def step_dump(cx):
         shutil.rmtree(env['SSBU_TMP'], ignore_errors=True)
     cx.dump = out
     cx.setup_args += ensure_fonts(cx, out)
-    return 'done', 'build\\dump made'
+    return 'done', '%s made' % out
 
 
 # ------------------------------------------------------------------------------------------------------ 6. tools
@@ -581,10 +634,12 @@ def fetch(name):
     return dst
 
 
-def find_runtime(a):
+def find_runtime(a, why=None):
     """The runtime package to use: --runtime, the pinned GitHub Release asset (downloaded into deps/ and checked), or a
-    ssbu-runtime-*.zip / runtime folder already in deps/. None: build everything here."""
+    ssbu-runtime-*.zip / runtime folder already in deps/. None: build everything here (why, a list, gets the reason)."""
+    why = why if why is not None else []
     if a.no_runtime:
+        why.append('"Use the prebuilt runtime" is off (--no-runtime)')
         return None
     if a.runtime:
         if not os.path.exists(a.runtime):
@@ -600,6 +655,8 @@ def find_runtime(a):
                 urllib.request.urlretrieve(url, dst + '.part')
             except OSError as e:
                 say('   the prebuilt runtime could not be downloaded (%s): everything is built here instead' % e)
+                why.append('the prebuilt runtime could not be downloaded from GitHub (%s): check the internet connection '
+                           '(or a firewall / antivirus blocking github.com) and press Resume' % e)
                 return None
             got = hashlib.sha256(open(dst + '.part', 'rb').read()).hexdigest()
             if got != sha:
@@ -611,35 +668,74 @@ def find_runtime(a):
         return os.path.join(DEPS, 'runtime')
     zips = sorted((os.path.join(DEPS, n) for n in os.listdir(DEPS) if n.startswith('ssbu-runtime-') and n.endswith('.zip')),
                   key=os.path.getmtime) if os.path.isdir(DEPS) else []
+    if not zips:
+        why.append('no prebuilt runtime is published for this version of the project')
     return zips[-1] if zips else None
 
 
-def tools_args(dump, runtime=None):
-    if runtime:                                  # only LLVM is needed: no MSVC, no SDL3 / Vulkan-Headers / glslang / suyu
-        probe = [sys.executable, os.path.join(HERE, 'setup.py'), '--only', 'deps', '--dump', dump, '--runtime', runtime]
-        r = subprocess.run(probe, capture_output=True, text=True, errors='replace')
-        if r.returncode == 0:
-            say('   LLVM found; prebuilt runtime %s (no MSVC Build Tools needed)' % os.path.basename(runtime))
-            return ['--runtime', runtime]
-        if 'runtime package' not in r.stdout:
-            llvm = fetch('llvm')
-            say('   LLVM there; prebuilt runtime %s (no MSVC Build Tools needed)' % os.path.basename(runtime))
-            return ['--runtime', runtime, '--llvm', llvm]
-        why = next((l for l in r.stdout.splitlines() if 'runtime package' in l), '').strip()
-        say('   the prebuilt runtime cannot be used (%s): everything is built here' % why[:300])
+def probe_failure(stdout):
+    """setup.py's "FAILED at step <s>: <message>" line -> the message ('' when there is none). Only that line counts:
+    before 2026-10-20 any line with "runtime package" in it was taken for a refusal, and setup.py prints
+    "  runtime package: <folder> (commit ...)" when it ACCEPTS the package, so a PC without LLVM yet (every new tester:
+    LLVM is fetched only after this probe) was told the runtime cannot be used and then that MSVC is missing."""
+    for line in stdout.splitlines():
+        m = re.match(r'FAILED at step \w+: (.*)', line.strip())
+        if m:
+            return m.group(1).strip()
+    return ''
+
+
+def probe_runtime(dump, runtime, extra):
+    """setup.py --only deps with the package (it unpacks and checks it in <build>\\runtime) -> (exit code, failure message)."""
+    probe = [sys.executable, os.path.join(HERE, 'setup.py'), '--only', 'deps', '--build', BUILD, '--dump', dump, '--runtime', runtime] + extra
+    r = subprocess.run(probe, capture_output=True, text=True, errors='replace')
+    return r.returncode, probe_failure(r.stdout) or (r.stdout + r.stderr).strip()[-300:]
+
+
+def msvc_found():
     vsw = os.path.join(os.environ.get('ProgramFiles(x86)', r'C:\Program Files (x86)'), 'Microsoft Visual Studio', 'Installer', 'vswhere.exe')
-    ok = os.path.exists(vsw) and subprocess.run([vsw, '-latest', '-products', '*', '-requires', 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64',
-                                                 '-property', 'installationPath'], capture_output=True, text=True).stdout.strip()
-    if not ok:
-        raise Stop('the MSVC Build Tools are missing (they cannot be installed silently)',
-                   'Install them with this command (it asks for administrator rights), then start the installer again:  winget install '
-                   'Microsoft.VisualStudio.2022.BuildTools --override "--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"')
+    return bool(os.path.exists(vsw) and subprocess.run([vsw, '-latest', '-products', '*', '-requires', 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64',
+                                                        '-property', 'installationPath'], capture_output=True, text=True).stdout.strip())
+
+
+def msvc_stop(why):
+    """The stop when the exe has to be built here and the MSVC Build Tools are missing: first WHY the prebuilt runtime is
+    not used (that is what the user can usually fix), then how to get the Build Tools with a visible progress window."""
+    lead = ('The prebuilt runtime cannot be used: %s. ' % why.rstrip('. ')) if why else ''
+    return Stop(lead + 'Without it the whole game, its exe too, is built on this PC, and that needs the Microsoft C++ Build Tools, '
+                'which are missing.',
+                'Usually the fix is the point above (then press Resume). Otherwise install the Build Tools (free, about 3 GB on C:, '
+                '5-15 minutes; Windows asks for administrator rights; Microsoft\'s installer shows its progress): press "Install '
+                'Build Tools" below, or run this in a Command Prompt, then press Resume:  ' + MSVC_WINGET, action='msvc')
+
+
+def tools_args(dump, runtime=None, extra=(), why=''):
+    extra = list(extra)
+    if runtime:                                  # only LLVM is needed: no MSVC, no SDL3 / Vulkan-Headers / glslang / suyu
+        rc, fail = probe_runtime(dump, runtime, extra)
+        llvm = []
+        if rc and 'LLVM/clang' in fail:          # no LLVM yet: fetch it (into deps\llvm) and ask again
+            llvm = ['--llvm', fetch('llvm')]
+            rc, fail = probe_runtime(dump, runtime, extra + llvm)
+        if rc == 0:
+            say('   LLVM there; prebuilt runtime %s (no MSVC Build Tools needed)' % os.path.basename(runtime))
+            return ['--runtime', runtime] + llvm
+        if 'runtime package refused' not in fail:
+            # a problem that has nothing to do with the package (the dump, a Python package): say it now, not "MSVC"
+            raise Stop('the tools check stopped: %s' % fail[:400], 'Fix the point above, then press Resume (see the logs in %s).'
+                       % os.path.join(BUILD, 'logs'))
+        why = fail.split('runtime package refused:', 1)[1].strip()
+        say('   the prebuilt runtime cannot be used: %s' % why[:600])
+        say('   so everything, the exe too, would be built here (needs the MSVC Build Tools)')
+    if not msvc_found():
+        raise msvc_stop(why)
     extra = []                                  # Dear ImGui is optional (the F1 menu): setup.py --only deps passes without it
     try:
         extra = ['--imgui', fetch('imgui')]
     except (Exception, SystemExit) as e:        # fetch() exits on a bad hash; only the menu is lost
         say('   WARNING: Dear ImGui not available (%s): the settings menu (F1) is left out of the build' % e)
-    if subprocess.run([sys.executable, os.path.join(HERE, 'setup.py'), '--only', 'deps', '--dump', dump], capture_output=True).returncode == 0:
+    if subprocess.run([sys.executable, os.path.join(HERE, 'setup.py'), '--only', 'deps', '--build', BUILD, '--dump', dump],
+                      capture_output=True).returncode == 0:
         say('   all found where setup.py looks')
         return extra
     args = []
@@ -653,10 +749,22 @@ def tools_args(dump, runtime=None):
 def step_tools(cx):
     a = cx.a
     if a.dry_run:
-        have = runtime_local(a)
-        return 'dry', ('would check LLVM/clang 9 (download it into deps\\llvm, SHA-256 checked, if missing); prebuilt runtime at hand: no MSVC needed'
-                       if have else 'would check LLVM, SDL3, Vulkan-Headers, glslang, suyu (download what is missing, SHA-256 checked) and the MSVC Build Tools')
-    cx.setup_args += tools_args(cx.dump, find_runtime(a))
+        p = local_runtime_candidate(a)
+        why = runtime_fit(p) if p else None
+        if why:
+            msg = 'the prebuilt runtime %s cannot be used: %s' % (os.path.basename(p), why.split(':', 1)[1].strip())
+            if msvc_found():
+                return 'dry', msg + '; the MSVC Build Tools are there, so everything would be built here'
+            cx.blockers.append(msg)
+            return 'dry', msg + '; and the MSVC Build Tools are missing: it would stop here'
+        if runtime_local(a):
+            return 'dry', ('would check LLVM/clang 9 (download it into deps\\llvm, SHA-256 checked, if missing); prebuilt runtime %s: '
+                           'no MSVC needed' % ('%s fits this copy' % os.path.basename(p) if p else 'to download'))
+        return 'dry', ('would check LLVM, SDL3, Vulkan-Headers, glslang, suyu (download what is missing, SHA-256 checked) and the MSVC '
+                       'Build Tools (%s)' % ('found' if msvc_found() else 'MISSING: it would stop here'))
+    why = []
+    rt = find_runtime(a, why)
+    cx.setup_args += tools_args(cx.dump, rt, cx.setup_args, why[0] if why else '')
     return 'done', 'tools ready'
 
 
@@ -747,7 +855,7 @@ def step_build(cx, P):
             else:
                 P.end(s, 'dry', 'would run scripts/setup.py step %s' % s)
         return
-    cmd = [sys.executable, os.path.join(HERE, 'setup.py'), '--dump', cx.dump] + cx.setup_args
+    cmd = [sys.executable, os.path.join(HERE, 'setup.py'), '--build', BUILD, '--dump', cx.dump] + cx.setup_args
     if a.jobs:
         cmd += ['--jobs', str(a.jobs)]
     if cx.rebuild_from and cx.rebuild_from in SETUP_STEPS:
@@ -879,6 +987,9 @@ def parse(argv):
     ap.add_argument('--keys', help='your prod.keys (used where it is, never copied)')
     ap.add_argument('--dump', help='a dump folder you already have (exefs\\ and romfs\\ inside)')
     ap.add_argument('--firmware', help='your firmware folder (.nca files) or the extracted system fonts')
+    ap.add_argument('--build-dir', help='install location: the folder for the unpacked game, the build, the logs, the saves and the '
+                                        '.nsz decompression (about 25 GB; default <repo>\\build). Remembered in build_location.txt, '
+                                        'so Resume, setup.py, run.py, Play SSBU.bat and the shortcuts use it too')
     ap.add_argument('--jobs', type=int, help='parallel compiler jobs')
     ap.add_argument('--prepare-only', action='store_true', help='stop before the build (steps 1-7 only)')
     ap.add_argument('--runtime', help='prebuilt runtime package (zip or folder) to use instead of the one of the GitHub Release')
@@ -913,6 +1024,17 @@ def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     a = parse(argv)
     PROG = P = Prog(a.progress_json)
+    if a.build_dir:                              # the install location chosen in the window: used now and remembered
+        set_build(os.path.expandvars(a.build_dir.strip().strip('"')))
+        if not a.dry_run:
+            try:
+                os.makedirs(BUILD, exist_ok=True)
+                build_location.save(BUILD, REPO)
+            except OSError as e:
+                say('STOPPED: the install location %s cannot be used (%s)' % (BUILD, e))
+                P.emit(ev='error', msg='the install location %s cannot be used: %s' % (BUILD, e),
+                       hint='Choose another folder (one you can write to, on a drive with enough free space) and start again.')
+                return 1
     st = State(a.dry_run)
     cx = Ctx(a, st)
     try:
@@ -942,7 +1064,7 @@ def main(argv=None):
         say('STOPPED: %s' % e.msg)
         if e.hint:
             say(e.hint)
-        P.emit(ev='error', msg=e.msg, hint=e.hint)
+        P.emit(ev='error', msg=e.msg, hint=e.hint, action=e.action)
         return 1
     if a.dry_run:
         msg = 'dry run finished, nothing was changed' + ('; it would stop: ' + '; '.join(cx.blockers) if cx.blockers else '')

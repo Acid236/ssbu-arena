@@ -19,12 +19,16 @@ import sys
 import time
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import build_location  # noqa: E402
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('--userdata', required=True)
-    ap.add_argument('--build', default=os.path.join(REPO, 'build'))
+    ap.add_argument('--userdata', help='the save folder (required, except with --play)')
+    ap.add_argument('--play', action='store_true', help='what "Play SSBU.bat" does: the saves in <build>\\saves, until you quit; '
+                                                        'a plain message when the game is not built yet')
+    ap.add_argument('--build', default=None, help='build folder (default: the install location of build_location.txt, else <repo>/build)')
     ap.add_argument('--seconds', type=int, default=0, help='stop after this many seconds (0 = play until you quit)')
     ap.add_argument('--seq', help='input sequence file (tests/seq_*.txt): lines starting with # are comments')
     ap.add_argument('--exe', default='ssbu_native.exe', help='exe name inside build/work; a copy of ssbu_native.exe is made if missing')
@@ -33,7 +37,14 @@ def main():
     ap.add_argument('--log', help='write the game output to this file instead of the console')
     ap.add_argument('--env', action='append', default=[], help='NAME=VALUE, may be repeated')
     a = ap.parse_args()
-    a.build = os.path.abspath(a.build)          # the game runs in build\work: a relative --build would point elsewhere there
+    a.build = os.path.abspath(a.build or build_location.get())   # the game runs in build\work: a relative --build would point elsewhere there
+    if a.play:
+        a.userdata = a.userdata or os.path.join(a.build, 'saves')
+        if not (os.path.isfile(os.path.join(a.build, 'work', 'ssbu_native.exe')) and os.path.isfile(os.path.join(a.build, 'state.json'))):
+            print('The game is not built yet (looked in %s): double-click "Install SSBU.bat" first.' % a.build)
+            return 1
+    if not a.userdata:
+        ap.error('--userdata is required (or --play)')
     state_file = os.path.join(a.build, 'state.json')
     with open(state_file) as f:
         state = json.load(f)

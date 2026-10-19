@@ -68,6 +68,7 @@ deps/
 build_release/
 dist/
 
-# local configuration
+# local configuration (build_location.txt: the install location chosen in the installer window, scripts/build_location.py)
 config/
+build_location.txt
 __pycache__/

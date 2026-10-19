@@ -6,7 +6,8 @@
 # What it does: looks for your own game files (scripts\find_inputs.py --json) and checks the PC (scripts\precheck.py --json),
 # both in the background so the window never freezes; lets you change every path; then runs
 #   python -u scripts\install.py --no-gui --progress-json [--base F | --dump D] [--update F] [--dlc F]... [--keys F]
-#          [--firmware D] [--jobs N] [--dry-run] [--no-runtime] [--no-shortcuts] [--no-self-update]
+#          [--firmware D] [--build-dir D] [--jobs N] [--dry-run] [--no-runtime] [--no-shortcuts] [--no-self-update]
+# (--build-dir: the "Install location" field, passed when it is not <repo>\build; install.py remembers it in build_location.txt)
 # and shows its steps, one progress bar, the time left and the log. install.py is resumable, so after an error or a Close the
 # button says "Resume". Lines "##ssbu {json}" on stdout are progress events (schema below), every other line goes to the log
 # box and to build\logs\installer_window.log.
@@ -15,7 +16,8 @@
 #   {"ev":"plan","steps":[{"id":"update","title":"Check for updates","est_s":5}, ...]}
 #   {"ev":"step","id":"compile","state":"start"|"done"|"skip"|"fail"|"dry","secs":12.3,"msg":"..."}
 #   {"ev":"progress","id":"compile","done":120,"total":1162}
-#   {"ev":"done","ok":true,"msg":"..."}      {"ev":"error","msg":"...","hint":"..."}
+#   {"ev":"done","ok":true,"msg":"..."}      {"ev":"error","msg":"...","hint":"...","action":"msvc"|""}
+#   (action "msvc": the stop needs the MSVC Build Tools; the window then shows its "Install Build Tools" button)
 # Without events it reads setup.py's lines ("[6/11] lift ...", "[6/11] lift: ok  19.3s", "... would run", "... skipped").
 #
 # Test switches (no input needed, nothing is installed): -SelfTest <seconds> [-SelfTestKind json|fallback|error] feeds a scripted
@@ -35,9 +37,25 @@ $ErrorActionPreference = 'Continue'
 Set-StrictMode -Off
 
 $repo = Split-Path -Parent $PSScriptRoot
-$buildDir = Join-Path $repo 'build'
-$logDir = Join-Path $buildDir 'logs'
-$logFile = Join-Path $logDir 'installer_window.log'
+# The install location (dump, build, logs, saves, .nsz cache): <repo>\build, or the folder chosen in the "Install location"
+# field and remembered by install.py in build_location.txt (scripts\build_location.py). python_path.txt (bootstrap.ps1)
+# always stays in <repo>\build.
+$defaultBuild = Join-Path $repo 'build'
+$locFile = Join-Path $repo 'build_location.txt'
+function Get-StoredBuild {
+    if (Test-Path -LiteralPath $locFile) {
+        try {
+            $t = [IO.File]::ReadAllLines($locFile, [Text.Encoding]::UTF8) | Select-Object -First 1
+            if ($t) { $t = $t.Trim().Trim('"'); if ($t) { return [Environment]::ExpandEnvironmentVariables($t) } }
+        } catch {}
+    }
+    return ''
+}
+$storedBuild = Get-StoredBuild
+$buildDir = $(if ($storedBuild) { $storedBuild } else { $defaultBuild })
+$logDir = [IO.Path]::Combine($buildDir, 'logs')
+try { if (-not [IO.Directory]::Exists([IO.Path]::GetPathRoot($logDir))) { $logDir = [IO.Path]::Combine($defaultBuild, 'logs') } } catch {}  # a drive that is gone
+$logFile = [IO.Path]::Combine($logDir, 'installer_window.log')
 $testMode = ($SelfTest -gt 0) -or $NoRun.IsPresent
 
 # ---------------------------------------------------------------------------------------------------- native helpers
@@ -137,7 +155,7 @@ function Resolve-Python {
     if ($Python) { return $Python }
     $p = Join-Path $repo 'deps\python\python.exe'
     if (Test-Path -LiteralPath $p) { return $p }
-    $f = Join-Path $buildDir 'python_path.txt'
+    $f = Join-Path $defaultBuild 'python_path.txt'
     if (Test-Path -LiteralPath $f) {
         $t = (Get-Content -LiteralPath $f -TotalCount 1 -ErrorAction SilentlyContinue)
         if ($t) { $t = $t.Trim().Trim('"'); if ($t -and (Test-Path -LiteralPath $t)) { return $t } }
@@ -165,8 +183,10 @@ $script:steps = New-Object System.Collections.ArrayList
 $script:stepIdx = @{}
 $script:jsonSeen = $false
 $script:fallbackN = 0
-$script:errMsg = ''; $script:errHint = ''
+$script:errMsg = ''; $script:errHint = ''; $script:errAction = ''
 $script:doneOk = $null; $script:doneMsg = ''
+$script:buildGb = 8.0; $script:dumpGb = 17.0      # what a build and the unpacked game take (precheck.py sends its own numbers)
+$script:locChangedAt = $null; $script:preAgain = $false
 $script:lastExit = $null
 $script:failedBefore = $false
 $script:succeeded = $false
@@ -253,7 +273,7 @@ $page.Controls.Add($pTitle, 0, 0)
 
 # row 1: the inputs
 $gIn = New-Object System.Windows.Forms.GroupBox
-$gIn.Text = '1. Your game files (found on this PC; change any of them)'
+$gIn.Text = '1. Your game files (found on this PC; change any of them) and where to install'
 $gIn.Dock = 'Fill'; $gIn.AutoSize = $true; $gIn.AutoSizeMode = 'GrowAndShrink'
 $tIn = New-Object System.Windows.Forms.TableLayoutPanel
 $tIn.Dock = 'Top'; $tIn.AutoSize = $true; $tIn.ColumnCount = 4
@@ -304,6 +324,12 @@ function Add-Field([string]$key, [string]$label, [string]$kind, [string]$hint) {
         $tIn.Controls.Add($b1, 2, $r); $tIn.SetColumnSpan($b1, 2)
         $entry.Buttons = @($b1)
         $b1.Add_Click({ Browse-Folder 'firmware' 'Firmware folder (optional: the .nca files of your firmware)' })
+    } elseif ($kind -eq 'loc') {
+        $b1 = New-Button 'Choose...' 80; $b2 = New-Button 'Default' 80
+        $tIn.Controls.Add($b1, 2, $r); $tIn.Controls.Add($b2, 3, $r)
+        $entry.Buttons = @($b1, $b2)
+        $b1.Add_Click({ Browse-Location })
+        $b2.Add_Click({ $script:F['buildloc'].Box.Text = $defaultBuild })
     }
     $script:F[$key] = $entry
     $box.Add_TextChanged({ if (-not $script:suppressStatus) { Update-FieldStatus } })
@@ -334,6 +360,11 @@ $script:dlcStatus = New-Label 'Extra packages (costumes, fighters, spirits). Not
 $script:dlcStatus.Margin = New-Object System.Windows.Forms.Padding(3, 0, 3, 6)
 [void]$script:wrapLabels.Add(@($script:dlcStatus, 'field'))
 $tIn.Controls.Add($script:dlcStatus, 1, ($dr + 1)); $tIn.SetColumnSpan($script:dlcStatus, 3)
+
+# install location: where the unpacked game (~17 GB), the build (~8 GB), the logs and the saves go
+Add-Field 'buildloc' 'Install location' 'loc' 'Where the unpacked game and the build go (about 25 GB). Choose a folder on a drive with enough free space.'
+$script:suppressStatus = $true; $script:F['buildloc'].Box.Text = $buildDir; $script:suppressStatus = $false
+$script:F['buildloc'].Box.Add_TextChanged({ $script:locChangedAt = [DateTime]::Now })
 
 # row 2: PC check + options
 $p2 = New-Object System.Windows.Forms.TableLayoutPanel
@@ -448,7 +479,10 @@ $script:btnInstall.Font = $fontBold
 $script:btnDry = New-Button 'Dry run' 90
 $script:btnUpdate = New-Button 'Update only' 100
 $script:btnLogs = New-Button 'Open log folder' 120
+$script:btnMsvc = New-Button 'Install Build Tools' 140      # shown only after a stop that needs the MSVC Build Tools
+$script:btnMsvc.Visible = $false
 [void]$fL.Controls.Add($script:btnLogs); [void]$fL.Controls.Add($script:btnUpdate); [void]$fL.Controls.Add($script:btnDry)
+[void]$fL.Controls.Add($script:btnMsvc)
 [void]$fR.Controls.Add($script:btnClose); [void]$fR.Controls.Add($script:btnPlay); [void]$fR.Controls.Add($script:btnInstall)
 $pBtn.Controls.Add($fL, 0, 0); $pBtn.Controls.Add($fR, 1, 0)
 $page.Controls.Add($pBtn, 0, 7)
@@ -572,6 +606,85 @@ function Update-FieldStatus {
     elseif ($n -eq 0) { $script:dlcStatus.Text = 'None chosen. Extra packages (costumes, fighters, spirits) are optional: they only unlock their content.' }
     else { $script:dlcStatus.Text = ('{0} DLC package(s) will be read. Optional: the game runs without them. Use Remove or Clear to leave some out.' -f $n) }
     $script:dlcStatus.ForeColor = $cDim
+    Update-LocStatus
+}
+
+# ---- install location
+function Full-Path([string]$p) { try { return [IO.Path]::GetFullPath($p).TrimEnd('\') } catch { return $p.TrimEnd('\') } }
+function Same-Path([string]$a, [string]$b) { return ((Full-Path $a) -ieq (Full-Path $b)) }
+function Get-ChosenBuild {
+    $v = $script:F['buildloc'].Box.Text.Trim().Trim('"')
+    if (-not $v) { return $defaultBuild }
+    return (Full-Path ([Environment]::ExpandEnvironmentVariables($v)))
+}
+function Get-FreeGB([string]$p) {        # free space of the drive of $p (the folder need not exist yet); $null if unknown
+    try {
+        $root = [IO.Path]::GetPathRoot((Full-Path $p))
+        if (-not $root -or $root.StartsWith('\\')) { return $null }
+        $d = New-Object System.IO.DriveInfo($root)
+        if (-not $d.IsReady) { return $null }
+        return [double]$d.AvailableFreeSpace / 1GB
+    } catch { return $null }
+}
+function Get-NeedGB {                     # -> @(GB, text): the same sum as precheck.py check_disk
+    $loc = Get-ChosenBuild
+    $b = $script:F['base'].Box.Text.Trim().Trim('"')
+    $n = $script:buildGb; $parts = @(('build {0:N0} GB' -f $script:buildGb))
+    $haveDump = (Is-Dir $b) -or (Test-Path -LiteralPath ([IO.Path]::Combine($loc, 'dump\romfs\data.arc')))
+    if (-not $haveDump) {
+        $n += $script:dumpGb; $parts += ('unpacked game {0:N0} GB' -f $script:dumpGb)
+        $t = 0.0
+        foreach ($p in @($b, $script:F['update'].Box.Text.Trim().Trim('"'))) {
+            if ($p -and $p.ToLower().EndsWith('.nsz') -and (Is-File $p)) { $t += (Get-Item -LiteralPath $p).Length }
+        }
+        if ($t -gt 0) { $tg = [Math]::Round($t * 1.25 / 1GB, 1); $n += $tg; $parts += ('{0:N0} GB for a while to decompress the .nsz' -f $tg) }
+    }
+    return @($n, ($parts -join ' + '))
+}
+function Update-LocStatus {
+    if (-not $script:F.ContainsKey('buildloc')) { return }
+    $v = $script:F['buildloc'].Box.Text.Trim().Trim('"')
+    if ($v -and -not ($v -match '^[A-Za-z]:\\' -or $v.StartsWith('\\'))) {
+        Set-FieldStatus 'buildloc' 'Give a full folder path, such as D:\SSBU (with the drive letter).' $cFail; return
+    }
+    $loc = Get-ChosenBuild
+    if ((Test-Path -LiteralPath $loc -PathType Leaf)) { Set-FieldStatus 'buildloc' 'This is a file, not a folder.' $cFail; return }
+    $need = Get-NeedGB
+    $free = Get-FreeGB $loc
+    $root = [IO.Path]::GetPathRoot($loc)
+    if ($root -and -not $root.StartsWith('\\') -and -not [IO.Directory]::Exists($root)) {
+        Set-FieldStatus 'buildloc' ('The drive {0} is not on this PC (or not connected): choose another folder.' -f $root) $cFail; return
+    }
+    $t = ''
+    if ($null -eq $free) { $t = ('Free space of {0} unknown; about {1:N0} GB needed ({2}).' -f $root, $need[0], $need[1]); $c = $cWarn }
+    else {
+        $t = ('{0:N0} GB free on {1}, about {2:N0} GB needed ({3}).' -f $free, $root, $need[0], $need[1])
+        if ($free -lt $need[0]) { $c = $cFail; $t += ' Not enough: choose a folder on another drive, or free some space.' }
+        elseif ($free -lt $need[0] * 1.25) { $c = $cWarn; $t += ' It fits, but only just.' }
+        else { $c = $cOk }
+    }
+    if (Same-Path $loc $defaultBuild) { $t += '  (The default: the build folder inside this program''s folder.)' }
+    if ($storedBuild -and -not (Same-Path $loc $storedBuild) -and (Test-Path -LiteralPath ([IO.Path]::Combine($storedBuild, 'state.json')))) {
+        $t += ('  Note: the last install is in {0}; a new location starts from the beginning there (the old folder is kept).' -f $storedBuild)
+        if ($c -eq $cOk) { $c = $cInfo }
+    } elseif ((Test-Path -LiteralPath ([IO.Path]::Combine($loc, 'state.json'))) -or (Test-Path -LiteralPath ([IO.Path]::Combine($loc, 'install_state.json')))) {
+        $t += '  An install is already here: Resume goes on with it.'
+    }
+    Set-FieldStatus 'buildloc' $t $c
+}
+function Browse-Location {
+    $d = New-Object System.Windows.Forms.FolderBrowserDialog
+    $d.Description = 'Install location: a folder on a drive with about 25 GB free (the unpacked game and the build go there)'
+    $d.ShowNewFolderButton = $true
+    $cur = Get-ChosenBuild
+    if (Is-Dir $cur) { $d.SelectedPath = $cur } elseif (Is-Dir (Split-Path -Parent $cur)) { $d.SelectedPath = (Split-Path -Parent $cur) }
+    if ($d.ShowDialog($form) -eq 'OK') {
+        $p = $d.SelectedPath
+        # a drive root (D:\) gets its own folder: the build makes many folders and files there
+        if ([IO.Path]::GetPathRoot($p) -ieq $p) { $p = Join-Path $p 'SSBU-native' }
+        $script:F['buildloc'].Box.Text = $p
+    }
+    $d.Dispose()
 }
 
 function Browse-File([string]$key, [string]$title, [string]$filter) {
@@ -608,7 +721,7 @@ function Reset-Steps {
     $script:steps.Clear(); $script:stepIdx = @{}
     $script:stepList.Items.Clear()
     $script:jsonSeen = $false; $script:fallbackN = 0
-    $script:errMsg = ''; $script:errHint = ''; $script:doneOk = $null; $script:doneMsg = ''
+    $script:errMsg = ''; $script:errHint = ''; $script:errAction = ''; $script:doneOk = $null; $script:doneMsg = ''
 }
 function Add-Step([string]$id, [string]$title, [double]$est) {
     if ($est -le 0) { $est = 10 }
@@ -752,6 +865,7 @@ function Handle-Event($e) {
         'error' {
             $script:errMsg = $(if ($e.msg) { [string]$e.msg } else { 'The installation stopped.' })
             $script:errHint = $(if ($e.hint) { [string]$e.hint } else { '' })
+            $script:errAction = $(if ($e.action) { [string]$e.action } else { '' })
             Log-Add ('ERROR: ' + $script:errMsg)
             if ($script:errHint) { Log-Add ('  hint: ' + $script:errHint) }
         }
@@ -810,8 +924,10 @@ function Set-Buttons {
     foreach ($k in $script:F.Keys) { $script:F[$k].Box.Enabled = -not $run; foreach ($b in $script:F[$k].Buttons) { $b.Enabled = -not $run } }
     $script:dlcList.Enabled = -not $run; $script:btnDlcAdd.Enabled = -not $run; $script:btnDlcDel.Enabled = -not $run; $script:btnDlcClr.Enabled = -not $run
     foreach ($c in @($script:cbShort, $script:cbUpd, $script:cbRuntime, $script:cbDry, $script:numJobs)) { $c.Enabled = -not $run }
-    $script:btnPlay.Enabled = (-not $run) -and (Test-Path -LiteralPath (Join-Path $buildDir 'work\ssbu_native.exe'))
-    $hasState = (Test-Path -LiteralPath (Join-Path $buildDir 'state.json')) -or (Test-Path -LiteralPath (Join-Path $buildDir 'install_state.json'))
+    $script:btnMsvc.Enabled = -not $run
+    $loc = Get-ChosenBuild                # Play and Resume follow the install location shown in the window
+    $script:btnPlay.Enabled = (-not $run) -and (Test-Path -LiteralPath ([IO.Path]::Combine($loc, 'work\ssbu_native.exe'))) -and (Same-Path $loc $buildDir)
+    $hasState = (Test-Path -LiteralPath ([IO.Path]::Combine($loc, 'state.json'))) -or (Test-Path -LiteralPath ([IO.Path]::Combine($loc, 'install_state.json')))
     if ($run) { $script:btnInstall.Text = 'Working...' }
     elseif ($script:failedBefore -or $hasState) { $script:btnInstall.Text = 'Resume' }
     elseif ($script:succeeded) { $script:btnInstall.Text = 'Install again' }
@@ -831,6 +947,10 @@ function Build-InstallArgs([bool]$forceDry) {
     if ($k -and -not $isDump) { [void]$a.Add('--keys'); [void]$a.Add((Q $k)) }
     $f = $script:F['firmware'].Box.Text.Trim().Trim('"')
     if ($f) { [void]$a.Add('--firmware'); [void]$a.Add((Q $f.TrimEnd('\'))) }
+    # the install location: passed when it is not the default, or to go back to the default (install.py then forgets the
+    # old one); with nothing chosen the command line is the same as before
+    $loc = Get-ChosenBuild
+    if (-not (Same-Path $loc $defaultBuild) -or $storedBuild) { [void]$a.Add('--build-dir'); [void]$a.Add((Q $loc)) }
     [void]$a.Add('--jobs'); [void]$a.Add([string][int]$script:numJobs.Value)
     if ($forceDry -or $script:cbDry.Checked) { [void]$a.Add('--dry-run') }
     if (-not $script:cbRuntime.Checked) { [void]$a.Add('--no-runtime') }
@@ -845,6 +965,7 @@ function Begin-Job([string]$kind, [bool]$dry) {
     $script:jobStart = [DateTime]::Now
     Reset-Steps
     $script:lblErr.Visible = $false; $script:lblErr.Text = ''
+    $script:btnMsvc.Visible = $false
     $script:bar.Value = 0; $script:lblPct.Text = '0 %'
     Set-Buttons
 }
@@ -870,7 +991,21 @@ function Start-Job([string]$kind, [bool]$dry) {
             $r = [System.Windows.Forms.MessageBox]::Show("Not chosen: $($miss -join ', ').`n`nThe installer may stop at the step that needs it (you can add it and press Resume). Start anyway?", 'SSBU native - installer', 'YesNo', 'Question')
             if ($r -ne 'Yes') { return }
         }
-        $fail = @($script:preResults | Where-Object { $_.level -eq 'fail' })
+        $lv = $script:F['buildloc'].Box.Text.Trim().Trim('"')
+        if ($lv -and -not ($lv -match '^[A-Za-z]:\\' -or $lv.StartsWith('\\'))) {
+            [void][System.Windows.Forms.MessageBox]::Show('The install location must be a full folder path, such as D:\SSBU.', 'SSBU native - installer', 'OK', 'Information'); return
+        }
+        $loc = Get-ChosenBuild
+        $need = Get-NeedGB; $free = Get-FreeGB $loc
+        if ($null -ne $free -and $free -lt $need[0] -and -not $dry) {
+            $r = [System.Windows.Forms.MessageBox]::Show(("The install location {0} has {1:N0} GB free; about {2:N0} GB are needed ({3}).`n`nChoose a folder on another drive (Install location, Choose...), or free some space. Start anyway?" -f $loc, $free, $need[0], $need[1]), 'SSBU native - installer', 'YesNo', 'Warning')
+            if ($r -ne 'Yes') { return }
+        }
+        if ($storedBuild -and -not (Same-Path $loc $storedBuild) -and (Test-Path -LiteralPath ([IO.Path]::Combine($storedBuild, 'state.json'))) -and -not $dry) {
+            $r = [System.Windows.Forms.MessageBox]::Show(("The last install is in {0}.`n`nWith the new location {1} the installation starts from the beginning there (the game files are unpacked and built again); the old folder is not deleted, you can delete it yourself afterwards.`n`nUse the new location?" -f $storedBuild, $loc), 'SSBU native - installer', 'YesNo', 'Question')
+            if ($r -ne 'Yes') { return }
+        }
+        $fail = @($script:preResults | Where-Object { $_.level -eq 'fail' -and -not ($_.what -eq 'Disk space' -and $null -ne $free) })   # (the disk was asked about just above)
         if ($fail.Count -gt 0 -and -not $dry) {
             $r = [System.Windows.Forms.MessageBox]::Show("The PC check found a problem:`n`n" + (($fail | ForEach-Object { $_.what + ': ' + $_.msg }) -join "`n") + "`n`nStart anyway?", 'SSBU native - installer', 'YesNo', 'Warning')
             if ($r -ne 'Yes') { return }
@@ -920,7 +1055,13 @@ function Finish-Job([int]$code) {
         $h = $(if ($script:errHint) { $script:errHint } else { 'Fix the problem, then press ' + $(if ($script:jobKind -eq 'install') { 'Resume' } else { 'the button again' }) + ': finished steps are not repeated.' })
         $script:lblErr.Text = $m + "`r`n" + $h
         $script:lblErr.Visible = $true
+        $script:btnMsvc.Visible = ($script:errAction -eq 'msvc')
         Set-Status 'Stopped.' $cFail
+    }
+    if ($script:jobKind -eq 'install' -and -not $script:jobDry) {      # install.py remembered the install location
+        $script:storedBuild = Get-StoredBuild
+        $script:buildDir = $(if ($script:storedBuild) { $script:storedBuild } else { $defaultBuild })
+        Update-LocStatus
     }
     Update-Progress
     Set-Buttons
@@ -944,9 +1085,28 @@ function Start-Precheck {
     $script:preDone = $false
     $script:scanPre = New-Object SsbuProc($script:q, $true)
     $a = '-u ' + (Q (Join-Path $repo 'scripts\precheck.py')) + ' --json' + $(if (-not $script:cbRuntime.Checked) { ' --need-msvc' } else { '' })
+    $a += ' --build ' + (Q (Get-ChosenBuild))          # the disk check looks at the drive of the install location
+    $b = $script:F['base'].Box.Text.Trim().Trim('"')
+    if (Is-Dir $b) { $a += ' --dump ' + (Q $b.TrimEnd('\')) }
+    else { foreach ($g in @($b, $script:F['update'].Box.Text.Trim().Trim('"'))) { if (Is-File $g) { $a += ' --game ' + (Q $g) } } }
     [void]$script:scanPre.Start($script:py, $a, $repo)
 }
 $script:cbRuntime.Add_CheckedChanged({ if (-not $script:running -and $script:preDone) { Start-Precheck } })
+
+# the MSVC Build Tools in a console the user can see (winget's own progress and Microsoft's installer window)
+$script:btnMsvc.Add_Click({
+    $cmd = 'winget install --id Microsoft.VisualStudio.2022.BuildTools -e --accept-package-agreements --accept-source-agreements --override "--passive --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"'
+    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+        [void][System.Windows.Forms.MessageBox]::Show('winget is not on this PC. Install "Build Tools for Visual Studio" (workload "Desktop development with C++") from https://aka.ms/vs/17/release/vs_BuildTools.exe , then press Resume.', 'SSBU native - installer', 'OK', 'Information')
+        return
+    }
+    $r = [System.Windows.Forms.MessageBox]::Show("Install the Microsoft C++ Build Tools now?`n`n- free, about 3 GB on C:, 5-15 minutes`n- Yes accepts the Microsoft licence terms of the Build Tools and of the winget source`n- Windows asks for administrator rights; Microsoft's installer shows its progress`n`nA console window opens and shows what happens; when it says it is finished, close it and press Resume here.`n`nCommand: $cmd", 'SSBU native - installer', 'YesNo', 'Question')
+    if ($r -ne 'Yes') { return }
+    try {
+        Start-Process -FilePath 'cmd.exe' -ArgumentList ('/k echo Installing the Microsoft C++ Build Tools (5-15 minutes; a Microsoft window shows the progress)... & ' + $cmd + ' & echo. & echo Finished: read the lines above. Close this window and press Resume in the installer.')
+        Log-Add ('started in a console: ' + $cmd)
+    } catch { [void][System.Windows.Forms.MessageBox]::Show('Could not start the console: ' + $_.Exception.Message, 'SSBU native - installer', 'OK', 'Warning') }
+})
 
 function Apply-Found {
     $raw = $script:scanFind.GetOutput()
@@ -979,6 +1139,8 @@ function Apply-Found {
     $n = 0; foreach ($k in 'base', 'update', 'prodkeys', 'firmware') { if ($script:F[$k].Box.Text) { $n++ } }
     Set-Status ('Search finished ({0:N1} s): {1} of 4 file fields filled in. Check them, then press Install.' -f [double]$r.seconds, $n) $null
     foreach ($nt in @($r.notes)) { if ($nt) { Log-Add ('note: ' + $nt) } }
+    # the PC check again with the game files found (a dump folder or .nsz packages change the disk space needed)
+    if ($script:preDone) { Start-Precheck } else { $script:preAgain = $true }
 }
 
 # (Windows PowerShell 5.1 hands a top-level JSON array over as ONE object, hence the extra variable below.)
@@ -998,6 +1160,9 @@ function Apply-Precheck {
         [void]$it.SubItems.Add([string]$c.what); [void]$it.SubItems.Add([string]$c.msg)
         if ($lv -eq 'ok') { $it.ForeColor = $cOk } elseif ($lv -eq 'warn') { $it.ForeColor = $cWarn } else { $it.ForeColor = $cFail }
         [void]$script:preList.Items.Add($it)
+        if ($c.what -eq 'Disk space' -and $null -ne $c.build_gb) {      # the sizes the "Install location" status adds up
+            $script:buildGb = [double]$c.build_gb; $script:dumpGb = [double]$c.dump_gb; Update-LocStatus
+        }
         if ($c.what -eq 'Memory' -and ([string]$c.msg) -match '--jobs (\d+)') {
             $j = [int]$Matches[1]; if ($j -ge 1 -and $j -le 64) { $script:numJobs.Value = $j }
         }
@@ -1050,7 +1215,7 @@ function Fake-Feed([string]$kind) {
     A 1400 '@SNAP'
     if ($kind -eq 'error') {
         A 1600 (& $ev @{ ev = 'step'; id = 'compile'; state = 'fail'; msg = 'clang exited with 1' })
-        A 1700 (& $ev @{ ev = 'error'; msg = 'The compiler failed on lift_0123.c'; hint = 'Free some disk space, then press Resume.' })
+        A 1700 (& $ev @{ ev = 'error'; msg = 'The compiler failed on lift_0123.c'; hint = 'Free some disk space, then press Resume.'; action = 'msvc' })
         A 1800 '@END 1'
     } else {
         A 1600 (& $ev @{ ev = 'progress'; id = 'compile'; done = 1162; total = 1162 })
@@ -1081,7 +1246,7 @@ function Snapshot([string]$tag) {
     [void]$script:testDump.Add(('  bar={0}/1000 pct="{1}" eta="{2}" ratio={3:N2}' -f $script:bar.Value, $script:lblPct.Text, $script:lblEta.Text, $o.Ratio))
     [void]$script:testDump.Add(('  status="{0}"' -f $script:lblStatus.Text))
     [void]$script:testDump.Add(('  error visible={0} text="{1}"' -f $script:lblErr.Visible, ($script:lblErr.Text -replace "`r`n", ' | ')))
-    [void]$script:testDump.Add(('  buttons: install="{0}" enabled={1}; close enabled={2}' -f $script:btnInstall.Text, $script:btnInstall.Enabled, $script:btnClose.Enabled))
+    [void]$script:testDump.Add(('  buttons: install="{0}" enabled={1}; close enabled={2}; build-tools button visible={3}' -f $script:btnInstall.Text, $script:btnInstall.Enabled, $script:btnClose.Enabled, $script:btnMsvc.Visible))
 }
 
 # ---------------------------------------------------------------------------------------------------- timer
@@ -1111,8 +1276,17 @@ $timer.Add_Tick({
         }
     }
     if ($script:scanFind -and $script:scanFind.Done -and -not $script:foundDone) { $script:foundDone = $true; Apply-Found }
-    if ($script:scanPre -and $script:scanPre.Done -and -not $script:preDone) { $script:preDone = $true; Apply-Precheck }
+    if ($script:scanPre -and $script:scanPre.Done -and -not $script:preDone) {
+        $script:preDone = $true; Apply-Precheck
+        if ($script:preAgain) { $script:preAgain = $false; Start-Precheck }
+    }
     if ($script:tickN % 2 -eq 0) { Update-Progress }
+    # install location: the free space shown live; the PC check again 1.5 s after the folder was changed
+    if ($script:tickN % 50 -eq 0 -and -not $script:running) { Update-LocStatus }
+    if ($script:locChangedAt -and -not $script:running -and (([DateTime]::Now - $script:locChangedAt).TotalSeconds -ge 1.5)) {
+        $script:locChangedAt = $null; Update-LocStatus; Set-Buttons
+        if ($script:preDone -and -not $testMode) { Start-Precheck }
+    }
     if ($script:tickN % 20 -eq 0 -and -not $script:running) { Set-Buttons }
     Flush-Log
     if ($NoRun -and $script:foundDone -and $script:preDone) {
@@ -1131,7 +1305,9 @@ $script:btnInstall.Add_Click({ Start-Job 'install' $false })
 $script:btnDry.Add_Click({ Start-Job 'install' $true })
 $script:btnUpdate.Add_Click({ Start-Job 'update' $false })
 $script:btnLogs.Add_Click({
-    try { [void][IO.Directory]::CreateDirectory($logDir); Start-Process -FilePath 'explorer.exe' -ArgumentList (Q $logDir) } catch {}
+    $d = [IO.Path]::Combine((Get-ChosenBuild), 'logs')
+    if (-not (Test-Path -LiteralPath $d)) { $d = $logDir }
+    try { [void][IO.Directory]::CreateDirectory($d); Start-Process -FilePath 'explorer.exe' -ArgumentList (Q $d) } catch {}
 })
 $script:btnPlay.Add_Click({
     $bat = Join-Path $repo 'Play SSBU.bat'
@@ -1154,7 +1330,7 @@ $form.Add_FormClosing({
 function Dump-NoRun {
     [void]$script:testDump.Add("python: $($script:py)   (dpi scale $scale)")
     [void]$script:testDump.Add(('find_inputs: exit={0}  precheck: exit={1}' -f $script:scanFind.ExitCode, $script:scanPre.ExitCode))
-    foreach ($k in 'base', 'update', 'prodkeys', 'firmware') {
+    foreach ($k in 'base', 'update', 'prodkeys', 'firmware', 'buildloc') {
         [void]$script:testDump.Add(('{0,-9} = {1}' -f $k, $script:F[$k].Box.Text))
         [void]$script:testDump.Add(('{0,-9}   status: {1}' -f '', $script:F[$k].Status.Text))
     }

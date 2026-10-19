@@ -323,6 +323,8 @@ def main():
         'name': 'ssbu-native runtime',
         'source_commit': commit, 'source_dirty': dirty,
         'tree_digest': digest,                              # setup.py --runtime compares it with the digest of its own tree
+        # since 2026-10-20 also file by file: setup.py then names what differs and accepts files that were only added
+        'tree_files': setup.tree_files(),
         'game_data_version': setup.game_data_version(),
         'game_dll': 'ssbu_game_eh_o1.dll',
         'game_builds': sorted(setup.GAME_BUILDS.values()),

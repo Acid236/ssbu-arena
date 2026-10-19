@@ -4,6 +4,7 @@ its steps, a progress bar and the log. Only the Python standard library (tkinter
 import os
 import queue
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -11,12 +12,15 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import build_location  # noqa: E402  (the install location; this old window has no chooser: it uses the remembered one)
 STEPS = ['Python packages', 'Game files (dump)', 'Tools', 'Build the game', 'Ready to play']
 # setup.py's own steps ("[n/11] name ...") make up step 4; the share of each in the time of a first build (measured order)
 SETUP_W = {'deps': 1, 'stage': 1, 'convert': 1, 'modules': 2, 'tables': 1, 'lift': 15, 'sdk': 8, 'compile': 55, 'nro': 12, 'link': 3, 'check': 1}
+# --passive: Microsoft's installer shows its progress (--quiet showed nothing and could wait on a hidden prompt)
 WINGET = ['winget', 'install', '--id', 'Microsoft.VisualStudio.2022.BuildTools', '-e', '--accept-package-agreements',
           '--accept-source-agreements', '--override',
-          '--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended']
+          '--passive --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended']
 
 
 class App:
@@ -76,7 +80,7 @@ class App:
         self.sync()
         root.protocol('WM_DELETE_WINDOW', self.close)
         root.after(100, self.pump)
-        if os.path.exists(os.path.join(REPO, 'build', 'work', 'ssbu_native.exe')):
+        if os.path.exists(os.path.join(build_location.get(), 'work', 'ssbu_native.exe')):
             self.play.config(state='normal')
 
     def field(self, parent, r, label, var, kind, tip):
@@ -168,12 +172,16 @@ class App:
             self.bar['value'] = 15 + 85 * done / sum(SETUP_W.values())
             self.mark(3, 'run')
             self.status.config(text='Build: ' + m.group(2) + ' (step %s of 11)' % m.group(1))
-        if 'MSVC Build Tools are missing' in s:
-            if messagebox.askyesno('Installer', 'The Microsoft C++ Build Tools are needed and missing.\n\nInstall them now? '
+        if 'C++ Build Tools, which are missing' in s or 'MSVC Build Tools are missing' in s:
+            if messagebox.askyesno('Installer', 'The Microsoft C++ Build Tools are needed and missing (read the reason in the log: '
+                                   'often the prebuilt runtime only needs the latest copy of the project).\n\nInstall them now? '
                                    '(Yes accepts the Microsoft licence terms for the Build Tools and the winget source; Windows asks for '
-                                   'administrator rights; about 3 GB; when the black window closes, press Install again.)'):
+                                   'administrator rights; about 3 GB, 5-15 minutes, Microsoft\'s installer shows its progress; when '
+                                   'the console window says it is finished, press Install again.)'):
                 try:
-                    subprocess.Popen(WINGET, creationflags=subprocess.CREATE_NEW_CONSOLE)
+                    if not shutil.which('winget'):
+                        raise OSError('no winget')
+                    subprocess.Popen(['cmd', '/k'] + WINGET, creationflags=subprocess.CREATE_NEW_CONSOLE)   # /k: the console stays open with winget's result
                 except OSError:                 # no winget (an old Windows 10): Microsoft's own installer page
                     messagebox.showinfo('Installer', 'winget is not on this PC. Install "Build Tools for Visual Studio" '
                                         '(workload "Desktop development with C++") from https://aka.ms/vs/17/release/vs_BuildTools.exe '

@@ -48,7 +48,10 @@ foreach ($it in (ConvertFrom-Json $env:SSBU_LNK_JSON)) {
 
 def plan(repo=REPO):
     """-> list of dict(dir, name, target, cwd, desc, icon); dir is a real folder or '@desktop' / '@programs'."""
-    exe = os.path.join(repo, 'build', 'work', 'ssbu_native.exe')
+    # Play SSBU.bat finds the install location by itself (scripts/run.py reads build_location.txt); only the icon is the exe's
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import build_location
+    exe = os.path.join(build_location.get(repo), 'work', 'ssbu_native.exe')
     icon = exe + ',0' if os.path.isfile(exe) else ''
     play = {'name': PLAY_NAME, 'target': os.path.join(repo, 'Play SSBU.bat'), 'cwd': repo,
             'desc': 'Super Smash Bros. Ultimate, native PC build', 'icon': icon}

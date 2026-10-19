@@ -43,7 +43,7 @@ DEFAULT_BRANCH = 'main'
 MANIFEST = os.path.join('build', 'update_manifest.json')
 BACKUP = os.path.join('build', 'update_backup')
 # never written, never deleted (first path component, lower case; a trailing * is a prefix)
-PROTECTED = ('.git', 'build', 'deps', 'config', 'saves', 'userdata*')
+PROTECTED = ('.git', 'build', 'deps', 'config', 'saves', 'userdata*', 'build_location.txt')   # build_location.txt: the install location chosen in the window
 UA = {'User-Agent': 'ssbu-recomp-update'}
 
 # changed path prefix -> the earliest setup.py step that has to run again (the list is in STEPS order of setup.py)

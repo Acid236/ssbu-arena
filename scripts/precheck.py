@@ -126,24 +126,48 @@ def _existing_parent(p):
     return p
 
 
-def check_disk(build_dir, dump_dir=None):
-    probe = _existing_parent(build_dir)
-    try:
-        free = shutil.disk_usage(probe).free / 2.0 ** 30
-    except OSError:
-        return _r('warn', 'Disk space', 'could not be read for %s' % probe)
-    need = BUILD_NEED_GB
-    parts = ['build %d GB' % BUILD_NEED_GB]
+def nsz_temp_gb(paths):
+    """Space a .nsz decompression needs for a while (romfs_extract.py writes a plain .nsp about as big as the game file,
+    a bit more since the .nsz is compressed; scripts/install.py removes it after the dump is made). 0 without .nsz."""
+    tot = 0
+    for p in paths or ():
+        try:
+            if p and p.lower().endswith('.nsz') and os.path.isfile(p):
+                tot += os.path.getsize(p)
+        except OSError:
+            pass
+    return round(tot * 1.25 / 2.0 ** 30, 1)
+
+
+def disk_need(dump_dir=None, temp_gb=0.0):
+    """-> (GB needed in the install location, the parts as text)."""
+    need, parts = BUILD_NEED_GB, ['build %d GB' % BUILD_NEED_GB]
     if not (dump_dir and os.path.isdir(dump_dir)):
         need += DUMP_NEED_GB
         parts.append('game files from the .nsp packages %d GB' % DUMP_NEED_GB)
+        if temp_gb:
+            need += temp_gb
+            parts.append('%.0f GB for a while to decompress the .nsz' % temp_gb)
+    return need, parts
+
+
+def check_disk(build_dir, dump_dir=None, temp_gb=0.0):
+    """The free space of the drive of the install location (build_dir: <repo>\\build or the folder chosen in the window)."""
+    probe = _existing_parent(build_dir)
+    need, parts = disk_need(dump_dir, temp_gb)
+    try:
+        free = shutil.disk_usage(probe).free / 2.0 ** 30
+    except OSError:
+        return dict(_r('warn', 'Disk space', 'could not be read for %s' % probe), need_gb=need, build_gb=BUILD_NEED_GB, dump_gb=DUMP_NEED_GB)
     drive = os.path.splitdrive(probe)[0] or probe
     txt = '%.0f GB free on %s, %.0f GB needed (%s)' % (free, drive, need, ' + '.join(parts))
+    # need_gb / build_gb / dump_gb / free_gb: the installer window shows them next to its "Install location" field
+    extra = {'need_gb': need, 'build_gb': BUILD_NEED_GB, 'dump_gb': DUMP_NEED_GB, 'free_gb': round(free, 1), 'drive': drive}
     if free < need:
-        return _r('fail', 'Disk space', txt + '; free some space or choose another drive')
+        return dict(_r('fail', 'Disk space', txt + '; free some space or choose another install location (another drive)'), **extra)
     if free < need * 1.25:
-        return _r('warn', 'Disk space', txt + '; it fits, but only just')
-    return _r('ok', 'Disk space', txt)
+        return dict(_r('warn', 'Disk space', txt + '; it fits, but only just'), **extra)
+    return dict(_r('ok', 'Disk space', txt), **extra)
 
 
 def check_vulkan():
@@ -187,7 +211,10 @@ def check_msvc(need):
             pass
     if found:
         return _r('ok', 'Visual Studio tools', found)
-    return _r('fail', 'Visual Studio tools', 'the Microsoft C++ Build Tools are missing: install them (winget install Microsoft.VisualStudio.2022.BuildTools) and run this again')
+    return _r('fail', 'Visual Studio tools', 'the Microsoft C++ Build Tools are missing (needed only without the prebuilt runtime): '
+              'install them (about 3 GB on C:, 5-15 minutes, a progress window shows): winget install --id '
+              'Microsoft.VisualStudio.2022.BuildTools -e --override "--passive --wait --add Microsoft.VisualStudio.Workload.VCTools '
+              '--includeRecommended", then run this again')
 
 
 def _long_paths():
@@ -213,9 +240,9 @@ def check_paths(build_dir):
     return _r('ok', 'Folder names', 'plain letters only')
 
 
-def checks(build_dir, need_msvc=False, dump_dir=None):
+def checks(build_dir, need_msvc=False, dump_dir=None, temp_gb=0.0):
     out = []
-    for fn in (check_windows, check_cpu, check_ram, lambda: check_disk(build_dir, dump_dir), check_vulkan, check_codecs,
+    for fn in (check_windows, check_cpu, check_ram, lambda: check_disk(build_dir, dump_dir, temp_gb), check_vulkan, check_codecs,
                lambda: check_msvc(need_msvc), lambda: check_paths(build_dir)):
         try:
             out.append(fn())
@@ -226,12 +253,19 @@ def checks(build_dir, need_msvc=False, dump_dir=None):
 
 def main():
     ap = argparse.ArgumentParser(description='Pre-installation checks')
-    ap.add_argument('--build', default=os.path.join(REPO, 'build'), help='folder where the build will be made')
+    ap.add_argument('--build', default=None, help='the install location, where the build will be made (default: the one in '
+                                                  'build_location.txt, else <repo>\\build); its drive is the one checked')
     ap.add_argument('--dump', default=None, help='folder of an existing dump (then its size is not counted)')
+    ap.add_argument('--game', action='append', default=[], help='a game file to be unpacked (repeatable): a .nsz adds the space '
+                                                                'its decompression takes for a while')
     ap.add_argument('--need-msvc', action='store_true', help='also check the Microsoft C++ Build Tools')
     ap.add_argument('--json', action='store_true', help='print the result as JSON')
     a = ap.parse_args()
-    res = checks(a.build, a.need_msvc, a.dump)
+    if not a.build:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import build_location
+        a.build = build_location.get()
+    res = checks(a.build, a.need_msvc, a.dump, 0.0 if a.dump else nsz_temp_gb(a.game))
     if a.json:
         print(json.dumps(res, indent=1))
     else:
