@@ -49,13 +49,32 @@ static const uint64_t g_code_13_0_5[][2] = {         /* 13.0.4 -> 13.0.5 offsets
     {0x35456d8, 0x3545c88},     /* and the end of its range (loose_files.c) */
     {0x3549170, 0x3549720}, /* worker kick 2 (r1_state.c) */
     {0x354c720, 0x354ccd0}, /* worker kick (r1_state.c) */
+    {0x356d7a0, 0x356dd50}, /* rollback re-run / snapshot ring (r1_ring.c, r1_state.c), test switches only */
+    {0x3575c60, 0x3576210}, /* rollback re-run / snapshot ring (r1_ring.c, r1_state.c), test switches only */
+    {0x3575fa0, 0x3576550}, /* rollback re-run / snapshot ring (r1_ring.c, r1_state.c), test switches only */
+    {0x35763c0, 0x3576970}, /* rollback re-run / snapshot ring (r1_ring.c, r1_state.c), test switches only */
+    {0x3593c40, 0x35941f0}, /* rollback re-run / snapshot ring (r1_ring.c, r1_state.c), test switches only */
     {0x35b5c50, 0x35b6200},     /* ostringstream code (cxxrt_selftest.h) */
+    {0x35c13d0, 0x35c1980}, /* rollback re-run / snapshot ring (r1_ring.c, r1_state.c), test switches only */
+    {0x36186d0, 0x3618c80}, /* rollback re-run / snapshot ring (r1_ring.c, r1_state.c), test switches only */
+    {0x3618b80, 0x3619130}, /* rollback re-run / snapshot ring (r1_ring.c, r1_state.c), test switches only */
+    {0x3618ef0, 0x36194a0}, /* rollback re-run / snapshot ring (r1_ring.c, r1_state.c), test switches only */
+    {0x3619080, 0x3619630}, /* rollback re-run / snapshot ring (r1_ring.c, r1_state.c), test switches only */
+    {0x361d040, 0x361d5f0}, /* rollback re-run / snapshot ring (r1_ring.c, r1_state.c), test switches only */
+    {0x361e7e0, 0x361ed90}, /* rollback re-run / snapshot ring (r1_ring.c, r1_state.c), test switches only */
+    {0x3632850, 0x3632e00}, /* rollback re-run / snapshot ring (r1_ring.c, r1_state.c), test switches only */
     {0x366d1f0, 0x366d7a0},     /* clock read return address (nnsdk.c, fixed seed) */
     {0x366d388, 0x366d938},     /* clock read return address (nnsdk.c, fixed seed) */
+    {0x36e6e00, 0x36e73b0}, /* rollback re-run / snapshot ring (r1_ring.c, r1_state.c), test switches only */
     {0x36f2814, 0x36f2dc4},     /* call site (os_threads.c) */
+    {0x36f2c00, 0x36f31b0}, /* rollback re-run / snapshot ring (r1_ring.c, r1_state.c), test switches only */
+    {0x36f2d40, 0x36f32f0}, /* rollback re-run / snapshot ring (r1_ring.c, r1_state.c), test switches only */
     {0x36f6070, 0x36f6620},     /* movie audio output Flush (nnmovie_mf.c), 0x114 bytes, the same in both */
+    {0x36f7410, 0x36f79c0}, /* rollback re-run / snapshot ring (r1_ring.c, r1_state.c), test switches only */
+    {0x3747270, 0x3747820}, /* rollback re-run / snapshot ring (r1_ring.c, r1_state.c), test switches only */
     {0x3747b7c, 0x374812c}, /* render loop call site (r1_state.c) */
     {0x37494fc, 0x3749aac}, /* render loop call site, workers hold (r1_state.c) */
+    {0x3749598, 0x3749b48}, /* rollback re-run / snapshot ring (r1_ring.c, r1_state.c), test switches only */
     {0x3749b24, 0x374a0d4}, /* render loop: run-ahead save point (r1_state.c) */
     {0x374b4f8, 0x374baa8}, /* render loop: preparation call (r1_state.c) */
     {0x374b528, 0x374bad8}, /* render loop: preparation call 2 (r1_state.c) */
@@ -63,6 +82,8 @@ static const uint64_t g_code_13_0_5[][2] = {         /* 13.0.4 -> 13.0.5 offsets
     {0x374c0d8, 0x374c688}, /* render loop: render call (r1_state.c) */
     {0x374c398, 0x374c948}, /* render loop: logic call (r1_state.c) */
     {0x374c5b8, 0x374cb68}, /* render loop: logic call 2 (r1_state.c) */
+    {0x374e000, 0x374e5b0}, /* rollback re-run / snapshot ring (r1_ring.c, r1_state.c), test switches only */
+    {0x37857f0, 0x3785da0}, /* rollback re-run / snapshot ring (r1_ring.c, r1_state.c), test switches only */
     {0x37a3ea0, 0x37a4450}, /* message text (newmodule_host.c) */
     {0x37a3fc0, 0x37a4570}, /* message label exists (newmodule_host.c) */
     {0x37f0590, 0x37f0b40}, /* submission step (r1_state.c) */
@@ -72,6 +93,7 @@ static const uint64_t g_code_13_0_5[][2] = {         /* 13.0.4 -> 13.0.5 offsets
     {0x3839a10, 0x3839fc0},     /* function with catch (std::ios_base::failure &) (cxxrt_selftest.h) */
     {0x3839b94, 0x383a144},     /* call site in it */
     {0x3839de8, 0x383a398},     /* its landing pad */
+    {0x3864700, 0x3864cb0}, /* rollback re-run / snapshot ring (r1_ring.c, r1_state.c), test switches only */
     {0x38697e0, 0x3869d90},     /* EH main test function (nnsdk2.c) */
     {0x386fc30, 0x38701e0},     /* graphics frame end (fighter_host.c, SSBU_DETERMINISTIC) */
     {0x38fae10, 0x38fb3c0},     /* luaD_throw */

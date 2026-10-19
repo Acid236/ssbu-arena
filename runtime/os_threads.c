@@ -42,6 +42,7 @@ typedef struct Obj {
     int holder_count;
     Ctx *fctx;                               /* fibers: the guest context of the fiber (R1 save / restore) */
     volatile DWORD run_tid;                  /* fibers: host thread running it now, 0 = switched away (R1) */
+    void *fls_fiber;                         /* (R2) the host fiber that was switched away when `fls` was noted */
     void *fls;                               /* fibers: the fighter runtime's per-fiber block (FLS slot g_r1_fls_idx) when it last switched away (R1) */
 } Obj;
 
@@ -633,7 +634,7 @@ static void CALLBACK fiber_main(void *arg) {
         uint64_t next = c->x[0];
         if (next) obj(next)->tp = c->tpidr;
         fiber_set_cur(next);
-        if (g_r1_keep_fibers) { o->run_tid = 0; if (g_r1_fls_idx != 0xFFFFFFFF) o->fls = FlsGetValue(g_r1_fls_idx); if (next) obj(next)->run_tid = GetCurrentThreadId(); }
+        if (g_r1_keep_fibers) { o->run_tid = 0; if (g_r1_fls_idx != 0xFFFFFFFF) { o->fls = FlsGetValue(g_r1_fls_idx); o->fls_fiber = GetCurrentFiber(); } if (next) obj(next)->run_tid = GetCurrentThreadId(); }
         SwitchToFiber(next ? obj(next)->fiber : thread_fiber());
     }
 }
@@ -641,6 +642,7 @@ static void fib_init(Ctx *c) {                        /* (FiberType*, fn, arg, s
     Obj *o = obj(A0);
     o->fn = A1; o->arg = A2; o->stack = A3; o->stack_size = A4;
     o->fiber = CreateFiberEx(1 << 20, (SIZE_T)256 << 20, 0, fiber_main, o);
+    if (g_r1_keep_fibers) { o->fctx = NULL; o->fls = NULL; o->fls_fiber = NULL; o->run_tid = 0; }      /* (R2) a new host fiber: no context, no block yet */
     RET(0);
 }
 static void fib_switch(Ctx *c) {
@@ -649,7 +651,7 @@ static void fib_switch(Ctx *c) {
     DWORD tid = GetCurrentThreadId();
     if (next) obj(next)->tp = c->tpidr;               /* the thread block (errno, ...) belongs to the host thread, not to the fiber */
     fiber_set_cur(next);
-    if (g_r1_keep_fibers) { if (self) { obj(self)->run_tid = 0; if (g_r1_fls_idx != 0xFFFFFFFF) obj(self)->fls = FlsGetValue(g_r1_fls_idx); } if (next) obj(next)->run_tid = GetCurrentThreadId(); }
+    if (g_r1_keep_fibers) { if (self) { obj(self)->run_tid = 0; if (g_r1_fls_idx != 0xFFFFFFFF) { obj(self)->fls = FlsGetValue(g_r1_fls_idx); obj(self)->fls_fiber = GetCurrentFiber(); } } if (next) obj(next)->run_tid = GetCurrentThreadId(); }
     SwitchToFiber(next ? obj(next)->fiber : own);
     if (!self && GetCurrentThreadId() != tid) {        /* a thread's own context must come back on its own thread (see fiber_cur) */
         static volatile LONG said;
@@ -667,7 +669,9 @@ static Obj *obj_peek(uint64_t key) {
     return f;
 }
 DWORD os_r1_fiber_tid(uint64_t key) { Obj *o = obj_peek(key); return o ? o->run_tid : 0; }
-void *os_r1_fiber_fls(uint64_t key) { Obj *o = obj_peek(key); return o ? o->fls : NULL; }
+long long g_r1_fls_stale;                              /* (R2) notes of a block that belong to another host fiber than the Obj's now */
+void *os_r1_fiber_fls(uint64_t key) { Obj *o = obj_peek(key); if (!o) return NULL; if (o->fls && o->fls_fiber != o->fiber) { g_r1_fls_stale++; return NULL; } return o->fls; }
+void os_r1_fiber_put_fls(uint64_t key, void *fiber, void *fls) { Obj *o = obj_peek(key); if (o) { o->fls = fls; o->fls_fiber = fls ? fiber : NULL; } }      /* (R2) ring load: the note goes back with the host fiber */
 void os_r1_fiber_get(uint64_t key, uint64_t v[6]) { Obj *o = obj_peek(key); if (!o) return; v[0] = (uint64_t)(uintptr_t)o->fiber; v[1] = (uint64_t)(uintptr_t)o->fctx; v[2] = o->fn; v[3] = o->arg; v[4] = o->stack; v[5] = o->stack_size; }
 void os_r1_fiber_put(uint64_t key, const uint64_t v[6]) { Obj *o = obj_peek(key); if (!o) return; o->fiber = (void *)(uintptr_t)v[0]; o->fctx = (Ctx *)(uintptr_t)v[1]; o->fn = v[2]; o->arg = v[3]; o->stack = v[4]; o->stack_size = v[5]; }
 /* R1 restore: give a guest fiber back the host fiber it had at the save (kept alive by g_r1_keep_fibers), or a fresh one */

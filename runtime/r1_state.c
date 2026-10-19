@@ -54,10 +54,12 @@ static PadRec g_pad[8192]; static int g_npad, g_ipad;
 static double g_t_pass1, g_t_rerun, g_t_first_frame;
 static long long g_pass_frames;
 
-/* run-ahead (round 5): SSBU_RUNAHEAD=1 (or graphics.ini `runahead = on`, gfx_options.c); default OFF */
+/* run-ahead (round 5): SSBU_RUNAHEAD=1 (or graphics.ini `runahead = on`, gfx_options.c); default OFF.
+ * R2 (r1_ring.c): SSBU_RB_SIM (the snapshot ring's rollback simulation) uses the same machinery; default OFF. */
+static int rgs_wanted(void); static void rgs_step(Ctx *c); static int rgs_poll(void); static void rgs_pad(uint64_t *b, int *lx, int *ly, int *rx, int *ry); static int rgs_skip_now(void); static void rgs_report(void);
 static int ra_wanted(void) {
     static int w = -1;
-    if (w < 0) { const char *e = getenv("SSBU_RUNAHEAD"); int gfx_runahead(void); w = e ? (e[0] && e[0] != '0') : gfx_runahead(); }
+    if (w < 0) { const char *e = getenv("SSBU_RUNAHEAD"); int gfx_runahead(void); w = rgs_wanted() || (e ? (e[0] && e[0] != '0') : gfx_runahead()); }
     return w;
 }
 int r1_on(void) {
@@ -298,12 +300,13 @@ void os_r1_fibers(void (*cb)(uint64_t key, Ctx *c, uint64_t stack, uint64_t stac
  * CONTEXT at +0x30, StackBase +0x10, StackLimit +0x18) and its host stack from the saved RSP to StackBase. Both are
  * copied with its guest context (Ctx); a restore puts all three back when the fiber is switched away then too. */
 #define FIB_BLOCK 0x500
-typedef struct { uint64_t key; uint64_t obj[6]; void *fls; uint8_t flsb[72]; Ctx *c; void *fiber; Ctx regs; const char *imp; uint64_t from, sp; int susp; uint8_t blk[FIB_BLOCK]; uint8_t *stk; size_t n; uint64_t rsp; } Fib;
+typedef struct { uint64_t key; uint64_t obj[6]; void *fls; uint8_t flsb[392]; Ctx *c; void *fiber; Ctx regs; const char *imp; uint64_t from, sp; int susp; uint8_t blk[FIB_BLOCK]; uint8_t *stk; size_t n; uint64_t rsp; } Fib;
 static Fib g_fib[1024]; static int g_fib_running, g_nfib, g_fib_mode, g_fib_same, g_fib_diff, g_fib_new, g_fib_bad;
 void os_r1_fiber_set(uint64_t key, void *fiber, Ctx *fctx, int fresh);
 void os_r1_fiber_get(uint64_t key, uint64_t v[6]); void os_r1_fiber_put(uint64_t key, const uint64_t v[6]);
 static struct { uint64_t key; void *fiber; Ctx *c; DWORD tid; } g_cur[2048]; static int g_ncur;
 DWORD os_r1_fiber_tid(uint64_t key); void *os_r1_fiber_fls(uint64_t key);
+void os_r1_fiber_put_fls(uint64_t key, void *fiber, void *fls); extern long long g_r1_fls_stale;      /* os_threads.c (R2: the block note restored with the fiber) */
 extern DWORD g_r1_fls_idx;
 /* fighter_host.c keeps a per-fiber block (FsFiber: module, script, ctx, depth ...) in a fiber-local slot; its index g_fs_fls is a
  * static there: its address is read from this exe's linker map. The first 72 bytes (mod, script, ctx, the counters) are
@@ -366,6 +369,7 @@ static void fibers_restore_all(void) {
         int j; for (j = 0; j < g_ncur; j++) if (g_cur[j].key == f->key) break;
         void *cf = j < g_ncur ? g_cur[j].fiber : NULL; Ctx *cc = j < g_ncur ? g_cur[j].c : NULL;
         os_r1_fiber_put(f->key, f->obj);                     /* entry, argument, stack, host fiber, context as at the save */
+        if (f->susp || !f->c) os_r1_fiber_put_fls(f->key, f->fiber, f->susp ? f->fls : NULL);   /* (R2) the block note of the host fiber put back; none for a fresh one */
         if (!f->c) {                                          /* never ran at the save: it must start from the beginning */
             if (cf != f->fiber || cc) { os_r1_fiber_set(f->key, NULL, NULL, 1); g_fib_new++; } else g_fib_same++;
             continue;
@@ -1158,8 +1162,14 @@ static int th_blocked(HANDLE h) {
     CONTEXT x; memset(&x, 0, sizeof x); x.ContextFlags = CONTEXT_CONTROL;
     if (!GetThreadContext(h, &x)) return 0;
     const uint8_t *r = (const uint8_t *)(uintptr_t)x.Rip;
-    MEMORY_BASIC_INFORMATION m;
-    if (!VirtualQuery(r - 2, &m, sizeof m) || m.State != MEM_COMMIT || !(m.Protect & (PAGE_EXECUTE_READ | PAGE_EXECUTE | PAGE_EXECUTE_READWRITE))) return 0;
+    static uintptr_t lo[8], hi[8]; static int nc;           /* (R2) executable regions already queried: system-call stubs stay put */
+    uintptr_t a = (uintptr_t)(r - 2); int known = 0;
+    for (int i = 0; i < nc; i++) if (a >= lo[i] && a + 2 <= hi[i]) { known = 1; break; }
+    if (!known) {
+        MEMORY_BASIC_INFORMATION m;
+        if (!VirtualQuery(r - 2, &m, sizeof m) || m.State != MEM_COMMIT || !(m.Protect & (PAGE_EXECUTE_READ | PAGE_EXECUTE | PAGE_EXECUTE_READWRITE))) return 0;
+        if (!(m.Protect & PAGE_EXECUTE_READWRITE)) { int k = nc < 8 ? nc++ : (int)(a >> 12) & 7; lo[k] = (uintptr_t)m.BaseAddress; hi[k] = lo[k] + m.RegionSize; }
+    }
     return r[-2] == 0x0f && r[-1] == 0x05;
 }
 static int ra_audio(const char *n) { return strstr(n, "nus3::audio") || strstr(n, "sindou") || strstr(n, "AudioDevice"); }
@@ -1325,6 +1335,7 @@ static void ra_step(Ctx *c) {
     double t = now_ms();
     g_ra_kicks++;
     if (g_ra_fe_kind) { int k = g_ra_fe_kind - 1; g_rap[k][3] += t - g_ra_fe_end; g_rapn[k]++; g_ra_fe_kind = 0; }
+    if (rgs_wanted()) { rgs_step(c); return; }            /* R2: the snapshot ring's rollback simulation instead of run-ahead */
     if (g_ra_phase == 1) {                               /* end of the speculative pass: its picture is presented; back to the save point */
         g_ra_spec_sum += t - g_ra_t_mark; g_ra_nspec++;
         ra_restore(c);
@@ -1403,10 +1414,18 @@ static void ra_kick2(Ctx *c, void *user) {           /* hook on FUN 0x7103549170
     uint64_t lr = c->x[30];
     if (lr == GA(0x71037494fcull) && g_ra_site == GA(0x7103749b24ull) && !g_ra_off && (g_ra_phase || ra_fight_on())) ra_workers_hold();      /* H1 */
     if (lr == g_ra_site) { ra_step(c); if (g_ra_wh_on) { ra_workers_release(); SetEvent(g_ra_wd_ev); } }      /* H2 */
-    if (g_ra_phase == 1 && g_ra_skip) {                  /* SSBU_RUNAHEAD_SKIP (experiment): job groups of the speculative pass whose result is thrown away */
+    if ((g_ra_phase == 1 && g_ra_skip) || rgs_skip_now()) {      /* SSBU_RUNAHEAD_SKIP (experiment): job groups of the speculative pass whose result is thrown away (R2: SSBU_RB_SIM_SKIP, re-run passes but the last) */
         int prep = c->x[30] == GA(0x7103749b24ull) || c->x[30] == GA(0x710374b4f8ull) || c->x[30] == GA(0x710374b528ull) || c->x[30] == GA(0x710374b558ull), rend = c->x[30] == GA(0x710374c0d8ull);
         int logic = c->x[30] == GA(0x710374c398ull) || c->x[30] == GA(0x710374c5b8ull);
-        if (((g_ra_skip & 1) && prep) || ((g_ra_skip & 2) && rend) || ((g_ra_skip & 4) && logic)) { g_ra_skipped_kicks++; return; }
+        int la = c->x[30] == GA(0x71037494fcull), lb = c->x[30] == GA(0x7103749598ull);      /* (R2) preparation lists A / B */
+        int sk = g_ra_phase == 1 ? g_ra_skip : rgs_skip_now();
+        if (((sk & 1) && prep) || ((sk & 2) && rend) || ((sk & 4) && logic) || (g_ra_phase == 2 && (((sk & 16) && la) || ((sk & 32) && lb)))) {
+            if (rend && g_ra_phase == 2) {                    /* (R2) the culling job of the render list sets this byte; the main loop spins on it at 0x7103749f48 */
+                uint64_t p = rd64(GA(0x71053365a8ull)); void r1_wrote(uint64_t a, uint64_t n);
+                if (p) { r1_wrote(p + 0x140, 1); *(volatile uint8_t *)(uintptr_t)(p + 0x140) = 1; }
+            }
+            g_ra_skipped_kicks++; return;
+        }
     }
     g_orig_kick2(c);
 }
@@ -1424,7 +1443,7 @@ static void ra_frame_end(double te) {
     { static long long n; if (++n % 1200 == 0 && g_ra_ready) ra_report(); }
     if (InterlockedExchange(&g_ra_lines, 0) > 0) {      /* this iteration ran a fight frame: real or speculative (for tests\r1_ra_cmp.py) */
         if (g_ra_nkind >= g_ra_kcap) { g_ra_kcap = g_ra_kcap ? g_ra_kcap * 2 : 65536; g_ra_kind = realloc(g_ra_kind, (size_t)g_ra_kcap); }
-        g_ra_kind[g_ra_nkind++] = g_ra_phase == 1 ? 'S' : 'R';
+        g_ra_kind[g_ra_nkind++] = g_ra_phase == 1 || (g_ra_phase == 2 && rgs_wanted()) ? 'S' : 'R';      /* (R2 simulation: a re-run pass = 'S') */
     }
 }
 static double pct(double *v, int n, int p) { if (!n) return 0; qsort(v, (size_t)n, sizeof *v, cmp_d); return v[(size_t)n * p / 100 < (size_t)n ? (size_t)n * p / 100 : (size_t)n - 1]; }
@@ -1443,7 +1462,9 @@ static void ra_report(void) {
         k == 0 ? "normal" : k == 1 ? "speculative" : "real", g_rapn[k], g_rap[k][0] / g_rapn[k], g_rap[k][1] / g_rapn[k], g_rap[k][2] / g_rapn[k], g_rap[k][3] / g_rapn[k]);
     static long long printed;
     for (long long i = printed; i < g_ra_nkind; i += 200, printed = i < g_ra_nkind ? i : g_ra_nkind) LOG("r1: RA kinds %lld: %.*s\n", i + 1, (int)(g_ra_nkind - i < 200 ? g_ra_nkind - i : 200), g_ra_kind + i);
+    if (rgs_wanted()) rgs_report();
 }
+#include "r1_ring.c"                                  /* R2: the snapshot ring (rollback) */
 static void ra_init(void) {
     g_ra = 1;
     if (getenv("SSBU_RUNAHEAD_PARK_MS")) g_ra_park_ms = atof(getenv("SSBU_RUNAHEAD_PARK_MS"));
@@ -1459,6 +1480,9 @@ static void ra_init(void) {
     int l = hook_install_name("_ZN7lua2cpp16L2CFighterCommon31sys_line_system_control_fighterEv", ra_line, NULL, &g_orig_line);
     LOG("r1: RUN-AHEAD on (one frame): marks %s; save point: the return of the job-counter wait 710354c720 called at 710374c028 (preparation done, before the render kick): %s; frame line counter: %s; park %.1f ms\n",
         g_mark > 0 ? "yes" : "NO (run-ahead will stay off)", k ? "installed" : "FAILED", l ? "installed or waiting" : "FAILED", g_ra_park_ms);
+    if (rgs_wanted()) { if (getenv("SSBU_RB_SIM_SKIP")) g_rgs_skip = atoi(getenv("SSBU_RB_SIM_SKIP"));
+        LOG("r1: RB SIM on (R2 snapshot ring): a rollback every %d real passes, k = 1..%d rotating, after %d captures; kick skip mask in re-run passes %d\n", g_rgs_n, g_rgs_k, g_rgs_warm, g_rgs_skip);
+        rgs_lite_init(); }
     atexit(ra_report);
 }
 
@@ -1527,11 +1551,13 @@ static void r1_frame_end(Ctx *c, void *user) {
 int r1_poll(int ticks) {
     g_ff += ticks;
     g_t_poll = now_ms();
+    if (g_ra > 0 && rgs_wanted()) return rgs_poll();     /* R2 simulation: a re-run pass's poll does not advance it either */
     if (g_ra > 0) return g_ra_phase == 1;                 /* run-ahead: the speculative pass's poll does not advance the input sequence */
     return g_phase == 2 && g_ipad < g_npad;
 }
 /* nnhid.c, player 1's values just before they are written: recorded in the first pass, replaced in the re-run */
 void r1_pad(uint64_t *b, int *lx, int *ly, int *rx, int *ry) {
+    if (g_ra > 0 && rgs_wanted()) { rgs_pad(b, lx, ly, rx, ry); return; }      /* R2 simulation: recorded per pass, given again in its re-run */
     if (g_ra > 0) {                                       /* run-ahead: the speculative pass gets player 1's last real values */
         if (g_ra_phase == 1) { *b = g_ra_pad.b; *lx = g_ra_pad.lx; *ly = g_ra_pad.ly; *rx = g_ra_pad.rx; *ry = g_ra_pad.ry; }
         else { PadRec r = {*b, *lx, *ly, *rx, *ry}; g_ra_pad = r; }
