@@ -284,7 +284,17 @@ def step_deps(cx):
     if a.runtime:
         say('  MSVC Build Tools / Windows SDK: %s (not needed with the runtime package%s)' % (
             'found' if cx.tools['msvc'] else 'not found', '' if cx.tools['msvc'] else '; the check step skips the differential test'))
-        cx.tools['opus'] = next((os.path.join(cx.runtime_dir, n) for n in ('opus.dll', 'libopus-0.dll') if os.path.isfile(os.path.join(cx.runtime_dir, n))), None)
+        # libopus (the music): the package's own copy, else --opus / OPUS_DLL / <repo>/deps/opus (install.py fetches it there);
+        # before 2026-10-20 only the package was looked at, so a package without it left the game silent
+        cands = [os.path.join(cx.runtime_dir, n) for n in ('opus.dll', 'libopus-0.dll')]
+        for p in (a.opus, os.environ.get('OPUS_DLL'), os.path.join(REPO, 'deps', 'opus')):
+            if p and os.path.isfile(p):
+                cands.append(p)
+            elif p:
+                cands += [os.path.join(p, n) for n in ('opus.dll', 'libopus-0.dll', os.path.join('bin', 'opus.dll'), os.path.join('bin', 'libopus-0.dll'))]
+        cx.tools['opus'] = next((os.path.abspath(c) for c in cands if os.path.isfile(c)), None)
+        say('  libopus  %s' % (cx.tools['opus'] + ' (copied beside the exe)' if cx.tools['opus'] else
+                               'NOT FOUND: the music and other Opus sounds will be silent (--opus <opus.dll or its folder>)'))
         dump_checks(cx, a)
         cx.state['tools'] = cx.tools
         return
@@ -584,10 +594,14 @@ def step_link(cx):
             if not os.path.exists(os.path.join(cx.work, f)):
                 raise Fail('%s was not produced' % f)
         opus = [n for n in files if n.lower() in ('opus.dll', 'libopus-0.dll')]
-        say('  %s, SDL3.dll, ssbu_glslang.dll%s from the runtime package; ssbu_game_eh_o1.dll %.0f MB linked here' % (
-            EXE, ', ' + opus[0] if opus else '', os.path.getsize(os.path.join(cx.work, 'ssbu_game_eh_o1.dll')) / 1048576.0))
+        src = cx.tools.get('opus')                      # the deps step's choice: the package's copy or deps\opus (install.py)
+        if not opus and src:
+            opus = [os.path.basename(src) if os.path.basename(src).lower() in ('opus.dll', 'libopus-0.dll') else 'opus.dll']
+            shutil.copy2(src, os.path.join(cx.work, opus[0]))
+        say('  %s, SDL3.dll, ssbu_glslang.dll from the runtime package%s; ssbu_game_eh_o1.dll %.0f MB linked here' % (
+            EXE, ', ' + opus[0] + ' (music)' if opus else '', os.path.getsize(os.path.join(cx.work, 'ssbu_game_eh_o1.dll')) / 1048576.0))
         if not opus:
-            say('  WARNING: the runtime package has no libopus: music and the other Opus sounds will be silent')
+            say('  WARNING: no libopus (neither in the runtime package nor in deps\\opus): music and the other Opus sounds will be silent')
         return
     cx.run('link', [os.environ.get('COMSPEC', 'cmd.exe'), '/c', os.path.join(cx.work, 'build_glslang.bat')], env=cx.env())
     cx.run('link', [sys.executable, 'build.py', 'link'], env=cx.env(**{k: v for k, v in build_env(cx).items() if k != 'RECOMP_NRO_SUFFIX'}, RECOMP_EXE=EXE))

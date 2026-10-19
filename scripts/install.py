@@ -324,9 +324,11 @@ def step_inputs(cx):
                 raise Stop('the dump folder %s has no %s\\ inside' % (a.dump, sub), 'Choose the folder that holds exefs\\ and romfs\\.')
         cx.dump = a.dump
         notes.append('dump folder given with --dump: %s' % a.dump)
-    elif dump_ok(ready) and not (a.base or a.update):
+    elif dump_ok(ready) and (not (a.base or a.update) or dump_made_from(ready) in (None, made_from_key(a.base, a.update))):
+        # 2026-10-20: the window always passes the game files it found, so "already there" never applied and every Resume
+        # unpacked the game again; now a complete dump is kept when it was made from the same files (or has no record yet)
         cx.dump = ready
-        notes.append('build\\dump is already there')
+        notes.append('build\\dump is already there (delete the build\\dump folder to make it again)')
     cx.dlc = [p for p in a.dlc]
     if cx.dump and has_fonts(os.path.join(cx.dump, 'sysdata')):
         for n in notes:
@@ -455,6 +457,24 @@ def ensure_fonts(cx, dump):
                'Restore runtime\\fonts_open (scripts/update.py, or tools/extract/open_fonts.py), or give your firmware folder (--firmware).')
 
 
+def made_from_key(base, update):
+    """The game files a dump comes from: names and sizes (no paths: the same files moved elsewhere still match)."""
+    def one(p):
+        try:
+            return '%s:%d' % (os.path.basename(p).lower(), os.path.getsize(p) if os.path.isfile(p) else -1)
+        except (OSError, TypeError):
+            return str(p)
+    return '%s|%s' % (one(base), one(update))
+
+
+def dump_made_from(dump):
+    try:
+        with open(os.path.join(dump, 'made_from.json'), encoding='utf-8') as f:
+            return json.load(f).get('key')
+    except (OSError, ValueError):
+        return None
+
+
 def step_dump(cx):
     a = cx.a
     if cx.dump:
@@ -489,6 +509,11 @@ def step_dump(cx):
         os.replace(out, out + '.old_%d' % int(time.time()))      # an unfinished dump of an older run: kept aside, not deleted
     if not os.path.isdir(out):
         os.replace(part, out)
+    try:                                                         # what this dump was made from (Resume keeps it next time)
+        with open(os.path.join(out, 'made_from.json'), 'w', encoding='utf-8') as f:
+            json.dump({'key': made_from_key(cx.base, cx.update)}, f)
+    except OSError:
+        pass
     if own_cache:
         shutil.rmtree(env['SSBU_TMP'], ignore_errors=True)
     cx.dump = out
