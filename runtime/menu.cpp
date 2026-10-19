@@ -31,6 +31,9 @@
 extern "C" {
 #include "gfx_options.h"
 #include "menu.h"
+#include "nnpad.h"
+uint64_t nnhid_preview(int id, int st[4]); void nnhid_kb_player_refresh(void); int nnhid_kb_player(void);      /* nnhid.c */
+void nnhid_test_key(int vk); long nnhid_test_result(uint64_t *buttons); int nnpad_kb_default(int idx);
 uint64_t nnhid_menu_buttons(void);                                   /* nnhid.c: every pad, Npad bit order, no effect on the game */
 void display_set_window_mode(int mode); void display_set_client_size(int w, int h); int display_window_mode(void);      /* display.c */
 int nnaudio_volume(void); void nnaudio_set_volume(int percent);     /* nnaudio.c */
@@ -165,7 +168,7 @@ static void settings_init(int cw, int ch) {
 static void ini(const char *key, const char *value) { gfx_ini_set(key, value); }
 static int restart_pending(void) {
     return S.vsync != S0.vsync || S.latency != S0.latency || S.renderer != S0.renderer || S.aniso != S0.aniso || S.profile != S0.profile || S.wait != S0.wait ||
-           S.prepare != S0.prepare || S.load != S0.load || S.console != S0.console || S.runahead != S0.runahead || S.lang != S0.lang || S.kb_player != S0.kb_player ||
+           S.prepare != S0.prepare || S.load != S0.load || S.console != S0.console || S.runahead != S0.runahead || S.lang != S0.lang ||
            fabsf(S.scale - S0.scale) > 0.001f || strcmp(S.gpu, S0.gpu);
 }
 static void apply_stats(int on) {            /* live: the stats box (F2) */
@@ -250,8 +253,8 @@ static uint64_t g_pad_prev;
 static long long g_closed_at, g_frame;
 static char g_pads[1024];
 static ULONGLONG g_pads_at;
-enum { SEC_DISPLAY, SEC_GRAPHICS, SEC_AUDIO, SEC_INPUT, SEC_DLC, SEC_LANG, SEC_LOG, SEC_ABOUT, SEC_N };
-static const char *const k_sections[SEC_N] = {"Display", "Graphics", "Audio", "Input", "Add-on content", "Language", "Log", "About"};
+enum { SEC_DISPLAY, SEC_GRAPHICS, SEC_AUDIO, SEC_INPUT, SEC_CONTROLS, SEC_DLC, SEC_LANG, SEC_LOG, SEC_ABOUT, SEC_N };
+static const char *const k_sections[SEC_N] = {"Display", "Graphics", "Audio", "Input", "Controls", "Add-on content", "Language", "Log", "About"};
 
 static ImGuiKey vk_key(int vk) {
     if (vk >= 'A' && vk <= 'Z') return (ImGuiKey)(ImGuiKey_A + (vk - 'A'));
@@ -390,36 +393,185 @@ static void sec_input(void) {
     tag(1, S.runahead != S0.runahead);
     help("Costs a second pass of each fight frame on the CPU; needs the build with dirty-page marks. Leave it off on a weak PC.");
     ImGui::Separator();
-    static const char *const kp[] = {"auto", "nobody", "1", "2", "3", "4", "5", "6", "7", "8"};
-    int p = S.kb_player + 2;
-    if (combo("Keyboard plays as player", &p, kp, N(kp))) { S.kb_player = p - 2; nnpad_kb_player_set(S.kb_player); }
-    tag(1, S.kb_player != S0.kb_player);
-    ImGui::Text("Keyboard keys");
+    help("Buttons, keys, sticks, which controller is which player: the Controls page. "
+         "Menu: F1, or the Home / Guide (or Capture / Share) button; + or Esc closes it. While the menu is open the game gets no input.");
+    if (ImGui::Button("Open the Controls page")) { g_section = SEC_CONTROLS; g_section_req = g_section; }
+}
+
+/* ------------------------------------------------------------------ the Controls page: remapping of the keyboard and of every
+ * controller (nnpad_sdl.c writes controllers.ini; all of it is used at once). The game's own actions next to each control are
+ * the game's DEFAULT controls (its Options > Controls can change them per player name). */
+static const char *const k_target_label[24] = {"A", "B", "X", "Y", "L-stick click", "R-stick click", "L", "R", "ZL", "ZR", "+ (Plus)", "- (Minus)",
+    "D-pad left", "D-pad up", "D-pad right", "D-pad down", "Left stick left", "Left stick up", "Left stick right", "Left stick down",
+    "Right stick left", "Right stick up", "Right stick right", "Right stick down"};
+static const char *const k_action[24] = {"attack", "special", "jump", "jump", "-", "-", "grab", "grab", "shield", "shield", "pause", "pause",
+    "taunt", "taunt", "taunt", "taunt", "move", "move / jump", "move", "move / crouch", "smash attack", "smash attack", "smash attack", "smash attack"};
+static const char *const k_display_order_note = "Order: the Switch Pro Controller's buttons, then the d-pad, then the two sticks.";
+static int g_ctl_dev = -1;          /* -1 = the keyboard, else the index of a controller (nnpad_list) */
+static int g_ctl_scope = 1;         /* 1 = every controller of this kind, 0 = this controller only */
+static int g_pcap = -1;             /* a controller target waiting for "press the button / stick direction" */
+static ULONGLONG g_cap_t0;          /* when the waiting (keyboard or controller) began */
+#define CAPTURE_MS 6000
+static NnPadDev g_devs[16];
+static int g_ndev;
+static ULONGLONG g_devs_at;
+static void capture_cancel(const char *why) {
+    if (g_capture >= 0 || g_pcap >= 0) { printf("menu: rebinding of %s cancelled (%s)\n", nnpad_target_name(g_capture >= 0 ? g_capture : g_pcap), why); fflush(stdout); }
+    g_capture = -1;
+    if (g_pcap >= 0) nnpad_capture_end();
+    g_pcap = -1;
+}
+static int capturing(void) { return g_capture >= 0 || g_pcap >= 0; }
+static const NnPadDev *ctl_dev(void) { for (int i = 0; i < g_ndev; i++) if (g_devs[i].index == g_ctl_dev) return &g_devs[i]; return NULL; }
+/* once per frame (render thread): the controller capture and the time-outs */
+static void capture_tick(uint64_t down) {
+    if (!capturing()) return;
+    ULONGLONG now = GetTickCount64();
+    if (now - g_cap_t0 > CAPTURE_MS) { capture_cancel("time-out"); return; }
+    if (g_capture >= 0 && (down & BIT(B_B))) { capture_cancel("B on a controller"); return; }      /* a keyboard key is wanted: B of a pad cancels */
+    if (g_pcap >= 0) {
+        char src[32];
+        int r = nnpad_capture_poll(src, sizeof src);
+        if (r == 1) {
+            nnpad_target_set(g_ctl_dev, g_ctl_scope, g_pcap, src);
+            printf("menu: %s of controller %d bound to %s (%s)\n", nnpad_target_name(g_pcap), g_ctl_dev, src, g_ctl_scope ? "its type profile" : "this controller only"); fflush(stdout);
+            nnpad_capture_end(); g_pcap = -1;
+        } else if (r == 2) capture_cancel("Home / Capture");
+        else if (r < 0) capture_cancel("the controller is gone");
+    }
+}
+static void test_area(int player) {
+    int st[4];
+    uint64_t b = player >= 0 ? nnhid_preview(player, st) : 0;
+    if (player < 0) { ImGui::TextDisabled("Test: this device is not a player now."); return; }
+    ImGui::Text("Test (player %d, what the game would get):", player + 1);
+    static const char *const sh[16] = {"A", "B", "X", "Y", "LS", "RS", "L", "R", "ZL", "ZR", "+", "-", "<", "^", ">", "v"};
+    for (int i = 0; i < 16; i++) {
+        bool on = (b >> i & 1) != 0;
+        if (i) ImGui::SameLine();
+        ImGui::PushStyleColor(ImGuiCol_Button, on ? ImVec4(0.95f, 0.55f, 0.15f, 1) : ImVec4(0.25f, 0.25f, 0.28f, 1));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, on ? ImVec4(0.95f, 0.55f, 0.15f, 1) : ImVec4(0.25f, 0.25f, 0.28f, 1));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, on ? ImVec4(0.95f, 0.55f, 0.15f, 1) : ImVec4(0.25f, 0.25f, 0.28f, 1));
+        ImGui::PushID(1000 + i);
+        ImGui::SmallButton(sh[i]);
+        ImGui::PopID();
+        ImGui::PopStyleColor(3);
+    }
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    float r = ImGui::GetFontSize() * 1.6f;
+    ImVec2 p = ImGui::GetCursorScreenPos();
+    for (int s = 0; s < 2; s++) {
+        ImVec2 c(p.x + r + s * (r * 2.6f), p.y + r);
+        dl->AddCircle(c, r, IM_COL32(160, 160, 170, 255), 32, 1.5f);
+        dl->AddCircleFilled(ImVec2(c.x + r * st[s * 2] / 32767.0f, c.y - r * st[s * 2 + 1] / 32767.0f), r * 0.18f, IM_COL32(240, 140, 40, 255));
+    }
+    ImGui::Dummy(ImVec2(r * 4.6f, r * 2.0f));
+    ImGui::SameLine();
+    ImGui::Text("left (%6d, %6d)\nright (%6d, %6d)", st[0], st[1], st[2], st[3]);
+}
+static void sec_controls(void) {
+    if (GetTickCount64() - g_devs_at > 500) { g_devs_at = GetTickCount64(); g_ndev = nnpad_list(g_devs, 16); }
+    const NnPadDev *dv = ctl_dev();
+    if (g_ctl_dev >= 0 && !dv) { capture_cancel("the controller is gone"); g_ctl_dev = -1; }
+    char cur[160];
+    if (dv) snprintf(cur, sizeof cur, "%s (%s)%s", dv->name, nnpad_type_label(dv->type), dv->player >= 0 ? "" : " - no player");
+    else snprintf(cur, sizeof cur, "Keyboard");
+    if (capturing()) ImGui::BeginDisabled();
+    if (ImGui::BeginCombo("Device", cur)) {
+        if (ImGui::Selectable("Keyboard", g_ctl_dev < 0)) g_ctl_dev = -1;
+        for (int i = 0; i < g_ndev; i++) {
+            char l[200];
+            if (g_devs[i].player >= 0) snprintf(l, sizeof l, "Player %d: %s (%s)##%d", g_devs[i].player + 1, g_devs[i].name, nnpad_type_label(g_devs[i].type), g_devs[i].index);
+            else snprintf(l, sizeof l, "No player: %s (%s)##%d", g_devs[i].name, nnpad_type_label(g_devs[i].type), g_devs[i].index);
+            if (ImGui::Selectable(l, g_ctl_dev == g_devs[i].index)) g_ctl_dev = g_devs[i].index;
+        }
+        ImGui::EndCombo();
+    }
+    if (capturing()) ImGui::EndDisabled();
     tag(0, 0);
-    ImGui::TextDisabled("%s, [keyboard]", nnpad_config_path());
-    if (g_capture >= 0) ImGui::TextColored(ImVec4(1, 0.8f, 0.2f, 1), "Press the key for %s (Esc = cancel)", nnpad_kb_label(g_capture));
-    if (ImGui::BeginTable("kb", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit)) {
+    if (!g_ndev) { ImGui::SameLine(); ImGui::TextDisabled("(no controller connected)"); }
+    dv = ctl_dev();
+    static const char *const kp[] = {"auto", "nobody", "1", "2", "3", "4", "5", "6", "7", "8"};
+    static const char *const pp[] = {"auto", "1", "2", "3", "4", "5", "6", "7", "8"};
+    if (!dv) {
+        int p = S.kb_player + 2;
+        if (combo("Keyboard plays as player", &p, kp, N(kp))) { S.kb_player = p - 2; S0.kb_player = S.kb_player; nnpad_kb_player_set(S.kb_player); nnhid_kb_player_refresh(); }
+        tag(0, 0);
+        ImGui::SameLine(); ImGui::TextDisabled("now: %s", nnhid_kb_player() >= 0 ? kp[nnhid_kb_player() + 2] : "nobody");
+    } else {
+        int p = nnpad_player_cfg(dv->index) + 1;
+        if (combo("Player", &p, pp, N(pp))) nnpad_player_assign(dv->index, p - 1);
+        tag(0, 0);
+        ImGui::SameLine(); ImGui::TextDisabled("now: %s", dv->player >= 0 ? pp[dv->player + 1] : "none");
+        char every[64];
+        snprintf(every, sizeof every, "Every %s controller", nnpad_type_label(dv->type));
+        if (ImGui::RadioButton(every, g_ctl_scope == 1)) g_ctl_scope = 1;
+        ImGui::SameLine();
+        if (ImGui::RadioButton("This controller only", g_ctl_scope == 0)) g_ctl_scope = 0;
+        ImGui::SameLine();
+        ImGui::TextDisabled("changes are saved for: %s", g_ctl_scope ? "its kind (a profile used whenever one is connected)" : "this controller (its GUID)");
+    }
+    ImGui::TextDisabled("%s   %s", nnpad_config_path(), k_display_order_note);
+    if (g_capture >= 0) ImGui::TextColored(ImVec4(1, 0.8f, 0.2f, 1), "Press the KEY for %s ... %d s (Esc or B on a controller = cancel)", k_target_label[g_capture], (int)((CAPTURE_MS - (GetTickCount64() - g_cap_t0)) / 1000) + 1);
+    if (g_pcap >= 0) ImGui::TextColored(ImVec4(1, 0.8f, 0.2f, 1), "Press the BUTTON or push the STICK / TRIGGER for %s ... %d s (Esc or Home = cancel)", k_target_label[g_pcap], (int)((CAPTURE_MS - (GetTickCount64() - g_cap_t0)) / 1000) + 1);
+    float tbl_h = ImGui::GetContentRegionAvail().y - ImGui::GetFrameHeightWithSpacing() * (dv ? 7.4f : 4.6f);
+    if (tbl_h < ImGui::GetFrameHeight() * 4) tbl_h = ImGui::GetFrameHeight() * 4;
+    if (ImGui::BeginTable("map", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingStretchProp, ImVec2(0, tbl_h))) {
+        ImGui::TableSetupScrollFreeze(0, 1);
+        ImGui::TableSetupColumn("Switch control", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+        ImGui::TableSetupColumn("In the game (default)", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+        ImGui::TableSetupColumn(dv ? "Bound to" : "Key", ImGuiTableColumnFlags_WidthStretch, 1.6f);
+        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthStretch, 1.4f);
+        ImGui::TableHeadersRow();
         for (int i = 0; i < 24; i++) {
-            char name[16];
-            nnpad_vk_name(nnpad_kb_vk(i), name, sizeof name);
+            char name[96];
+            int from = 0;
+            if (dv) from = nnpad_target_text(dv->index, i, name, sizeof name); else nnpad_vk_name(nnpad_kb_vk(i), name, sizeof name);
             ImGui::PushID(i);
             ImGui::TableNextRow();
-            ImGui::TableSetColumnIndex(0); ImGui::TextUnformatted(nnpad_kb_label(i));
-            ImGui::TableSetColumnIndex(1); ImGui::TextUnformatted(g_capture == i ? "..." : name);
+            ImGui::TableSetColumnIndex(0); ImGui::TextUnformatted(k_target_label[i]);
+            ImGui::TableSetColumnIndex(1); ImGui::TextDisabled("%s", k_action[i]);
             ImGui::TableSetColumnIndex(2);
-            if (ImGui::SmallButton("Change")) g_capture = i;
+            if ((!dv && g_capture == i) || (dv && g_pcap == i)) ImGui::TextColored(ImVec4(1, 0.8f, 0.2f, 1), "... waiting");
+            else if (dv) { ImGui::TextUnformatted(name); ImGui::SameLine(); ImGui::TextDisabled(from == 2 ? "(this controller)" : from == 1 ? "(profile)" : "(default)"); }
+            else ImGui::TextUnformatted(name);
+            ImGui::TableSetColumnIndex(3);
+            if (capturing()) ImGui::BeginDisabled();
+            if (ImGui::SmallButton("Change")) {
+                g_cap_t0 = GetTickCount64();
+                if (dv) { g_pcap = i; nnpad_capture_begin(dv->index); } else g_capture = i;
+            }
             ImGui::SameLine();
-            if (ImGui::SmallButton("Clear")) nnpad_kb_bind(i, 0);
+            if (ImGui::SmallButton("Clear")) { if (dv) nnpad_target_set(dv->index, g_ctl_scope, i, "none"); else nnpad_kb_bind(i, 0); }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Default")) { if (dv) nnpad_target_set(dv->index, g_ctl_scope, i, NULL); else nnpad_kb_bind(i, nnpad_kb_default(i)); }
+            if (capturing()) ImGui::EndDisabled();
             ImGui::PopID();
         }
         ImGui::EndTable();
     }
+    if (capturing()) ImGui::BeginDisabled();
+    if (dv) {
+        char rl[96];
+        snprintf(rl, sizeof rl, "Reset %s to the default", g_ctl_scope ? "the profile" : "this controller");
+        if (ImGui::Button(rl)) nnpad_profile_reset(dv->index, g_ctl_scope);
+        float tv[3];
+        nnpad_tune_get(dv->index, tv);
+        static const char *const tn[3] = {"Stick dead zone", "Stick outer zone (lower = more sensitive)", "Trigger threshold (ZL / ZR)"};
+        static const float lo[3] = {0.0f, 0.5f, 0.05f}, hi[3] = {0.5f, 1.0f, 0.95f};
+        static float edit[3];
+        static int editing = -1;
+        for (int k = 0; k < 3; k++) {
+            float v = editing == k ? edit[k] : tv[k];
+            if (ImGui::SliderFloat(tn[k], &v, lo[k], hi[k], "%.2f")) { edit[k] = v; editing = k; }
+            if (ImGui::IsItemDeactivatedAfterEdit()) { nnpad_tune_set(dv->index, g_ctl_scope, k, v); editing = -1; }
+        }
+    } else {
+        if (ImGui::Button("All keys back to the default")) for (int i = 0; i < 24; i++) nnpad_kb_bind(i, nnpad_kb_default(i));
+    }
+    if (capturing()) ImGui::EndDisabled();
     ImGui::Separator();
-    ImGui::Text("Controllers");
-    if (GetTickCount64() - g_pads_at > 1000) { g_pads_at = GetTickCount64(); if (!nnpad_describe(g_pads, sizeof g_pads)) snprintf(g_pads, sizeof g_pads, "(none connected)\n"); }
-    ImGui::TextUnformatted(g_pads);
-    help("A controller's buttons: ssbu_native.exe --pad-map <player> (asks for each button, writes controllers.ini; read again at once). "
-         "Menu: F1, or the Home / Guide (or Capture / Share) button; + or Esc closes it. While the menu is open the game gets no input.");
+    test_area(dv ? dv->player : nnhid_kb_player());
 }
 static void sec_dlc(void) {
     const int *own = NULL;
@@ -624,6 +776,7 @@ static void draw_menu(int cw, int ch) {
     case SEC_GRAPHICS: sec_graphics(); break;
     case SEC_AUDIO: sec_audio(); break;
     case SEC_INPUT: sec_input(); break;
+    case SEC_CONTROLS: sec_controls(); break;
     case SEC_DLC: sec_dlc(); break;
     case SEC_LANG: sec_lang(); break;
     case SEC_LOG: sec_log(); break;
@@ -644,13 +797,13 @@ static void set_open(int on) {
         InterlockedExchange(&g_open, 1);
         InterlockedExchange(&g_guard, 1);
         g_section_req = g_section;
-        g_capture = -1;
+        capture_cancel("menu opened");
         g_dlc_loaded = 0;
         printf("menu: opened at presented frame %lld\n", g_frame);
     } else {
         InterlockedExchange(&g_open, 0);
         g_closed_at = g_frame;
-        g_capture = -1;
+        capture_cancel("menu closed");
         printf("menu: closed at presented frame %lld\n", g_frame);
     }
     fflush(stdout);
@@ -672,7 +825,7 @@ static DWORD WINAPI redraw_thread(LPVOID) {
 
 /* ------------------------------------------------------------------ SSBU_MENU_TEST */
 static long long g_test_at = -2;
-static int g_test_step;
+static int g_test_step, g_test_kb_old;
 static char g_shot_path[MAX_PATH];
 static int g_shot_req;
 static void test_shot(const char *what) {
@@ -707,6 +860,34 @@ static void test_tick(void) {
     case 8: if (t - step_at >= 10) { test_shot("stats"); g_test_step = 9; } break;
     case 10: apply_stats(0); apply_overlay(!S.overlay); printf("menu: test: stats overlay and frame time overlay back as they were\n"); g_test_step = 11; break;
     case 11: if (!g_guard) { printf("menu: test: closed; input to the game blocked = %d (released) at frame %lld\n", menu_input_blocked(), g_frame); g_test_step = 12; } break;
+    /* the Controls page: a key rebound through the same code as the page (capture + window key message), and the game's
+     * own read of the keyboard player's pad before and after (nnhid_test_key holds the key P whatever the focus) */
+    case 12: g_test_kb_old = nnpad_kb_vk(0); nnhid_test_key('P'); g_test_step = 13; step_at = t;
+        printf("menu: test: controls: key P held for the keyboard's player %d (A is bound to key 0x%02x now)\n", nnhid_kb_player() + 1, g_test_kb_old); break;
+    case 13: if (t - step_at >= 15) {
+            uint64_t seen; long polls = nnhid_test_result(&seen); nnhid_test_key(0);
+            printf("menu: test: controls: BEFORE: %ld polls of player %d with key P held: the game read buttons 0x%llx (A %s)\n", polls, nnhid_kb_player() + 1, (unsigned long long)seen, seen & 1 ? "PRESSED" : "not pressed");
+            set_open(1); g_section = SEC_CONTROLS; g_section_req = g_section; g_ctl_dev = -1; g_test_step = 14; step_at = t; } break;
+    case 14: if (t - step_at >= 10) { test_shot("controls"); g_test_step = 15; } break;
+    case 16: g_cap_t0 = GetTickCount64(); g_capture = 0;                          /* the Change button of row A */
+        q_push(EV_KEY, 'P', 1); q_push(EV_KEY, 'P', 0);                          /* what the window thread queues for a press of P */
+        printf("menu: test: controls: Change on A, then the key P (window messages)\n"); g_test_step = 17; step_at = t; break;
+    case 17: if (t - step_at >= 3) {
+            char nm[16], got[128] = "(not found)", ln[256];
+            int in_kb = 0;
+            nnpad_vk_name(nnpad_kb_vk(0), nm, sizeof nm);
+            FILE *f = fopen(nnpad_config_path(), "rb");
+            while (f && fgets(ln, sizeof ln, f)) { if (ln[0] == '[') in_kb = !_strnicmp(ln, "[keyboard]", 10); else if (in_kb && !strncmp(ln, "A = ", 4)) { ln[strcspn(ln, "\r\n")] = 0; snprintf(got, sizeof got, "%s", ln); } }
+            if (f) fclose(f);
+            printf("menu: test: controls: A is now bound to %s; %s [keyboard] says \"%s\"\n", nm, nnpad_config_path(), got);
+            set_open(0); g_test_step = 18; } break;
+    case 18: if (!g_guard) { nnhid_test_key('P'); g_test_step = 19; step_at = t; } break;
+    case 19: if (t - step_at >= 15) {
+            uint64_t seen; long polls = nnhid_test_result(&seen); nnhid_test_key(0);
+            printf("menu: test: controls: AFTER: %ld polls of player %d with key P held: the game read buttons 0x%llx (A %s)\n", polls, nnhid_kb_player() + 1, (unsigned long long)seen, seen & 1 ? "PRESSED" : "not pressed");
+            nnpad_kb_bind(0, g_test_kb_old);
+            printf("menu: test: controls: A bound back to its old key 0x%02x; test over\n", g_test_kb_old);
+            g_test_step = 20; } break;
     }
     fflush(stdout);
 }
@@ -719,7 +900,7 @@ extern "C" int menu_shot_wanted(char *path, int n) {
 extern "C" void menu_shot_done(const char *path, int w, int h, int ok) {
     printf("menu: test: picture %s %dx%d %s; draw data of that frame: %d vertices, %d indices, %d commands\n", path, w, h, ok ? "written" : "NOT written", g_vtx.Size, g_idx.Size, g_cmd.Size);
     fflush(stdout);
-    if (g_test_step == 3 || g_test_step == 6 || g_test_step == 9) g_test_step++;
+    if (g_test_step == 3 || g_test_step == 6 || g_test_step == 9 || g_test_step == 15) g_test_step++;
 }
 
 /* ------------------------------------------------------------------ once per presented frame (render thread) */
@@ -736,8 +917,12 @@ extern "C" int menu_frame(int width, int height, MenuDraw *out) {
     test_tick();
     uint64_t b = nnhid_menu_buttons(), down = b & ~g_pad_prev;
     g_pad_prev = b;
-    if (down & (BIT(B_HOME) | BIT(B_CAPTURE))) menu_request_toggle();      /* nnhid_menu_buttons bits 16 / 17: never seen by the game */
-    if (g_open && (down & BIT(B_PLUS))) menu_request_toggle();
+    if (g_open && capturing()) { if (g_pcap < 0 && (down & (BIT(B_HOME) | BIT(B_CAPTURE)))) capture_cancel("Home / Capture"); }      /* Home cancels a rebinding instead of closing */
+    else {
+        if (down & (BIT(B_HOME) | BIT(B_CAPTURE))) menu_request_toggle();      /* nnhid_menu_buttons bits 16 / 17: never seen by the game */
+        if (g_open && (down & BIT(B_PLUS))) menu_request_toggle();
+    }
+    if (g_open) capture_tick(down);
     for (LONG t = InterlockedExchange(&g_toggle_req, 0); t > 0; t--) set_open(!g_open);
     if (!g_open && g_guard && b == 0 && g_frame - g_closed_at >= 6) InterlockedExchange(&g_guard, 0);      /* closed and every pad button released */
     for (LONG t = InterlockedExchange(&g_stats_req, 0); t > 0; t--) apply_stats(!S.stats);
@@ -754,10 +939,11 @@ extern "C" int menu_frame(int width, int height, MenuDraw *out) {
     for (int i = 0; i < n && g_open; i++) {
         Ev &e = ev[i];
         if (e.type == EV_KEY && g_capture >= 0 && e.b) {                      /* a new keyboard binding */
-            if (e.a != VK_ESCAPE) nnpad_kb_bind(g_capture, e.a);
-            g_capture = -1;
+            if (e.a != VK_ESCAPE) { nnpad_kb_bind(g_capture, e.a); char nm[16]; nnpad_vk_name(e.a, nm, sizeof nm); printf("menu: keyboard %s bound to %s\n", nnpad_target_name(g_capture), nm); fflush(stdout); g_capture = -1; }
+            else capture_cancel("Esc");
             continue;
         }
+        if (e.type == EV_KEY && g_pcap >= 0) { if (e.b && e.a == VK_ESCAPE) capture_cancel("Esc"); continue; }      /* the keyboard does not drive the menu meanwhile */
         switch (e.type) {
         case EV_MOVE: io.AddMousePosEvent((float)e.a, (float)e.b); break;
         case EV_BTN: io.AddMouseButtonEvent(e.a, e.b != 0); break;
@@ -772,9 +958,9 @@ extern "C" int menu_frame(int width, int height, MenuDraw *out) {
             break;
         }
     }
-    pad_feed(io, g_open && g_capture < 0 ? b : 0);
-    if (g_open && (down & BIT(B_L))) { g_section = (g_section + SEC_N - 1) % SEC_N; g_section_req = g_section; }
-    if (g_open && (down & BIT(B_R))) { g_section = (g_section + 1) % SEC_N; g_section_req = g_section; }
+    pad_feed(io, g_open && !capturing() ? b : 0);
+    if (g_open && !capturing() && (down & BIT(B_L))) { g_section = (g_section + SEC_N - 1) % SEC_N; g_section_req = g_section; }
+    if (g_open && !capturing() && (down & BIT(B_R))) { g_section = (g_section + 1) % SEC_N; g_section_req = g_section; }
     io.MouseDrawCursor = false;
     ImGui::NewFrame();
     if (S.overlay) draw_overlay();

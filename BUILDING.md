@@ -183,6 +183,12 @@ A settings menu drawn over the game's picture (Dear ImGui, Vulkan renderer only)
 - While it is open the game keeps running but gets no input from the pads and the keyboard.
 - Pages: Display, Graphics, Audio, Input, Add-on content, Language, Log (with **Export log**), About. Every control is marked
   **[live]** (acts at once) or **[restart]** (saved now, used at the next start).
+- **Controls** page: remap the keyboard and every controller. For each Switch control (A B X Y L R ZL ZR + - stick
+  clicks, d-pad, both sticks' four directions; the game's default action is shown beside it) press **Change** and then the
+  key, button, trigger or stick direction you want (6 s; Esc, Home or B for a key cancels), **Clear** or **Default**.
+  A controller's changes are saved either for every controller of its kind (Xbox, PlayStation, Switch, GameCube, other)
+  or for that one controller, in `config\controllers.ini`, and used at once. Also: which player each controller and the
+  keyboard are, stick dead zone / outer zone, trigger threshold, and a live test of what the game would get.
 - **F2** shows a small stats overlay (fps, frame time, online state, run-ahead), menu open or not.
 
 It is built only when Dear ImGui v1.91.9b is found: `scripts/install.py` downloads it into `deps\imgui` and checks its

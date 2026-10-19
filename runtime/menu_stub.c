@@ -21,7 +21,8 @@ int menu_enabled(void) {
     if (!checked) {
         const char *e = getenv("SSBU_MENU");
         checked = 1;
-        if ((e && e[0] ? atoi(e) != 0 : gfx_menu()) || (getenv("SSBU_MENU_TEST") && getenv("SSBU_MENU_TEST")[0])) say_why("the settings menu is asked for");
+        /* graphics.ini menu = on is the default: only an explicit request (or the test hook) is worth a line at the start */
+        if ((e && e[0] && atoi(e) != 0) || (getenv("SSBU_MENU_TEST") && getenv("SSBU_MENU_TEST")[0])) say_why("the settings menu is asked for");
     }
     return 0;
 }

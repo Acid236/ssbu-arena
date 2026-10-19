@@ -511,6 +511,13 @@ static int player_connected(uint32_t id) {
 }
 
 int menu_input_blocked(void);                                 /* U1 (menu.cpp) */
+/* U1 TEST ONLY (menu.cpp, SSBU_MENU_TEST): a key of the PC keyboard taken as held for the keyboard's player through its
+ * configured binding, whatever the focus or the input sequence (the real keyboard is off in scripted runs); what the game
+ * then reads for that player is recorded. 0 = off: nothing changes. */
+static volatile LONG g_test_vk, g_test_polls;
+static volatile LONG64 g_test_seen;
+void nnhid_test_key(int vk) { InterlockedExchange(&g_test_polls, 0); InterlockedExchange64(&g_test_seen, 0); InterlockedExchange(&g_test_vk, vk); }
+long nnhid_test_result(uint64_t *buttons) { *buttons = (uint64_t)g_test_seen; return g_test_polls; }
 /* Player 1 gets the test scripts (SSBU_PRESS / SSBU_SCRIPT / SSBU_SEQ); the keyboard's player gets the real keys. */
 static int key_for(uint32_t id, int vk, int kbidx) {         /* vk = the fixed key of the test scripts; kbidx = which configurable binding (controllers.ini) the real keyboard uses */
     int down = 0;
@@ -519,6 +526,7 @@ static int key_for(uint32_t id, int vk, int kbidx) {         /* vk = the fixed k
     if (!down && (int)id == g_keyboard_player && !menu_input_blocked()) {
         int real = sdl_on() ? nnpad_kb_vk(kbidx) : vk;
         down = real && keyboard_ours() && (GetAsyncKeyState(real) & 0x8000) != 0;
+        if (!down && g_test_vk && real == g_test_vk) down = 1;      /* U1 test only (nnhid_test_key) */
     }
     return down;
 }
@@ -601,6 +609,7 @@ static void fill_pad(uint64_t out, uint32_t id, int style_is_fullkey) {
     if (rx > STICK_MAX / 2) buttons |= 1ull << (BTN_SL_RIGHT + 4);
     if (ry < -STICK_MAX / 2) buttons |= 1ull << (BTN_SL_DOWN + 4);
     wr64(out + 8, buttons);
+    if (g_test_vk && (int)id == g_keyboard_player) { InterlockedIncrement(&g_test_polls); InterlockedOr64(&g_test_seen, (LONG64)buttons); }      /* U1 test only */
     if (id == 0) { void display_l1_poll(uint64_t buttons, long long fight_ticks, long long poll); int r1_ra_phase(void); if (r1_ra_phase() != 1) display_l1_poll(buttons, l1_ticks, (long long)g_seq_polls); }      /* (R1 run-ahead: the speculative pass's poll is not a poll of the real timeline) */      /* L1 (input latency): the time of player 1's poll, the press it saw */
     wr32(out + 0x10, (uint32_t)lx);
     wr32(out + 0x14, (uint32_t)ly);
@@ -613,6 +622,32 @@ static void fill_pad(uint64_t out, uint32_t id, int style_is_fullkey) {
  * above, the left stick as the d-pad bits; bit 16 = a Home / Guide button, bit 17 = a Capture / Share button (U1, the
  * settings menu: those two are never part of the game's state). No side effect on the game's own polls (no sampling number, no input sequence,
  * no recording). The keyboard is not here: the menus read keys from the window (display.c). 0 in scripted runs. */
+/* U1, the Controls page: the keyboard player chosen in the menu is used at once */
+void nnhid_kb_player_refresh(void) { if (sdl_on()) { g_keyboard_player = nnpad_keyboard_player(); printf("nn::hid: keyboard = player %d (settings menu)\n", g_keyboard_player + 1); } }
+int nnhid_kb_player(void) { hid_setup(); return g_keyboard_player; }
+/* U1, the Controls page's test area: what player <id>'s controller and keyboard hold right now, as the game would get it
+ * (configured bindings), without any effect on the game (no sampling number, no sequence) and also while the menu is open.
+ * Pro bits 0..15; st = lx ly rx ry. */
+uint64_t nnhid_preview(int id, int st[4]) {
+    uint64_t b = 0;
+    int lx = 0, ly = 0, rx = 0, ry = 0;
+    hid_setup();
+    st[0] = st[1] = st[2] = st[3] = 0;
+    if (id < 0 || id > 7 || scripted_run()) return 0;
+    if (id == g_keyboard_player && sdl_on() && keyboard_ours()) {
+        int k[24];
+        for (int i = 0; i < 24; i++) { int vk = nnpad_kb_vk(i); k[i] = vk && (GetAsyncKeyState(vk) & 0x8000) != 0; }
+        for (int i = 0; i < 16; i++) if (k[i]) b |= 1ull << i;
+        lx = (k[18] - k[16]) * STICK_MAX; ly = (k[17] - k[19]) * STICK_MAX; rx = (k[22] - k[20]) * STICK_MAX; ry = (k[21] - k[23]) * STICK_MAX;
+    }
+    if (sdl_on()) {
+        NnPadState ps;
+        if (nnpad_get(id, &ps)) { b |= ps.buttons; if (ps.lx || ps.ly) { lx = ps.lx; ly = ps.ly; } if (ps.rx || ps.ry) { rx = ps.rx; ry = ps.ry; } }
+    }
+    st[0] = lx; st[1] = ly; st[2] = rx; st[3] = ry;
+    return b & 0xffff;
+}
+
 uint64_t nnhid_menu_buttons(void) {
     hid_setup();
     if (scripted_run() || !devices_live()) return 0;

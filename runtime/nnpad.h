@@ -25,6 +25,28 @@ int  nnpad_keyboard_player(void);                /* 0..7, -1 = nobody; fixed onc
 int  nnpad_kb_vk(int idx);                       /* configured virtual key: 0..15 = Pro buttons, 16..19 = left stick left/up/right/down, 20..23 = right stick; 0 = unbound */
 int  nnpad_tool(int argc, char **argv);          /* --pad-test / --pad-map <n> / SSBU_PAD_TEST: returns the exit code, or -1 if this is no tool request */
 
+/* U1, the Controls page of the settings menu (menu.cpp). Targets 0..15 = the Pro buttons above, 16..23 = left stick
+ * left/up/right/down, right stick left/up/right/down. A device is named by its index (stable while it stays connected);
+ * scope 0 = this controller only ([device <GUID>]), 1 = every controller of its kind ([type <kind>]). */
+typedef struct { int index, player, type, gamepad; char name[80], guid[40]; } NnPadDev;
+int  nnpad_list(NnPadDev *out, int max);
+const char *nnpad_type_label(int type);          /* "Xbox", "PlayStation", "Switch", "GameCube", "other pad", "joystick (no SDL mapping)" */
+const char *nnpad_type_key(int type);            /* the [type ...] name: xbox playstation switch gamecube generic joystick */
+const char *nnpad_target_name(int target);       /* A ... DOWN, LSTICK_LEFT ... RSTICK_DOWN */
+int  nnpad_target_text(int index, int target, char *out, int n);   /* the sources now: 2 = this controller, 1 = its type profile, 0 = built-in, -1 = no device */
+int  nnpad_scope_text(int index, int scope, int target, char *out, int n);
+void nnpad_target_set(int index, int scope, int target, const char *srcs);   /* NULL = default again, "none" = unbound */
+void nnpad_profile_reset(int index, int scope);
+void nnpad_tune_get(int index, float v[3]);      /* dead zone, outer zone, trigger threshold in use */
+void nnpad_tune_set(int index, int scope, int which, float value);
+void nnpad_capture_begin(int index);
+int  nnpad_capture_poll(char *out, int n);       /* 0 waiting, 1 got a source, 2 cancelled (Home / Capture), -1 device gone */
+void nnpad_capture_end(void);
+int  nnpad_player_cfg(int index);                /* the player kept for this device in [players], -1 = auto */
+void nnpad_player_assign(int index, int player); /* -1 auto, 0..7; used at once */
+void nnpad_kb_bind(int idx, int vk);
+void nnpad_kb_player_set(int p);                 /* -2 auto, -1 nobody, 0..7; used at once */
+
 /* self-test hooks implemented by nnhid.c (they call the handlers the game calls) */
 typedef struct {
     uint32_t (*style)(uint32_t id);

@@ -17,6 +17,8 @@
 
 #define MAXDEV 16
 #define MAXCFG 64
+#define NTYPE 6
+static const char *const g_type_key[NTYPE] = {"xbox", "playstation", "switch", "gamecube", "generic", "joystick"};
 enum { SK_NONE = 0, SK_BTN, SK_AXP, SK_AXN, SK_HAT, SK_AXF };
 typedef struct { unsigned char kind, raw; short idx; } Src;     /* raw: joystick numbering (button3, axis2, hat0up); else SDL gamepad names */
 typedef struct {
@@ -26,11 +28,12 @@ typedef struct {
     int rumble;                 /* -1 unset */
     int inv[4];
     Src axis[4]; char has_axis[4];
-    Src map[16][4]; int nmap[16];       /* -1 = unset: the default for this device */
+    Src map[24][4]; int nmap[24];       /* -1 = unset: the default for this device. 0..15 Pro buttons, 16..23 stick directions (g_kbn order) */
 } DevCfg;
 typedef struct {
     char path[MAX_PATH]; ULONGLONG mtime;
     DevCfg def; DevCfg dev[MAXCFG]; int ndev;
+    DevCfg type[NTYPE];                 /* U1: [type xbox|playstation|switch|gamecube|generic|joystick]: a profile for every device of that kind */
     char pguid[8][40]; int pnone[8];    /* [players]: a GUID reserves the slot for that device, none = nobody */
     char ignore[16][40]; int nignore;   /* [general] ignore = <GUID>: devices that are never used */
     int kb_player;                      /* -2 auto, -1 none, 0..7 */
@@ -175,16 +178,23 @@ static const char *const g_default_ini =
 "; map.A = south, button7      ; any source(s) for a Pro button; the button is pressed when any of them is\r\n"
 "; map.ZL = leftshoulder\r\n"
 "; axis.LX = leftx             ; which axis feeds a Pro stick axis (LX LY RX RY)\r\n"
-"; invert.LY = on              ; flip it (up is already handled: SDL's y axis is down-positive)\r\n";
+"; invert.LY = on              ; flip it (up is already handled: SDL's y axis is down-positive)\r\n"
+"; map.LSTICK_LEFT = dpleft    ; a stick direction from its own source(s) (LSTICK_ / RSTICK_ LEFT UP RIGHT DOWN): a button\r\n"
+";                             ; pushes the stick fully, an axis half as far as it is moved; the other direction keeps the axis\r\n"
+";\r\n"
+"; Per kind of controller, the same keys: [type xbox] [type playstation] [type switch] [type gamecube] [type generic]\r\n"
+"; [type joystick] (a pad without an SDL mapping). Used for every connected controller of that kind; a [device] section wins.\r\n"
+"; The settings menu (F1 or Home, page Controls) writes these sections.\r\n";
 
 static void cfg_init_dev(DevCfg *d) {
     memset(d, 0, sizeof *d);
     d->layout = -1; d->dz = d->outer = d->trig = d->rstr = -1.0f; d->rumble = -1;
-    for (int i = 0; i < 16; i++) d->nmap[i] = -1;
+    for (int i = 0; i < 24; i++) d->nmap[i] = -1;
 }
 static void cfg_defaults(Cfg *c) {
     memset(c, 0, sizeof *c);
     cfg_init_dev(&c->def);
+    for (int t = 0; t < NTYPE; t++) cfg_init_dev(&c->type[t]);
     c->def.layout = 2; c->def.dz = 0.10f; c->def.outer = 0.98f; c->def.trig = 0.33f; c->def.rstr = 1.0f; c->def.rumble = 1;
     c->kb_player = -2;
     memcpy(c->kb_vk, g_kb_default, sizeof c->kb_vk);
@@ -225,8 +235,8 @@ static void cfg_set(Cfg *c, DevCfg *d, int in_dev, const char *key, char *val) {
     else if (in_dev && !_strnicmp(key, "invert.", 7)) { for (int i = 0; i < 4; i++) if (!_stricmp(key + 7, g_stk[i])) d->inv[i] = parse_bool(val); }
     else if (in_dev && !_strnicmp(key, "axis.", 5)) { for (int i = 0; i < 4; i++) if (!_stricmp(key + 5, g_stk[i]) && src_parse(val, &d->axis[i])) d->has_axis[i] = d->axis[i].kind != SK_NONE; }
     else if (in_dev && !_strnicmp(key, "map.", 4)) {
-        for (int b = 0; b < 16; b++) {
-            if (_stricmp(key + 4, g_pro[b])) continue;
+        for (int b = 0; b < 24; b++) {
+            if (_stricmp(key + 4, g_kbn[b])) continue;
             d->nmap[b] = 0;
             for (char *tok = val; tok && d->nmap[b] < 4; ) {            /* not strtok: cfg_parse is using it */
                 char *comma = strchr(tok, ',');
@@ -253,6 +263,11 @@ static void cfg_parse(Cfg *c, char *text) {
             if (!_stricmp(line + 1, "general")) sect = 1; else if (!_stricmp(line + 1, "players")) sect = 2;
             else if (!_stricmp(line + 1, "keyboard")) sect = 3;
             else if (!_strnicmp(line + 1, "device ", 7)) { char *g = line + 8; while (*g == ' ') g++; cur = cfg_find(c, g, 1); sect = cur ? 4 : 0; }
+            else if (!_strnicmp(line + 1, "type ", 5)) {      /* U1: a controller-type profile */
+                char *g = line + 6; while (*g == ' ') g++;
+                cur = NULL; for (int t = 0; t < NTYPE; t++) if (!_stricmp(g, g_type_key[t])) cur = &c->type[t];
+                sect = cur ? 4 : 0;
+            }
             else sect = 0;
             continue;
         }
@@ -331,20 +346,36 @@ static void cfg_load(int first) {                 /* lock held */
 
 /* ================================================================ devices */
 static const DevCfg *dev_cfg(const Dev *d) { for (int i = 0; i < g_cfg.ndev; i++) if (!_stricmp(g_cfg.dev[i].guid, d->guid)) return &g_cfg.dev[i]; return NULL; }
+/* U1: what kind of controller a device is, for the [type ...] profiles: Xbox, PlayStation, Switch (Pro, Joy-Con), GameCube,
+ * any other pad SDL has a mapping for, a joystick without a mapping (its sources are its own numbers) */
+static int dev_type(const Dev *d) {
+    if (!d->gp) return 5;
+    switch (d->gtype) {
+    case SDL_GAMEPAD_TYPE_XBOX360: case SDL_GAMEPAD_TYPE_XBOXONE: return 0;
+    case SDL_GAMEPAD_TYPE_PS3: case SDL_GAMEPAD_TYPE_PS4: case SDL_GAMEPAD_TYPE_PS5: return 1;
+    case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_PRO: case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_LEFT: case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_RIGHT:
+    case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_PAIR: return 2;
+    case SDL_GAMEPAD_TYPE_GAMECUBE: return 3;
+    }
+    return 4;
+}
+static const DevCfg *type_cfg(const Dev *d) { return &g_cfg.type[dev_type(d)]; }
+/* every setting: the device's own [device GUID] section, else its [type ...] profile, else [general] / the built-in default */
 static float eff_f(const Dev *d, size_t off, float def) {
-    const DevCfg *c = dev_cfg(d);
+    const DevCfg *c = dev_cfg(d), *t = type_cfg(d);
     float v = c ? *(const float *)((const char *)c + off) : -1.0f;
     (void)def;
+    if (v < 0) v = *(const float *)((const char *)t + off);
     return v >= 0 ? v : *(const float *)((const char *)&g_cfg.def + off);
 }
 #define EFF(d, field) eff_f(d, offsetof(DevCfg, field), 0)
 static int eff_layout(const Dev *d) {
-    const DevCfg *c = dev_cfg(d);
-    int l = c && c->layout >= 0 ? c->layout : g_cfg.def.layout;
+    const DevCfg *c = dev_cfg(d), *t = type_cfg(d);
+    int l = c && c->layout >= 0 ? c->layout : t->layout >= 0 ? t->layout : g_cfg.def.layout;
     if (l == 2) l = d->gtype == SDL_GAMEPAD_TYPE_GAMECUBE;
     return l;
 }
-static int eff_rumble(const Dev *d) { const DevCfg *c = dev_cfg(d); return c && c->rumble >= 0 ? c->rumble : g_cfg.def.rumble; }
+static int eff_rumble(const Dev *d) { const DevCfg *c = dev_cfg(d), *t = type_cfg(d); return c && c->rumble >= 0 ? c->rumble : t->rumble >= 0 ? t->rumble : g_cfg.def.rumble; }
 
 static int slot_usable(int p, const char *guid) {            /* configured reservations */
     if (g_cfg.pnone[p]) return 0;
@@ -537,12 +568,24 @@ static int def_map(const Dev *d, int labels, int b, Src *o) {          /* the bu
     }
 }
 static int stick_src(const Dev *d, int i, Src *s) {
-    const DevCfg *c = dev_cfg(d);
+    const DevCfg *c = dev_cfg(d), *t = type_cfg(d);
     if (c && c->has_axis[i]) { *s = c->axis[i]; return 1; }
+    if (t->has_axis[i]) { *s = t->axis[i]; return 1; }
     *s = d->gp ? mk(SK_AXF, i, 0) : mk(SK_AXF, i, 1);
     if (!d->gp && i >= 2 && d->naxes >= 6) *s = mk(SK_AXF, i == 2 ? 2 : 3, 1);
     return d->gp || d->naxes > i;
 }
+static int stick_inv(const Dev *d, int i) { const DevCfg *c = dev_cfg(d), *t = type_cfg(d); return c && (c->has_axis[i] || c->inv[i]) ? c->inv[i] : t->inv[i]; }
+/* U1: the sources of a target (0..15 Pro button, 16..23 stick direction): device section, type profile, built-in default.
+ * *from = 2 device, 1 type profile, 0 built-in. A stick direction has no built-in source: the stick's axis drives it. */
+static int prof_map(const Dev *d, int b, Src *s, int *from) {
+    const DevCfg *c = dev_cfg(d), *t = type_cfg(d);
+    if (c && c->nmap[b] >= 0) { memcpy(s, c->map[b], sizeof(Src) * 4); if (from) *from = 2; return c->nmap[b]; }
+    if (t->nmap[b] >= 0) { memcpy(s, t->map[b], sizeof(Src) * 4); if (from) *from = 1; return t->nmap[b]; }
+    if (from) *from = 0;
+    return b < 16 ? def_map(d, eff_layout(d), b, s) : 0;
+}
+static int prof_set(const Dev *d, int b) { const DevCfg *c = dev_cfg(d), *t = type_cfg(d); return (c && c->nmap[b] >= 0) || t->nmap[b] >= 0; }
 static void sensors(const Dev *d, NnPadState *o) {
     float a[3], g[3];
     o->accel[2] = -1.0f;
@@ -579,14 +622,11 @@ unsigned nnpad_menu_keys(void) {                      /* bit 0: a Home / Guide b
 }
 static void dev_state(const Dev *d, NnPadState *o) {      /* lock held */
     float dz = EFF(d, dz), outer = EFF(d, outer), trig = EFF(d, trig);
-    const DevCfg *dc = dev_cfg(d);
-    int labels = eff_layout(d);
     float v[4];
     memset(o, 0, sizeof *o);
     o->wired = !d->wireless;
     for (int b = 0; b < 16; b++) {
-        Src s[4]; int n;
-        if (dc && dc->nmap[b] >= 0) { n = dc->nmap[b]; memcpy(s, dc->map[b], sizeof s); } else n = def_map(d, labels, b, s);
+        Src s[4]; int n = prof_map(d, b, s, NULL);
         for (int k = 0; k < n; k++) {
             if (menu_owns(d, s[k])) continue;                    /* U1: Home / Guide and Capture open the settings menu, never the game */
             float x = src_val(d, s[k]);
@@ -599,8 +639,26 @@ static void dev_state(const Dev *d, NnPadState *o) {      /* lock held */
         Src s;
         v[i] = stick_src(d, i, &s) ? src_val(d, s) : 0;
         if (i & 1) v[i] = -v[i];                             /* SDL: down is positive; the Npad: up is positive */
-        if (dc && dc->inv[i]) v[i] = -v[i];
+        if (stick_inv(d, i)) v[i] = -v[i];
         if (v[i] > 1) v[i] = 1; if (v[i] < -1) v[i] = -1;
+        {   /* U1: a stick direction bound to its own sources (a button = full deflection, an axis half = that much); the
+             * other direction of the same axis keeps the axis. Npad: x right positive, y up positive. */
+            static const int dir_neg[4] = {16, 19, 20, 23}, dir_pos[4] = {18, 17, 22, 21};
+            int bn = dir_neg[i], bp = dir_pos[i];
+            if (prof_set(d, bn) || prof_set(d, bp)) {
+                float pos = v[i] > 0 ? v[i] : 0, neg = v[i] < 0 ? -v[i] : 0;
+                for (int side = 0; side < 2; side++) {
+                    int tb = side ? bp : bn;
+                    if (!prof_set(d, tb)) continue;
+                    Src s[4]; int n = prof_map(d, tb, s, NULL);
+                    float m = 0;
+                    for (int k = 0; k < n; k++) { if (menu_owns(d, s[k])) continue; float x = src_val(d, s[k]); if (x < 0) x = -x; if (x > m) m = x; }
+                    if (side) pos = m; else neg = m;
+                }
+                v[i] = pos - neg;
+                if (v[i] > 1) v[i] = 1; if (v[i] < -1) v[i] = -1;
+            }
+        }
     }
     for (int st = 0; st < 2; st++) {
         float x = v[st * 2], y = v[st * 2 + 1], m = sqrtf(x * x + y * y), k = 0;
@@ -773,7 +831,7 @@ static int pad_test(int seconds) {
 
 static void ini_replace_section(const char *path, const char *header, const char *body) {
     size_t len = 0;
-    char *old = read_file(path, &len), *out = malloc(len + strlen(body) + strlen(header) + 64);
+    char *old = read_file(path, &len), *out = malloc(len + (body ? strlen(body) : 0) + strlen(header) + 64);
     size_t o = 0;
     int skipping = 0;
     if (!out) { free(old); return; }
@@ -785,7 +843,7 @@ static void ini_replace_section(const char *path, const char *header, const char
         p += l;
     }
     if (o && out[o - 1] != '\n') { out[o++] = '\r'; out[o++] = '\n'; }
-    o += (size_t)sprintf(out + o, "%s\r\n%s", header, body);
+    if (body) o += (size_t)sprintf(out + o, "%s\r\n%s", header, body);      /* body NULL: the section is removed */
     FILE *f = fopen(path, "wb");
     if (f) { fwrite(out, 1, o, f); fclose(f); }
     free(old); free(out);
@@ -1113,6 +1171,60 @@ int nnpad_selftest(const NnHidHooks *h) {
         }
     }
 
+    /* ---- U1: the Controls page API (type profile, device section over it, a stick direction from a button, capture, reset) */
+    {
+        NnPadDev l[16];
+        int n = nnpad_list(l, 16), ix = -1, k = -1, from = -1, ok;
+        char t[64];
+        for (int i = 0; i < n; i++) if (l[i].player == 0) ix = l[i].index;
+        lock(); Dev *d0 = dev_of(0); SDL_JoystickID want = d0 ? d0->id : 0; int ty = d0 ? dev_type(d0) : -1; unlock();
+        for (int i = 0; i < 10; i++) if (id[i] && id[i] == want) k = i;
+        check(ix >= 0 && k >= 0, "controls: the device list names player 1's pad");
+        if (ix >= 0 && k >= 0) {
+            SDL_Joystick *j = js[k];
+            nnpad_target_set(ix, 1, 0, "north");                         /* A <- north for every pad of this kind */
+            vj_clear(j, SDL_GAMEPAD_BUTTON_COUNT, 6); SDL_SetJoystickVirtualButton(j, SDL_GAMEPAD_BUTTON_NORTH, true); settle(); h->state(0, &btn, st, &attr);
+            from = nnpad_target_text(ix, 0, t, sizeof t);
+            { char *f = read_file(path, NULL); char hd[48]; snprintf(hd, sizeof hd, "[type %s]", g_type_key[ty]); ok = f && strstr(f, hd) && strstr(f, "map.A = north"); free(f); }
+            check((btn & 1) && from == 1 && !strcmp(t, "north") && ok, "controls: a [type ...] profile binding (A = north) is used at once and written");
+            nnpad_target_set(ix, 0, 0, "west");                          /* this controller only: A <- west wins over the profile */
+            h->state(0, &btn, st, &attr); int north_a = (int)(btn & 1);
+            vj_clear(j, SDL_GAMEPAD_BUTTON_COUNT, 6); SDL_SetJoystickVirtualButton(j, SDL_GAMEPAD_BUTTON_WEST, true); settle(); h->state(0, &btn, st, &attr);
+            from = nnpad_target_text(ix, 0, t, sizeof t);
+            check(!north_a && (btn & 1) && from == 2, "controls: the [device] binding wins over the type profile");
+            nnpad_target_set(ix, 0, 16, "south");                        /* left stick LEFT <- south (a button = full deflection) */
+            vj_clear(j, SDL_GAMEPAD_BUTTON_COUNT, 6); SDL_SetJoystickVirtualButton(j, SDL_GAMEPAD_BUTTON_SOUTH, true); settle(); h->state(0, &btn, st, &attr);
+            int left = st[0];
+            vj_clear(j, SDL_GAMEPAD_BUTTON_COUNT, 6); SDL_SetJoystickVirtualAxis(j, SDL_GAMEPAD_AXIS_LEFTX, 32767); settle(); h->state(0, &btn, st, &attr);
+            check(left == -32767 && st[0] == 32767, "controls: a stick direction bound to a button (left stick left = south); the other direction keeps the axis");
+            vj_clear(j, SDL_GAMEPAD_BUTTON_COUNT, 6); settle();
+            nnpad_capture_begin(ix);
+            int c0 = nnpad_capture_poll(t, sizeof t);
+            SDL_SetJoystickVirtualButton(j, SDL_GAMEPAD_BUTTON_EAST, true); settle();
+            int c1 = nnpad_capture_poll(t, sizeof t);
+            ok = c0 == 0 && c1 == 1 && !strcmp(t, "east");
+            vj_clear(j, SDL_GAMEPAD_BUTTON_COUNT, 6); settle(); nnpad_capture_begin(ix); nnpad_capture_poll(t, sizeof t);
+            SDL_SetJoystickVirtualAxis(j, SDL_GAMEPAD_AXIS_RIGHTY, -32768); settle();
+            int c2 = nnpad_capture_poll(t, sizeof t);
+            ok = ok && c2 == 1 && !strcmp(t, "righty-");
+            vj_clear(j, SDL_GAMEPAD_BUTTON_COUNT, 6); settle(); nnpad_capture_begin(ix); nnpad_capture_poll(t, sizeof t);
+            SDL_SetJoystickVirtualButton(j, SDL_GAMEPAD_BUTTON_GUIDE, true); settle();
+            int c3 = nnpad_capture_poll(t, sizeof t);
+            nnpad_capture_end();
+            check(ok && c3 == 2, "controls: capture waits for release, then names the button (east) or stick direction (righty-); Guide cancels");
+            nnpad_tune_set(ix, 1, 0, 0.5f);
+            vj_clear(j, SDL_GAMEPAD_BUTTON_COUNT, 6); SDL_SetJoystickVirtualAxis(j, SDL_GAMEPAD_AXIS_RIGHTX, 13000); settle(); h->state(0, &btn, st, &attr);
+            int rx_dz = st[2];
+            check(rx_dz == 0, "controls: dead zone 0.5 in the profile: a stick at 0.4 gives nothing");
+            nnpad_profile_reset(ix, 0); nnpad_profile_reset(ix, 1);
+            vj_clear(j, SDL_GAMEPAD_BUTTON_COUNT, 6); SDL_SetJoystickVirtualButton(j, SDL_GAMEPAD_BUTTON_EAST, true); settle(); h->state(0, &btn, st, &attr);
+            from = nnpad_target_text(ix, 0, t, sizeof t);
+            { char *f = read_file(path, NULL); char hd[48]; snprintf(hd, sizeof hd, "[type %s]", g_type_key[ty]); ok = f && !strstr(f, hd); free(f); }
+            check((btn & 1) && from == 0 && ok, "controls: reset of both levels: the built-in default again (east = A), the [type] section removed");
+            vj_clear(j, SDL_GAMEPAD_BUTTON_COUNT, 6); settle();
+        }
+    }
+
     /* ---- a joystick SDL has no mapping for */
     {
         SDL_JoystickID fill = vj_make(12, 0x600, 1, 0), rid;
@@ -1193,11 +1305,16 @@ void nnpad_kb_bind(int idx, int vk) {
     kb_write();
     unlock();
 }
-void nnpad_kb_player_set(int p) {                     /* -2 auto, -1 none, 0..7: used from the next start */
+void nnpad_kb_player_set(int p) {                     /* -2 auto, -1 none, 0..7: written, and used at once (nnhid_kb_player_refresh) */
     nnpad_kb_vk(0);
     lock();
     g_cfg.kb_player = p < -2 ? -2 : p > 7 ? 7 : p;
     kb_write();
+    if (g_kb_slot != -3 && !getenv("SSBU_KEYBOARD_PLAYER")) {
+        if (g_cfg.kb_player >= -1) g_kb_slot = g_cfg.kb_player;
+        else { g_kb_slot = -1; for (int q = 0; q < 8 && g_kb_slot < 0; q++) if (!slot_taken(q) && slot_usable(q, "") && !g_cfg.pguid[q][0]) g_kb_slot = q; }
+        say("nn::pad: keyboard = player %d (settings menu)\n", g_kb_slot + 1);
+    }
     unlock();
 }
 int nnpad_describe(char *out, int n) {               /* one line per device: "player N: name (type)"; returns the number of devices */
@@ -1217,3 +1334,188 @@ int nnpad_describe(char *out, int n) {               /* one line per device: "pl
     return k;
 }
 const char *nnpad_config_path(void) { nnpad_kb_vk(0); return g_cfg.path; }
+
+/* ================================================================ U1, the Controls page of the settings menu (menu.cpp)
+ * Every pad target (16 Pro buttons + 8 stick directions) can be bound for ONE controller ([device <GUID>]) or for every
+ * controller of its kind ([type xbox|playstation|switch|gamecube|generic|joystick]); the device section wins over the type
+ * profile, which wins over the built-in default. All of it is written to controllers.ini at once and used at once (the
+ * memory copy is changed together with the file; the 1 s reload then finds nothing new). */
+static const char *const g_type_label[NTYPE] = {"Xbox", "PlayStation", "Switch", "GameCube", "other pad", "joystick (no SDL mapping)"};
+const char *nnpad_type_label(int t) { return t >= 0 && t < NTYPE ? g_type_label[t] : "?"; }
+const char *nnpad_type_key(int t) { return t >= 0 && t < NTYPE ? g_type_key[t] : "?"; }
+const char *nnpad_target_name(int t) { return t >= 0 && t < 24 ? g_kbn[t] : ""; }
+static Dev *dev_at(int index) { return index >= 0 && index < MAXDEV && g_dev[index].used && !g_dev[index].ignored ? &g_dev[index] : NULL; }
+int nnpad_list(NnPadDev *o, int max) {               /* the connected devices (not the ignored ones) */
+    int n = 0;
+    if (!g_sdl_ok) return 0;
+    lock();
+    for (int i = 0; i < MAXDEV && n < max; i++) {
+        const Dev *d = dev_at(i);
+        if (!d) continue;
+        o[n].index = i; o[n].player = d->slot; o[n].type = dev_type(d); o[n].gamepad = d->gp != NULL;
+        snprintf(o[n].name, sizeof o[n].name, "%s", d->name); snprintf(o[n].guid, sizeof o[n].guid, "%s", d->guid);
+        n++;
+    }
+    unlock();
+    return n;
+}
+static DevCfg *scope_cfg(const Dev *d, int scope, int create) { return scope ? &g_cfg.type[dev_type(d)] : cfg_find(&g_cfg, d->guid, create); }
+static void srcs_text(const Src *s, int n, char *out, int len) {
+    int o = 0;
+    out[0] = 0;
+    if (!n) { snprintf(out, (size_t)len, "none"); return; }
+    for (int k = 0; k < n && o < len - 1; k++) { char t[32]; src_name(s[k], t, sizeof t); o += snprintf(out + o, (size_t)(len - o), "%s%s", k ? ", " : "", t); if (o >= len) o = len - 1; }
+}
+int nnpad_target_text(int index, int target, char *out, int n) {   /* what drives the target now; returns 2 device, 1 type profile, 0 built-in, -1 no device */
+    int from = -1;
+    out[0] = 0;
+    if (target < 0 || target > 23) return -1;
+    lock();
+    const Dev *d = dev_at(index);
+    if (d) {
+        Src s[4]; int k = prof_map(d, target, s, &from);
+        if (target >= 16 && !from) {                       /* a stick direction on its axis */
+            static const int axis[8] = {0, 1, 0, 1, 2, 3, 2, 3}, positive[8] = {0, 1, 1, 0, 0, 1, 1, 0};
+            int i = axis[target - 16], pos = positive[target - 16] ^ stick_inv(d, i) ^ (i & 1);      /* SDL y: down positive */
+            Src a; char t[32];
+            if (stick_src(d, i, &a)) { src_name(a, t, sizeof t); snprintf(out, (size_t)n, "%s%s", t, a.kind == SK_AXF ? (pos ? "+" : "-") : ""); } else snprintf(out, (size_t)n, "none");
+        } else srcs_text(s, k, out, n);
+    }
+    unlock();
+    return from;
+}
+static void section_write(const Dev *d, int scope) {        /* lock held: the section of that scope, from memory */
+    char head[80], body[4096], t[96];
+    int o = 0, any = 0;
+    DevCfg *c = scope_cfg(d, scope, 0);
+    if (scope) snprintf(head, sizeof head, "[type %s]", g_type_key[dev_type(d)]); else snprintf(head, sizeof head, "[device %s]", d->guid);
+    if (c) {
+        if (!scope) o += snprintf(body + o, sizeof body - (size_t)o, "name = %s\r\n", d->name);
+        else o += snprintf(body + o, sizeof body - (size_t)o, "; every %s controller (written by the settings menu, F1); a [device <GUID>] section wins over this one\r\n", g_type_label[dev_type(d)]);
+        if (c->layout >= 0) { o += snprintf(body + o, sizeof body - (size_t)o, "layout = %s\r\n", c->layout == 1 ? "labels" : c->layout == 2 ? "auto" : "positional"); any = 1; }
+        if (c->dz >= 0) { o += snprintf(body + o, sizeof body - (size_t)o, "deadzone = %.2f\r\n", c->dz); any = 1; }
+        if (c->outer >= 0) { o += snprintf(body + o, sizeof body - (size_t)o, "outer_zone = %.2f\r\n", c->outer); any = 1; }
+        if (c->trig >= 0) { o += snprintf(body + o, sizeof body - (size_t)o, "trigger_threshold = %.2f\r\n", c->trig); any = 1; }
+        if (c->rumble >= 0) { o += snprintf(body + o, sizeof body - (size_t)o, "rumble = %s\r\n", c->rumble ? "on" : "off"); any = 1; }
+        if (c->rstr >= 0) { o += snprintf(body + o, sizeof body - (size_t)o, "rumble_strength = %.2f\r\n", c->rstr); any = 1; }
+        for (int b = 0; b < 24; b++) if (c->nmap[b] >= 0) { srcs_text(c->map[b], c->nmap[b], t, sizeof t); o += snprintf(body + o, sizeof body - (size_t)o, "map.%s = %s\r\n", g_kbn[b], t); any = 1; }
+        for (int i = 0; i < 4; i++) {
+            if (c->has_axis[i]) { src_name(c->axis[i], t, sizeof t); o += snprintf(body + o, sizeof body - (size_t)o, "axis.%s = %s\r\n", g_stk[i], t); any = 1; }
+            if (c->inv[i]) { o += snprintf(body + o, sizeof body - (size_t)o, "invert.%s = on\r\n", g_stk[i]); any = 1; }
+        }
+    }
+    ini_replace_section(g_cfg.path, head, any ? body : NULL);       /* nothing left: the section goes */
+    g_cfg.mtime = file_mtime(g_cfg.path);
+    say("nn::pad: %s of %s %s (settings menu)\n", head, g_cfg.path, any ? "written" : "removed");
+}
+int nnpad_scope_text(int index, int scope, int target, char *out, int n) {   /* the binding at one scope; 0 = not set there */
+    int r = 0;
+    out[0] = 0;
+    lock();
+    const Dev *d = dev_at(index);
+    DevCfg *c = d ? scope_cfg(d, scope, 0) : NULL;
+    if (c && target >= 0 && target < 24 && c->nmap[target] >= 0) { srcs_text(c->map[target], c->nmap[target], out, n); r = 1; }
+    unlock();
+    return r;
+}
+void nnpad_target_set(int index, int scope, int target, const char *srcs) {   /* srcs NULL = back to the next level (default), "none" = no source */
+    if (target < 0 || target > 23) return;
+    lock();
+    const Dev *d = dev_at(index);
+    DevCfg *c = d ? scope_cfg(d, scope, 1) : NULL;
+    if (c) {
+        if (!srcs) c->nmap[target] = -1;
+        else {
+            char b[160];
+            snprintf(b, sizeof b, "%s", srcs);
+            c->nmap[target] = 0;
+            for (char *tok = b; tok && c->nmap[target] < 4; ) { char *comma = strchr(tok, ','); Src x; if (comma) *comma = 0; if (src_parse(tok, &x) && x.kind) c->map[target][c->nmap[target]++] = x; tok = comma ? comma + 1 : NULL; }
+        }
+        if (!scope && !c->name[0]) snprintf(c->name, sizeof c->name, "%s", d->name);
+        section_write(d, scope);
+    }
+    unlock();
+}
+void nnpad_profile_reset(int index, int scope) {          /* every binding and tuning of that scope removed (the next level is used again) */
+    lock();
+    const Dev *d = dev_at(index);
+    DevCfg *c = d ? scope_cfg(d, scope, 0) : NULL;
+    if (c) {
+        char g[40], nm[80];
+        snprintf(g, sizeof g, "%s", c->guid); snprintf(nm, sizeof nm, "%s", c->name);
+        cfg_init_dev(c);
+        snprintf(c->guid, sizeof c->guid, "%s", g); snprintf(c->name, sizeof c->name, "%s", nm);
+        section_write(d, scope);
+    }
+    unlock();
+}
+void nnpad_tune_get(int index, float v[3]) {            /* what is used now: dead zone, outer zone, trigger threshold */
+    v[0] = v[1] = v[2] = 0;
+    lock();
+    const Dev *d = dev_at(index);
+    if (d) { v[0] = EFF(d, dz); v[1] = EFF(d, outer); v[2] = EFF(d, trig); }
+    unlock();
+}
+void nnpad_tune_set(int index, int scope, int which, float value) {     /* which: 0 dead zone, 1 outer zone, 2 trigger threshold */
+    lock();
+    const Dev *d = dev_at(index);
+    DevCfg *c = d ? scope_cfg(d, scope, 1) : NULL;
+    if (c) {
+        if (which == 0) c->dz = value; else if (which == 1) c->outer = value; else c->trig = value;
+        if (!scope && !c->name[0]) snprintf(c->name, sizeof c->name, "%s", d->name);
+        section_write(d, scope);
+    }
+    unlock();
+}
+/* "press the button / stick direction you want": first everything on that device must be released, then the first source
+ * pressed is the answer. Home / Guide or Capture cancels (they belong to the menu). */
+static struct { int index, phase; } g_cap = {-1, 0};
+void nnpad_capture_begin(int index) { lock(); g_cap.index = index; g_cap.phase = 0; unlock(); }
+void nnpad_capture_end(void) { lock(); g_cap.index = -1; unlock(); }
+int nnpad_capture_poll(char *out, int n) {               /* 0 waiting, 1 got one (its name in out), 2 cancelled, -1 the device is gone */
+    char cur[8][24];
+    int r = 0;
+    out[0] = 0;
+    nnpad_poll(0);
+    lock();
+    const Dev *d = dev_at(g_cap.index);
+    if (!d) r = -1;
+    else {
+        int k = active_sources(d, cur, 8), cancel = 0, pick = -1;
+        for (int i = 0; i < k; i++) { if (!_stricmp(cur[i], "guide") || !_stricmp(cur[i], "misc1")) cancel = 1; else if (pick < 0) pick = i; }
+        if (g_cap.phase == 0) { if (!k) g_cap.phase = 1; }
+        else if (cancel) r = 2;
+        else if (pick >= 0) { snprintf(out, (size_t)n, "%s", cur[pick]); r = 1; }
+    }
+    unlock();
+    return r;
+}
+/* [players]: which player a device is. player -1 = auto (its GUID taken out of every playerN line), 0..7 = that slot kept
+ * for this device (another device that had it moves to a free one). Used at once (reassign_all). */
+int nnpad_player_cfg(int index) {
+    int r = -1;
+    lock();
+    const Dev *d = dev_at(index);
+    for (int p = 0; d && p < 8; p++) if (!_stricmp(g_cfg.pguid[p], d->guid)) r = p;
+    unlock();
+    return r;
+}
+void nnpad_player_assign(int index, int player) {
+    lock();
+    const Dev *d = dev_at(index);
+    if (d) {
+        char body[1024];
+        int o = 0;
+        for (int p = 0; p < 8; p++) if (!_stricmp(g_cfg.pguid[p], d->guid)) g_cfg.pguid[p][0] = 0;
+        if (player >= 0 && player < 8) { snprintf(g_cfg.pguid[player], sizeof g_cfg.pguid[0], "%s", d->guid); g_cfg.pnone[player] = 0; }
+        o += snprintf(body + o, sizeof body - (size_t)o, "; written by the settings menu (F1): auto, a device GUID (that slot is kept for it) or none\r\n");
+        for (int p = 0; p < 8; p++) o += snprintf(body + o, sizeof body - (size_t)o, "player%d = %s\r\n", p + 1, g_cfg.pnone[p] ? "none" : g_cfg.pguid[p][0] ? g_cfg.pguid[p] : "auto");
+        ini_replace_section(g_cfg.path, "[players]", body);
+        g_cfg.mtime = file_mtime(g_cfg.path);
+        g_mem_n = 0;                                     /* the slots remembered in this run would keep the old order */
+        reassign_all();
+        say("nn::pad: [players] of %s written (settings menu)\n", g_cfg.path);
+    }
+    unlock();
+}
+int nnpad_kb_default(int idx) { return idx >= 0 && idx < 24 ? g_kb_default[idx] : 0; }      /* U1: the built-in key of a target */
