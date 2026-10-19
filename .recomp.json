@@ -1,0 +1,27 @@
+{
+  "game": "Super Smash Bros. Ultimate",
+  "system": "Switch",
+  "type": ["recomp", "decomp"],
+  "project": "OpenSmash-Ultimate (ssbu-recomp)",
+  "status": "playable",
+  "targets": ["Windows"],
+  "toolchain": ["Custom AArch64-to-C lifter", "Clang", "Ghidra"],
+  "original": [
+    { "region": "World", "revision": "13.0.4", "serial": "01006A800016E000" },
+    { "region": "World", "revision": "13.0.5", "serial": "01006A800016E000" }
+  ],
+  "approach": "Static recompilation of the whole game (AArch64 to C, built natively, no emulation); NVN graphics on Vulkan; the fighters' script code as C++ source.",
+  "notes": "Native Windows build made on your PC from your own dump by a one-click installer. Menus, fights with every base fighter, music, movies, controllers and the on-screen keyboard work; shaders are loaded at start. Run-ahead for lower input delay is exact but off by default. Next: online play (Local Wireless over the internet, then rollback), an in-game settings menu, items as source.",
+  "help": [
+    "Rollback netcode (savestate ring, logic-only frames)",
+    "Testing on AMD and Intel GPUs",
+    "Fighter and item decompilation",
+    "Linux build"
+  ],
+  "tags": ["static-recompilation", "vulkan", "rollback", "smash"],
+  "maintainers": [{ "name": "Denkishi", "link": "https://github.com/Denkishi" }],
+  "links": [
+    { "label": "Source", "url": "https://github.com/Denkishi/ssbu-recomp" },
+    { "label": "How to build", "url": "https://github.com/Denkishi/ssbu-recomp/blob/main/BUILDING.md" }
+  ]
+}
