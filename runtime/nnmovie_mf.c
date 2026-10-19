@@ -111,6 +111,13 @@ void os_signal_event(uint64_t key);                   /* os_threads.c */
 /* ---------------------------------------------------------------- small helpers */
 static int g_log;                                     /* SSBU_MOVIE_LOG */
 static int g_test_resync_flag, g_test_resync_at;      /* SSBU_MOVIE_TEST_RESYNC */
+static int g_test_resync_flag2, g_test_resync_ms;
+static DWORD WINAPI test_resync_later(void *req) {
+    Sleep((DWORD)g_test_resync_ms);
+    InterlockedOr8((char *)req, (char)g_test_resync_flag2);
+    printf("movie: TEST: resync request %d raised %d ms later\n", g_test_resync_flag2, g_test_resync_ms);
+    return 0;
+}
 static uint64_t g_alloc_fn, g_free_fn, g_alloc_user;  /* movie::SetAllocator */
 static volatile LONG g_mf_started;
 static __declspec(thread) int t_com_init;
@@ -290,7 +297,10 @@ static void buf_release(Ctx *c, uint64_t b) {
 }
 static void buf_copy_ctor(Ctx *c) { buf_zero(A0); buf_copy_from(c, A0, A1); }
 static void buf_assign(Ctx *c) { if (A0 != A1) { buf_release(c, A0); buf_copy_from(c, A0, A1); } RET(A0); }
-static void buf_dtor(Ctx *c) { buf_release(c, A0); }
+/* ~Buffer frees owned memory only; a borrowed buffer's fields are left as they are (the game's audio output object clears
+ * its pool of borrowed Buffers in its reset [0x71036f5ad0] without the object's mutex: a reader racing it should see the old
+ * pointer, not 0). The address-0 copy of runs osk1 / det_ga1 had another cause: see aout_flush_hook. */
+static void buf_dtor(Ctx *c) { if (rd8(A0 + B_OWNS)) buf_release(c, A0); }
 static void buf_SetDataAndCapacity(Ctx *c) { buf_release(c, A0); wr64(A0 + B_BASE, A1); wr64(A0 + B_CAP, A2); }
 static void buf_SetCapacity(Ctx *c) { wr64(A0 + B_CAP, A1); }
 static void buf_SetRange(Ctx *c) { wr32(A0 + B_OFFSET, (uint32_t)A1); wr32(A0 + B_SIZE, (uint32_t)A2); }
@@ -334,7 +344,8 @@ typedef struct Ext {
     struct { int have; IMFSample *s; int64_t us; } ahead[MAX_TRACKS];    /* next decoded sample of each selected track */
     char path[260];
     unsigned long long samples_read;
-    volatile uint64_t gen;                            /* bumped by SeekTo: samples read before it are refused by the decoders */
+    unsigned long long seek_base;                     /* samples_read at the last SeekTo (SSBU_SKIP_MOVIES counts from there) */
+    volatile uint64_t gen;                           /* bumped by SeekTo: samples read before it are refused by the decoders */
 } Ext;
 
 /* Decoder buffer model, as in the real library [subsdk DecoderImpl 0x1e440 Flush, 0x1fa30 AcquireInputBufferIndex,
@@ -647,7 +658,10 @@ static int ext_fill(Ext *e) {
         if (skip < 0) { const char *v = getenv("SSBU_SKIP_MOVIES"); skip = v && atoi(v) != 0; }
         static unsigned long long keep = 0;                /* SSBU_SKIP_MOVIES=<n>: n > 1 lets the first n samples through (default 1 = 12) */
         if (skip > 0 && !keep) { const char *v = getenv("SSBU_SKIP_MOVIES"); keep = atoi(v) > 1 ? (unsigned long long)atoi(v) : 12; }
-        if (skip && e->samples_read >= keep) { if (!e->eos) printf("movie: SSBU_SKIP_MOVIES: end of stream after %llu samples%c", e->samples_read, 10); e->eos = 1; return ST_END; }
+        /* counted from the last SeekTo: the game seeks (to 0) again when its movie start is late (slow PC, threads
+         * held); the samples read before are refused as stale, so a budget counted from the open left the stream with
+         * no valid sample after such a seek (audio never started, the title screen never came: run-ahead / PR #46 hang) */
+        if (skip && e->samples_read - e->seek_base >= keep) { if (!e->eos) printf("movie: SSBU_SKIP_MOVIES: end of stream after %llu samples%c", e->samples_read, 10); e->eos = 1; return ST_END; }
     }
     if (e->eos || !e->rd) return ST_END;
     int best = -1;
@@ -742,6 +756,10 @@ static void ext_SetDataSource_reader(Ctx *c) {       /* (ClientStreamReader *rea
     printf("movie: SetDataSource(%s): read %lld of %lld bytes through the game's reader in %.2f s\n", path, (long long)got, (long long)size,
            (double)(t1.QuadPart - t0.QuadPart) / f0.QuadPart);
     if (got != size) { free(data); RET(ST_FAILED); return; }
+    if (g_test_resync_flag && g_test_resync_at == 0) {   /* SSBU_MOVIE_TEST_RESYNC=<flag>,0: raised here, before any decoder exists */
+        InterlockedOr8((char *)(uintptr_t)GA(0x7107446040ULL), (char)g_test_resync_flag);
+        printf("movie: TEST: resync request %d raised at SetDataSource\n", g_test_resync_flag);
+    }
     RET(ext_set_source_bytes(e, data, (size_t)size));
 }
 
@@ -803,13 +821,14 @@ static void ext_SeekTo(Ctx *c) {                      /* (int64 timeUs) */
     release_pending(e);
     release_ahead(e, -1);
     e->gen++;
+    e->seek_base = e->samples_read;
     PROPVARIANT var; PropVariantInit(&var);
     var.vt = VT_I8; var.hVal.QuadPart = (LONGLONG)A1 * 10;
     HRESULT hr = IMFSourceReader_SetCurrentPosition(e->rd, &GUID_NULL, &var);
     e->eos = 0;
     for (int i = 0; i < e->ntracks; i++) e->tr[i].eos = 0;
     ext_unlock(e);
-    printf("movie: SeekTo(%.3f s) %08lx\n", (int64_t)A1 / 1e6, hr);
+    printf("movie: SeekTo(%.3f s) %08lx (tick %llu)\n", (int64_t)A1 / 1e6, hr, (unsigned long long)GetTickCount64());
     RET(SUCCEEDED(hr) ? ST_OK : ST_FAILED);
 }
 
@@ -893,6 +912,19 @@ static void dec_unlock(Dec *d) { LeaveCriticalSection(&d->cs); }
 static int dec_enter(Dec *d) { EnterCriticalSection(&d->cs); if (!d->dead) return 1; LeaveCriticalSection(&d->cs); return 0; }
 static int dec_live(const Dec *d) { return d && !d->dead; }
 
+static char g_mlog[4096][192]; static volatile LONG g_mlog_n, g_mlog_started;
+static DWORD WINAPI mlog_thread(void *p) {            /* SSBU_MOVIE_LOG=2: the lines kept in memory, every 2 s (older than 4096 back: lost) */
+    (void)p;
+    LONG done = 0;
+    for (;;) {
+        Sleep(2000);
+        LONG n = g_mlog_n;
+        if (n - done > 4096) { printf("movie: (log: %ld lines lost)\n", (long)(n - done - 4096)); done = n - 4096; }
+        for (; done < n; done++) fputs(g_mlog[done & 4095], stdout);
+        fflush(stdout);
+    }
+    return 0;
+}
 static void dlog(Dec *d, const char *fmt, ...) {      /* SSBU_MOVIE_LOG: one line per call, with thread and time */
     if (!g_log) return;
     char line[256];
@@ -900,6 +932,12 @@ static void dlog(Dec *d, const char *fmt, ...) {      /* SSBU_MOVIE_LOG: one lin
     va_start(ap, fmt);
     vsnprintf(line, sizeof line, fmt, ap);
     va_end(ap);
+    if (g_log == 2) {                                 /* SSBU_MOVIE_LOG=2: into memory, written out by mlog_thread every 2 s (less timing change) */
+        LONG k = InterlockedIncrement(&g_mlog_n) - 1;
+        snprintf(g_mlog[k & 4095], sizeof g_mlog[0], "movie[%5lu %8llu] %c %s\n", GetCurrentThreadId(), (unsigned long long)GetTickCount64(), d->is_video ? 'V' : 'A', line);
+        if (!InterlockedExchange(&g_mlog_started, 1)) CloseHandle(CreateThread(NULL, 0, mlog_thread, NULL, 0, NULL));
+        return;
+    }
     printf("movie[%5lu %8llu] %c %s\n", GetCurrentThreadId(), (unsigned long long)GetTickCount64(), d->is_video ? 'V' : 'A', line);
 }
 
@@ -919,6 +957,7 @@ static void dec_release_all(Dec *d) {
         d->in_state[i] = IN_CODEC;
     }
     d->in_n = d->dec_n = d->out_n = 0;
+    d->eos_in = 0;                                    /* (WebM too: after Flush / Stop the stream may be fed again) */
     if (d->h264) {                                    /* decoded but not handed out, and what the transform holds */
         for (int i = 0; i < d->pend_n; i++) if (d->pend[i].s) IMFSample_Release(d->pend[i].s);
         d->pend_n = 0;
@@ -944,6 +983,7 @@ static int dec_pump(Dec *d) {
         d->out[o].state = OUT_READY;
         d->out_list[d->out_n++] = o;
         memset(&d->in_data[in], 0, sizeof d->in_data[in]);
+        if (d->eos_in) { d->in_state[in] = IN_CODEC; ev |= 2; continue; }      /* after the end of stream: not offered again */
         d->in_state[in] = IN_OFFERED;
         d->in_list[d->in_n++] = in;
         ev |= 3;
@@ -1287,6 +1327,12 @@ static int fmt_event_wanted(const Dec *d) {
 }
 static void dec_Start(Ctx *c) {
     Dec *d = dec_of(A0);
+    {   /* TEST ONLY, SSBU_MOVIE_TEST_START_DELAY=<ms>: the first Start of each decoder waits that long (a slow movie start: the
+         * player stays prepared, state 3, long enough for an early resync seek to run before the audio output's Init) */
+        static int delay = -1;
+        if (delay < 0) { const char *v = getenv("SSBU_MOVIE_TEST_START_DELAY"); delay = v ? atoi(v) : 0; }
+        if (delay > 0 && d && !d->started && !d->flushes) { printf("movie: TEST: first Start held %d ms\n", delay); Sleep((DWORD)delay); }
+    }
     if (!d || !dec_enter(d)) { RET(ST_INVALID); return; }
     int offer = !d->started || d->flushed;            /* first start, or the start that follows a flush: all input buffers are offered */
     if (offer) {
@@ -1387,6 +1433,12 @@ static void dec_SendInputBufferForDecode(Ctx *c) {    /* (int index, int offset,
         RET(held ? ST_OK : ST_INVALID);
         return;
     }
+    {   /* TEST ONLY, SSBU_MOVIE_TEST_VIDEO_DELAY=<ms>: the first video sample of each decoder is held that long before it is
+         * taken (a slow first VP9 picture, as on a busy PC: the boot resync then comes before the first video frame) */
+        static int delay = -1;
+        if (delay < 0) { const char *v = getenv("SSBU_MOVIE_TEST_VIDEO_DELAY"); delay = v ? atoi(v) : 0; }
+        if (delay > 0 && d->is_video && d->in_count == 0 && !(flags & FLAG_EOS)) { printf("movie: TEST: first video sample held %d ms\n", delay); Sleep((DWORD)delay); }
+    }
     if (!dec_enter(d)) { RET(ST_INVALID); return; }   /* d->mem is gone once the destructor ran */
     dec_error_check(d);
     IMFSample *sample = NULL;
@@ -1419,9 +1471,14 @@ static void dec_SendInputBufferForDecode(Ctx *c) {    /* (int index, int offset,
         /* SSBU_MOVIE_TEST_RESYNC=<flag>,<n>: at the n-th video sample raise the game's own "re-synchronise movies" request
          * (byte 0x7107446040, set by its system-notification handler f_7103741700: 8 = operation mode changed, 4 / 2 = the
          * two halves of a focus change); the movie manager [game 0x71036e3984] then pauses, seeks and resumes the player. */
+        /* Read in the game [0x71036e3988..0x71036e3a7c]: 4 = PAUSE the playing movie (focus lost; nothing else), 2 = resume:
+         * re-sync state 1 / 4 frames -> seek + start (focus back), 8 = re-sync state 1 or 5 / 30 frames. So 4 alone keeps the
+         * movie paused for good, as on the console with the HOME menu open: SSBU_MOVIE_TEST_RESYNC=4,<n>,<flag2>,<ms> raises
+         * <flag2> (2 = focus back) <ms> later from a thread of its own. */
         uint8_t *req = (uint8_t *)(uintptr_t)GA(0x7107446040ULL);
         InterlockedOr8((char *)req, (char)g_test_resync_flag);
         printf("movie: TEST: resync request %d raised at video sample %d\n", g_test_resync_flag, g_test_resync_at);
+        if (g_test_resync_flag2) CloseHandle(CreateThread(NULL, 0, test_resync_later, req, 0, NULL));
     }
     if (!sample && !(flags & FLAG_EOS)) {             /* nothing to decode: the buffer is offered again */
         d->dropped++;
@@ -1431,6 +1488,18 @@ static void dec_SendInputBufferForDecode(Ctx *c) {    /* (int index, int offset,
         RET(ST_OK);
         return;
     }
+    if ((flags & FLAG_EOS) && d->eos_in) {            /* an index the game acquired before its first end of stream: taken, nothing comes out */
+        if (sample) IMFSample_Release(sample);
+        d->in_state[i] = IN_CODEC;
+        dec_unlock(d);
+        dlog(d, "SendInput %d: end of stream again, kept (no output, not offered again until a flush)", i);
+        RET(ST_OK);
+        return;
+    }
+    /* MediaCodec after an end-of-stream input: one end-of-stream output, and no input buffer is offered again until a flush.
+     * Before, every offered index came back and every end of stream the game sent again made an output (48 video and 64
+     * audio end-of-stream "frames" filled the pools: SSBU_MOVIE_LOG of n11_rsf4), so the decoders never ran dry. */
+    if (flags & FLAG_EOS) d->eos_in = 1;
     d->in_data[i].s = sample; d->in_data[i].ts = ts; d->in_data[i].flags = flags & FLAG_EOS;
     d->in_state[i] = IN_DECODING;
     d->dec_list[d->dec_n++] = i;
@@ -1635,8 +1704,46 @@ static void decoder_ctor(Ctx *c) {                    /* Decoder(DecoderType, De
     if (d->is_video && d->fmt != 4) printf("movie: WARNING output format %d requested, only 4 (NV12) is produced\n", d->fmt);
 }
 
+/* ---------------------------------------------------------------- the game's audio output object (movie player)
+ * Layout used [game 0x71036f5720 ctor, 0x71036f5c10 Init, 0x71036f5170 output handler, 0x71036f6070 Flush, 0x71036f5e50 Stop]:
+ * +56 the pool block (count +68 x size +72 bytes, allocated by Init, freed by Stop), +88/+96 pending decoder outputs,
+ * +112/+120 the pool (movie::Buffer, 64 bytes each, borrowed from the block), +136/+144 the second list, +160 the decoded-
+ * block Buffer, +184 the object's mutex. Flush rebuilds the pool from +56 WITHOUT checking it: called by the movie Seek
+ * [0x71036e7620, calls at 0x71036e77ac / 0x71036e7860] before Init has run (the boot resync coming early, as on a busy PC),
+ * it made 16 Buffers at addresses 0, 0x2000, ...; Init then appends the real 16, the output handler copies the first decoded
+ * block into pool[0] = address 0 (HOST EXCEPTION writing 0x0, f_75004de070 from 0x71036f537c; runs osk1, det_ga1).
+ * With no block, Flush here only empties the lists (what it does before the rebuild), under the object's mutex. */
+static ImportFn g_orig_aout_flush, g_mtx_lock, g_mtx_unlock;
+static long long g_aout_flush_empty;
+static void aout_flush_hook(Ctx *c, void *user) {
+    (void)user;
+    uint64_t o = c->x[0];
+    if (!o || !g_mtx_lock || !g_mtx_unlock) { g_orig_aout_flush(c); return; }
+    Ctx t = *c; t.x[0] = o + 184; g_mtx_lock(&t);
+    int empty = rd64(o + 56) == 0;
+    if (empty) {
+        wr64(o + 96, rd64(o + 88));                       /* pending outputs dropped */
+        for (uint64_t b = rd64(o + 112), e = rd64(o + 120); b < e; b += 64) if (rd8(b + B_OWNS)) buf_release(c, b);
+        wr64(o + 120, rd64(o + 112));
+        for (uint64_t b = rd64(o + 136), e = rd64(o + 144); b < e; b += 64) if (rd8(b + B_OWNS)) buf_release(c, b);
+        wr64(o + 144, rd64(o + 136));
+    }
+    t = *c; t.x[0] = o + 184; g_mtx_unlock(&t);
+    if (!empty) { g_orig_aout_flush(c); return; }
+    if (++g_aout_flush_empty <= 3) printf("movie: audio output Flush before its Init (no pool block): lists emptied, no pool built\n");
+}
+int hook_install(uint64_t addr, void (*repl)(Ctx *, void *), void *user, ImportFn *orig);      /* fighter_sdk\hook_host.c (in nnro.c) */
+static void aout_hooks(void) {
+    static int done; if (done++) return;
+    if (getenv("SSBU_MOVIE_NO_FLUSH_GUARD")) return;
+    g_mtx_lock = import_lookup("_ZNSt3__15mutex4lockEv"); g_mtx_unlock = import_lookup("_ZNSt3__15mutex6unlockEv");
+    int id = hook_install(GA(0x71036f6070ULL), aout_flush_hook, NULL, &g_orig_aout_flush);
+    if (!id || !g_mtx_lock || !g_mtx_unlock) printf("movie: WARNING the audio output Flush guard is not installed (hook %d, mutex %d)\n", id, g_mtx_lock && g_mtx_unlock);
+}
+
 /* ---------------------------------------------------------------- free functions */
 static void movie_SetAllocator(Ctx *c) {              /* (alloc, free, realloc, user) */
+    aout_hooks();
     g_alloc_fn = A0; g_free_fn = A1; g_alloc_user = A3;
     printf("movie: SetAllocator(alloc %llx, free %llx, realloc %llx, user %llx)\n", (unsigned long long)A0, (unsigned long long)A1, (unsigned long long)A2, (unsigned long long)A3);
 }
@@ -1882,8 +1989,8 @@ void register_movie_mf_imports(void) {
     if (getenv("SSBU_MOVIE_H264_TEST")) h264_selftest(getenv("SSBU_MOVIE_H264_TEST"));    /* test only: ends the process */
     const char *env = getenv("SSBU_MOVIE");
     if (env && atoi(env) == 0) { printf("movie: SSBU_MOVIE=0, keeping the failing placeholder\n"); return; }
-    g_log = getenv("SSBU_MOVIE_LOG") != NULL;
-    if (getenv("SSBU_MOVIE_TEST_RESYNC")) sscanf(getenv("SSBU_MOVIE_TEST_RESYNC"), "%d,%d", &g_test_resync_flag, &g_test_resync_at);
+    g_log = getenv("SSBU_MOVIE_LOG") ? (atoi(getenv("SSBU_MOVIE_LOG")) == 2 ? 2 : 1) : 0;
+    if (getenv("SSBU_MOVIE_TEST_RESYNC")) sscanf(getenv("SSBU_MOVIE_TEST_RESYNC"), "%d,%d,%d,%d", &g_test_resync_flag, &g_test_resync_at, &g_test_resync_flag2, &g_test_resync_ms);
     InitializeCriticalSection(&g_init_lock);
     register_imports(movie_mf_imports, (int)(sizeof movie_mf_imports / sizeof movie_mf_imports[0]));
 }

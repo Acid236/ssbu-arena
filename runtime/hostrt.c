@@ -53,6 +53,7 @@ static const uint64_t g_code_13_0_5[][2] = {         /* 13.0.4 -> 13.0.5 offsets
     {0x366d1f0, 0x366d7a0},     /* clock read return address (nnsdk.c, fixed seed) */
     {0x366d388, 0x366d938},     /* clock read return address (nnsdk.c, fixed seed) */
     {0x36f2814, 0x36f2dc4},     /* call site (os_threads.c) */
+    {0x36f6070, 0x36f6620},     /* movie audio output Flush (nnmovie_mf.c), 0x114 bytes, the same in both */
     {0x3747b7c, 0x374812c}, /* render loop call site (r1_state.c) */
     {0x37494fc, 0x3749aac}, /* render loop call site, workers hold (r1_state.c) */
     {0x3749b24, 0x374a0d4}, /* render loop: run-ahead save point (r1_state.c) */
