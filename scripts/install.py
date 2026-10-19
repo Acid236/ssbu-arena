@@ -174,7 +174,16 @@ def fetch(name):
         shutil.move(inner[0] if len(inner) == 1 and os.path.isdir(inner[0]) else tmp, dst)
         shutil.rmtree(tmp, ignore_errors=True)
     else:                                       # the LLVM installer: silent, into deps\llvm
-        subprocess.run([arc, '/S', '/D=' + dst], check=True)
+        try:
+            subprocess.run([arc, '/S', '/D=' + dst], check=True)
+        except OSError as e:                    # 740: it asks for administrator rights; Windows shows its Yes/No prompt
+            if getattr(e, 'winerror', None) != 740:
+                raise
+            say('3. Tools: the LLVM installer asks for administrator rights: answer Yes in the Windows prompt')
+            ps = "Start-Process -FilePath '%s' -ArgumentList '/S','/D=%s' -Verb RunAs -Wait" % (arc.replace("'", "''"), dst.replace("'", "''"))
+            subprocess.run(['powershell', '-NoProfile', '-Command', ps], check=True)
+        if not os.path.exists(os.path.join(dst, 'bin', 'clang.exe')):
+            sys.exit('LLVM was not installed into %s (was the Windows prompt answered No?): start the installer again' % dst)
     os.remove(arc)
     return dst
 

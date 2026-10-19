@@ -6,16 +6,19 @@ tables, the script-module libraries) is **generated on your PC from your own dum
 
 ## The short way: one click
 
-1. Install Python 3.10 or newer (tick "Add python.exe to PATH") and the MSVC Build Tools (the installer gives the command
-   if they are missing).
-2. Download this repository (Code, Download ZIP) and unpack it, or `git clone` it.
-3. Double-click **`Install SSBU.bat`**. The installer window opens: choose your own files (the base game as `.nsp`,
+Nothing has to be installed first.
+
+1. Download this repository (Code, Download ZIP) and unpack it, or `git clone` it.
+2. Double-click **`Install SSBU.bat`**. If Python 3.10 or newer is not on the PC, it offers to install it (the official
+   python.org installer, checked against its published SHA-256, for your user only). If the Microsoft C++ Build Tools are
+   missing, the window offers to install them through winget (Windows asks for administrator rights), and the LLVM 9
+   installer does the same once. The installer window opens: choose your own files (the base game as `.nsp`,
    `.xci` or `.nsz`, the 13.0.4 or 13.0.5 update as `.nsp` or `.nsz`, your `prod.keys`, and your firmware dump for the system
    fonts, which the game needs) or a dump folder you already have, and press **Install**. It shows each step, a progress bar and the log. The installer makes the dump,
    downloads the missing tools from their official pages (each archive is checked against the SHA-256 written in
    `scripts/install.py` before it is used), then builds. The first build takes 30 minutes to a few hours; if it stops,
    double-click it again and it goes on from there.
-4. Double-click **`Play SSBU.bat`**.
+3. Double-click **`Play SSBU.bat`** (your saves go to `build\saves`).
 
 The rest of this page is the same build done by hand, step by step.
 

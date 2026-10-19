@@ -14,7 +14,8 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STEPS = ['Python packages', 'Game files (dump)', 'Tools', 'Build the game', 'Ready to play']
 # setup.py's own steps ("[n/11] name ...") make up step 4; the share of each in the time of a first build (measured order)
 SETUP_W = {'deps': 1, 'stage': 1, 'convert': 1, 'modules': 2, 'tables': 1, 'lift': 15, 'sdk': 8, 'compile': 55, 'nro': 12, 'link': 3, 'check': 1}
-WINGET = ['winget', 'install', '--id', 'Microsoft.VisualStudio.2022.BuildTools', '-e', '--override',
+WINGET = ['winget', 'install', '--id', 'Microsoft.VisualStudio.2022.BuildTools', '-e', '--accept-package-agreements',
+          '--accept-source-agreements', '--override',
           '--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended']
 
 
@@ -170,8 +171,14 @@ class App:
             self.status.config(text='Build: ' + m.group(2) + ' (step %s of 11)' % m.group(1))
         if 'MSVC Build Tools are missing' in s:
             if messagebox.askyesno('Installer', 'The Microsoft C++ Build Tools are needed and missing.\n\nInstall them now? '
-                                   '(Windows asks for administrator rights; about 3 GB; then press Install again.)'):
-                subprocess.Popen(WINGET)
+                                   '(Yes accepts the Microsoft licence terms for the Build Tools and the winget source; Windows asks for '
+                                   'administrator rights; about 3 GB; when the black window closes, press Install again.)'):
+                try:
+                    subprocess.Popen(WINGET, creationflags=subprocess.CREATE_NEW_CONSOLE)
+                except OSError:                 # no winget (an old Windows 10): Microsoft's own installer page
+                    messagebox.showinfo('Installer', 'winget is not on this PC. Install "Build Tools for Visual Studio" '
+                                        '(workload "Desktop development with C++") from https://aka.ms/vs/17/release/vs_BuildTools.exe '
+                                        'and press Install again.')
 
     def finish(self, code):
         self.btn.config(state='normal')
