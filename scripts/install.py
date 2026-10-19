@@ -18,7 +18,8 @@ also written to build\\install_state.json; scripts/setup.py keeps its own build\
               path in SSBU_PROD_KEYS. Key values are never printed.
  5. dump      build\\dump from base + update (tools/extract/dump_folder.py; .nsz and .nca are read by romfs_extract.py), or the
               dump folder you have. DLC paths are recorded in install_state.json.
-              The system fonts are required (firmware).
+              The firmware is optional: it gives your console's own system fonts; without it the open-source fonts of
+              runtime\\fonts_open are used.
  6. tools     LLVM/clang 9 and the prebuilt runtime (or SDL3, Vulkan-Headers, glslang, suyu, MSVC to build everything).
  7. dlc       build\\config\\dlc.txt from the DLC file names (the runtime unlocks that content; names only).
  7. media     libopus (music) into deps\\opus; the Store codecs for the movies are checked (links printed when missing).
@@ -420,7 +421,8 @@ def _record_inputs(cx):
 
 # ------------------------------------------------------------------------------------------------------ 5. dump
 def ensure_fonts(cx, dump):
-    """The runtime stops (code 7) without the system fonts. -> extra setup.py arguments (--sysdata), [] if the dump has them."""
+    """The system fonts: the dump's, else your firmware's, else the open-source ones of runtime\\fonts_open (the runtime stops,
+    code 7, only without all three). -> extra setup.py arguments (--sysdata), [] if the dump has them or the open ones are used."""
     if has_fonts(os.path.join(dump, 'sysdata')):
         return []
     mine = os.path.join(BUILD, 'sysdata')
@@ -441,8 +443,15 @@ def ensure_fonts(cx, dump):
                 raise Stop('the system fonts could not be extracted from %s (code %d)' % (fw, rc), 'Check that prod.keys is the one of the same console.')
         if has_fonts(mine):
             return ['--sysdata', mine]
-    raise Stop('no system fonts: the game needs them (it stops at start without)',
-               'Give your firmware folder (--firmware, the .nca files of your console firmware) and start again.')
+    # no firmware fonts: the open-source replacements the repository ships (runtime\fonts_open, README.md there: Open Sans,
+    # Source Sans Pro, the yuzu project's icon font); setup.py stages them beside the exe, where nnpl.c looks for them
+    shipped = os.path.join(REPO, 'runtime', 'fonts_open')
+    if os.path.isdir(shipped) and sum(n.lower().endswith('.ttf') for n in os.listdir(shipped)) >= 7:
+        say('   system fonts: no firmware given, the open-source fonts of runtime\\fonts_open are used (no Chinese, Japanese '
+            'or Korean characters; a firmware folder adds your console\'s own)')
+        return []
+    raise Stop('no system fonts: neither a firmware nor the open-source fonts of runtime\\fonts_open (the game stops at start without)',
+               'Restore runtime\\fonts_open (scripts/update.py, or tools/extract/open_fonts.py), or give your firmware folder (--firmware).')
 
 
 def step_dump(cx):
@@ -450,7 +459,8 @@ def step_dump(cx):
     if cx.dump:
         if a.dry_run:
             fonts = has_fonts(os.path.join(cx.dump, 'sysdata'))
-            return 'dry', 'would use the dump %s%s' % (cx.dump, '' if fonts else ' and add the system fonts from the firmware')
+            return 'dry', 'would use the dump %s%s' % (cx.dump, '' if fonts else (' and add the system fonts from the firmware' if cx.firmware
+                                                                       else ' with the open-source fonts of runtime\\fonts_open'))
         cx.setup_args += ensure_fonts(cx, cx.dump)
         return 'skip', 'using the dump %s' % cx.dump
     if not (cx.base and cx.update):

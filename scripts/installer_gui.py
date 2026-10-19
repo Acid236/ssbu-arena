@@ -45,7 +45,7 @@ class App:
                 ('Base game', self.base, 'pkg', '.nsp, .xci or .nsz of the game itself (v0)'),
                 ('Update 13.0.4 or 13.0.5', self.update, 'pkg', '.nsp or .nsz of the update'),
                 ('prod.keys (packages only)', self.keys, 'keys', 'your console\'s keys, needed only to read package files'),
-                ('Firmware', self.fw, 'dir', 'your firmware dump folder: the game needs its system fonts')), start=1):
+                ('Firmware (optional)', self.fw, 'dir', 'optional: your firmware\'s own fonts; without it open-source fonts are used')), start=1):
             self.rows.append(self.field(src, r, label, var, kind, tip))
         ttk.Radiobutton(src, text='A dump folder I already made (exefs\\ and romfs\\ inside)', variable=self.mode, value='dump',
                         command=self.sync).grid(row=5, column=0, columnspan=3, sticky='w', **pad)
@@ -127,9 +127,8 @@ class App:
             args += ['--base', self.base.get(), '--update', self.update.get()]
             if self.keys.get():
                 args += ['--keys', self.keys.get()]
-            if not self.fw.get():
-                return messagebox.showwarning('Installer', 'Choose your firmware dump folder: the game needs the system fonts in it.')
-            args += ['--firmware', self.fw.get()]
+            if self.fw.get():
+                args += ['--firmware', self.fw.get()]
         self.btn.config(state='disabled')
         self.status.config(text='Working... this can take from 30 minutes to a few hours. You can close the window: the next Install goes on from where it stopped.')
         self.mark(0, 'run')

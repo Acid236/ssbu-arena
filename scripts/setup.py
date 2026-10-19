@@ -6,7 +6,8 @@
 <folder> holds what you dumped from YOUR console (see BUILDING.md):
     <folder>/exefs/    the title's ExeFS files: main  sdk  (rtld, subsdk0, main.npdm are not used), update applied
     <folder>/romfs/    the title's RomFS (data.arc ...), update applied
-    <folder>/sysdata/fonts (the system's shared fonts: the game stops at start without them); optional: <folder>/sysdata/zoneinfo
+    optional: <folder>/sysdata/fonts (your console's system fonts; without them the open-source ones of runtime/fonts_open
+              are used) and <folder>/sysdata/zoneinfo
 
 Nothing of the game is stored in the repository: every step below derives its files from the dump, into <repo>/build
 (ignored by git). Steps run in this order and are resumable (a finished step is skipped; --redo <step> repeats it,
@@ -401,7 +402,12 @@ def dump_checks(cx, a):
         cx.state['dump']['sysdata'] = os.path.abspath(sysdata)
         say('  dump: exefs, romfs, sysdata (fonts%s)' % (', zoneinfo' if os.path.isdir(os.path.join(sysdata, 'zoneinfo')) else ''))
     else:
-        say('  dump: exefs, romfs   (no sysdata\\fonts: WARNING, the game stops at start without the system fonts; tools/extract/fw_fonts.py, BUILDING.md)')
+        say('  dump: exefs, romfs   (no sysdata\\fonts: the open-source fonts of runtime\\fonts_open are used, staged beside the exe; '
+            'no Chinese, Japanese or Korean characters. Your console\'s own: tools/extract/fw_fonts.py, BUILDING.md)')
+        shipped = os.path.join(REPO, 'runtime', 'fonts_open')
+        if not os.path.isdir(shipped) or sum(n.lower().endswith('.ttf') for n in os.listdir(shipped)) < 7:
+            raise Fail('runtime\\fonts_open lacks its 7 font files and the dump has no sysdata\\fonts: the game would stop at start. '
+                       'Restore the folder (scripts/update.py, git) or make it with tools/extract/open_fonts.py')
     if a.sdk_roots:
         if not os.path.isfile(a.sdk_roots):
             raise Fail('--sdk-roots file not found')

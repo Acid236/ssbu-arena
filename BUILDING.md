@@ -120,7 +120,7 @@ own), produce a folder:
 ```
 <dump>/exefs/      the whole ExeFS: main, sdk, rtld, subsdk0, main.npdm   (with the update applied)
 <dump>/romfs/      the RomFS with the update applied (it contains data.arc)
-<dump>/sysdata/fonts      required: the system shared fonts (.ttf); the game stops at start (code 7) without them
+<dump>/sysdata/fonts      optional: your console's system shared fonts (.ttf); without them the open-source ones are used
 <dump>/sysdata/zoneinfo   optional: the tz database files
 ```
 
@@ -136,6 +136,22 @@ The pieces are also tools of their own: `tools/extract/romfs_extract.py <base> <
 applied; `.nsp` or `.xci`), `tools/extract/nca_exefs.py` (ExeFS from an NCA) and `tools/extract/fw_fonts.py` (system
 fonts from a firmware dump). They read the keys from `~/.switch/prod.keys` and need `pip install pycryptodome`. This
 repository contains no keys and no link to any.
+
+### System fonts
+
+The game draws its text with the console's 7 shared system fonts. A firmware is **optional**:
+
+- **With** your firmware (the installer's Firmware field, `dump_folder.py --firmware`, or `tools/extract/fw_fonts.py`
+  into `<dump>/sysdata/fonts`), the game uses your console's own fonts and looks exactly as on the console.
+- **Without** it, the runtime uses the open-source replacements shipped in `runtime/fonts_open` (Open Sans, Source Sans
+  Pro and the yuzu project's button-icon font, from suyu; licences and sources in `runtime/fonts_open/README.md`;
+  `tools/extract/open_fonts.py` makes them again from their source). `scripts/setup.py` stages them beside the exe.
+  What changes: menus and texts use a different typeface; Chinese, Japanese and Korean characters and most symbols
+  are missing (each is drawn as an empty box), so play in a Latin-alphabet language; the button icons are yuzu's.
+  Fights and saves are not affected.
+
+`SSBU_FONTS=<folder>` chooses a font folder by hand. The runtime looks there (or in `..\sysdata\fonts`), then in
+`fonts_open\` beside the exe, and stops at start (code 7) only when a font file is in neither place.
 
 ## The SDK function list
 

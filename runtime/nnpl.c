@@ -1,8 +1,10 @@
 /* nn::pl: the system's shared fonts, read from plain TrueType files on the host.
  *
- * The files come from the user's own firmware dump (extract-tools/fw_fonts.py) and are looked up in
- * %SSBU_FONTS% or ..\sysdata\fonts. A font that is missing reports size 0 but still "loaded", so the
- * game does not wait for it forever.
+ * Each file is looked up in %SSBU_FONTS% (else ..\sysdata\fonts): the user's own firmware fonts
+ * (extract-tools/fw_fonts.py); then in fonts_open\ beside the exe: the open-source replacements the runtime
+ * ships (Open Sans, Source Sans Pro, the yuzu project's extension font; runtime\fonts_open\README.md). They lack
+ * many characters (no CJK, few symbols); nnfontll.c draws their .notdef box where the game needs U+25A1.
+ * Only a file found in neither place stops the game (code 7), as a console always has its fonts.
  *
  * SharedFontType: 0 Standard, 1 ChineseSimple, 2 ChineseSimpleExtension, 3 ChineseTraditional,
  *                 4 Korean, 5 NintendoExtension. SharedFontLoadState: 0 Loading, 1 Loaded. */
@@ -29,10 +31,19 @@ static void load_font(unsigned type) {
     EnterCriticalSection(&g_lock);
     if (!g_fonts[type].tried) {
         g_fonts[type].tried = 1;
-        char path[MAX_PATH];
-        const char *dir = getenv("SSBU_FONTS");
-        snprintf(path, sizeof path, "%s\\%s", dir ? dir : "..\\sysdata\\fonts", font_files[type]);
-        FILE *f = fopen(path, "rb");
+        char path[MAX_PATH], dirs[2][MAX_PATH], exe[MAX_PATH];
+        int ndirs = 0;
+        const char *env = getenv("SSBU_FONTS");
+        snprintf(dirs[ndirs++], MAX_PATH, "%s", env ? env : "..\\sysdata\\fonts");
+        DWORD n = GetModuleFileNameA(NULL, exe, sizeof exe);       /* the open-source fonts shipped with the runtime: fonts_open\ beside the exe */
+        char *slash = n && n < sizeof exe ? strrchr(exe, '\\') : NULL;
+        if (slash) { *slash = 0; snprintf(dirs[ndirs++], MAX_PATH, "%s\\fonts_open", exe); }
+        FILE *f = NULL;
+        for (int i = 0; i < ndirs && !f; i++) {
+            snprintf(path, sizeof path, "%s\\%s", dirs[i], font_files[type]);
+            f = fopen(path, "rb");
+        }
+        if (!f) snprintf(path, sizeof path, "%s\\%s", dirs[0], font_files[type]);
         if (f) {
             fseek(f, 0, SEEK_END);
             long size = ftell(f);
@@ -43,12 +54,21 @@ static void load_font(unsigned type) {
         }
         printf("nn::pl: shared font %u %s (%s, %zu bytes)\n", type, g_fonts[type].data ? "loaded" : "NOT FOUND", path, g_fonts[type].size);
         if (!g_fonts[type].data) {                        /* close4: a console always has its system fonts; "loaded, size 0" was a made-up state */
-            printf("nn::pl: the system font file is a required input (extract-tools/fw_fonts.py from your own firmware dump, or SSBU_FONTS=<folder>): stopping\n");
+            printf("nn::pl: %s is neither in %s nor in fonts_open\\ beside the exe. The runtime ships open-source fonts in "
+                   "runtime\\fonts_open (copied beside the exe by scripts/setup.py): copy that folder there again, or give your own "
+                   "firmware's fonts (tools/extract/fw_fonts.py, SSBU_FONTS=<folder>): stopping\n", font_files[type], dirs[0]);
             fflush(stdout);
             report_and_exit(7);
         }
     }
     LeaveCriticalSection(&g_lock);
+}
+
+/* Whether p points into one of the shared font files (nnfontll.c: tells the system's fonts from the game's own). */
+int pl_shared_font_contains(const void *p) {
+    for (int i = 0; i < FONT_TYPES; i++)
+        if (g_fonts[i].data && (const char *)p >= (const char *)g_fonts[i].data && (const char *)p < (const char *)g_fonts[i].data + g_fonts[i].size) return 1;
+    return 0;
 }
 
 static void pl_RequestSharedFontLoad(Ctx *c) { load_font((unsigned)A0); }

@@ -98,7 +98,25 @@ typedef struct {
     int sub_format;
     HFONT hfont;
     int gdi;                                      /* 0 not tried, 1 usable, -1 unusable */
+    int no_alt;                                   /* the cmap has no U+25A1 (a replacement font): see ALT_CHAR */
+    int shared;                                   /* one of the system's shared fonts (nn::pl), not a font of the game's own */
+    volatile LONG misses, drawn, alt_drawn;       /* counted only when no_alt: CheckGlyphExist misses, glyph maps made, of them U+25A1 */
+    uint32_t miss_codes[48];                      /* the first distinct codes missed (g_lock) */
+    int miss_count;
 } FontData;
+
+/* The character the game draws for a character no font of a face has (nn::font ScalableFont's alternate
+ * character). The game registers it in the glyph cache once and then uses the cache node without checking it
+ * (0x710007ca9c: FindGlyphNode's result is dereferenced), so a face whose fonts all lack it crashes. Every
+ * console font has it; the open-source replacements (Open Sans, Source Sans Pro, the yuzu extension font) do
+ * not. When NO loaded font has it, CheckGlyphExist says yes for it and the glyph drawn is glyph 0 (.notdef, a
+ * box in all those fonts), which is what U+25A1 WHITE SQUARE looks like. With the console fonts loaded nothing
+ * changes (alt_somewhere: the game's own add_font lacks it too, the console's fonts have it). */
+#define ALT_CHAR 0x25a1u
+static int alt_somewhere(void);
+#ifndef FONTLL_TEST
+int pl_shared_font_contains(const void *p);       /* nnpl.c */
+#endif
 
 typedef struct { FontData *fd; char name[50]; } Font;
 
@@ -280,6 +298,10 @@ static FontData *font_data(const uint8_t *data, uint32_t index) {
     f->glyphs = (int)be16(maxp + 4);
     f->hmetrics = (int)be16(f->hhea + 34);
     pick_cmap(f);
+    f->no_alt = map_char(f, ALT_CHAR) == 0;
+#ifndef FONTLL_TEST
+    f->shared = pl_shared_font_contains(data);
+#endif
     char family[41];
     name_string(f, 1, family, sizeof family, f->face, LF_FACESIZE);
     int n = 0;
@@ -578,6 +600,12 @@ static uint8_t *make_glyphmap(Engine *e, uint32_t code, unsigned type) {
     memset(&path, 0, sizeof path);
     if (f) {
         uint32_t glyph = map_char(f, code);
+        if (f->no_alt && !alt_somewhere()) {
+            LONG n = InterlockedIncrement(&f->drawn);
+            if (code == ALT_CHAR) InterlockedIncrement(&f->alt_drawn);
+            if ((n & (n - 1)) == 0 && n >= 16) printf("nn::fontll: font \"%s\": %ld glyph maps made, %ld of them the U+25A1 box, %ld glyph checks missed\n",
+                                                      f->name, (long)n, (long)f->alt_drawn, (long)f->misses);
+        }
         dx = advance_fixed(e, f, glyph);
         glyph_path(f, glyph, e->scale, &path);
         rasterise(&path, &g);
@@ -948,10 +976,46 @@ static void fe_GetFontMetrics(Ctx *c) {
     RET(e->error);
 }
 
+/* Missing characters of a replacement font (no_alt): the first distinct codes and a running count. A miss is not
+ * necessarily a missing character on screen: the game asks every font of a face in turn. */
+/* Whether one of the system's shared fonts (nn::pl) has U+25A1. The console's all have it: with them nothing below
+ * applies (no stand-in, no counters, no log lines). The game's own fonts do not count: add_font lacks it, the
+ * Rodin fonts of data.arc have it, and the faces that crash hold only shared fonts. Fonts are only ever added, so
+ * once true it stays true. */
+static int alt_somewhere(void) {
+    static volatile LONG found;
+    if (found) return 1;
+    EnterCriticalSection(&g_lock);
+    for (int i = 0; i < g_fontdata_count && !found; i++) if (g_fontdata[i].shared && !g_fontdata[i].no_alt) found = 1;
+    LeaveCriticalSection(&g_lock);
+    return found;
+}
+
+static void note_miss(FontData *f, uint32_t code) {
+    LONG n = InterlockedIncrement(&f->misses);
+    int fresh = 0;
+    EnterCriticalSection(&g_lock);
+    int k = 0;
+    for (; k < f->miss_count && f->miss_codes[k] != code; k++) {}
+    if (k == f->miss_count && f->miss_count < (int)(sizeof f->miss_codes / sizeof f->miss_codes[0])) { f->miss_codes[f->miss_count++] = code; fresh = f->miss_count; }
+    LeaveCriticalSection(&g_lock);
+    if (fresh) printf("nn::fontll: font \"%s\" has no glyph for U+%04X (distinct miss %d, misses so far %ld)\n", f->name, (unsigned)code, fresh, (long)n);
+    else if ((n & (n - 1)) == 0 && n >= 64) printf("nn::fontll: font \"%s\": %ld glyph checks missed so far, %ld glyph maps made, %ld of them the U+25A1 box\n",
+                                                   f->name, (long)n, (long)f->drawn, (long)f->alt_drawn);
+}
+
 static void fe_CheckGlyphExist(Ctx *c) {
     Engine *e = engine(A0);
     FontData *f = current(e);
     int yes = f && (map_char(f, (uint32_t)A1) & 0xffff) != 0;
+    if (f && !yes && f->no_alt && !alt_somewhere()) {
+        static volatile LONG told;
+        if (!InterlockedExchange(&told, 1))
+            printf("nn::fontll: no system font has U+25A1 (the game's missing-character box: replacement fonts): the .notdef glyph of "
+                   "the font asked stands in for it; characters the fonts lack are logged below\n");
+        if ((uint32_t)A1 == ALT_CHAR) yes = 1;
+        else note_miss(f, (uint32_t)A1);
+    }
     e->error = f ? 0 : ERR_NO_FONT;
     if (flog(L_CHECK)) printf("fontll: CheckGlyphExist engine %llx font %d code %x -> %d\n", (unsigned long long)A0, e->current, (unsigned)A1, yes);
     RET(yes);
