@@ -3387,6 +3387,7 @@ static void present_progress(float frac) { if (!g_ovl.bar_arg) return; g_ovl.fra
  * NOT covered (said in the log line at the end): pipelines of pairs never drawn on this PC are still linked at their first
  * loading screen or draw (a link is 0.011 ms on NVIDIA, up to 3.9 ms on Intel). */
 extern volatile LONG g_display_close;              /* display.c */
+int display_splash_prep(int pct, int eta_s, int loading);      /* display.c: the window's own loading screen shows the preparation (or the loading at start) */
 static void prep_first_hold(LONG64 frame) {
     static int done, mode = -1;
     if (done) return;
@@ -3430,12 +3431,13 @@ static void prep_first_hold(LONG64 frame) {
         else snprintf(g_ovl.text[1], sizeof g_ovl.text[1], "%lld / %lld", (long long)dn, (long long)(qd + left_files * 90));
         if (eta >= 0) snprintf(g_ovl.text[2], sizeof g_ovl.text[2], "ABOUT %d:%02d LEFT", eta / 60, eta % 60); else snprintf(g_ovl.text[2], sizeof g_ovl.text[2], "TIME LEFT: ...");
         snprintf(g_ovl.text[3], sizeof g_ovl.text[3], loadall ? "NO SHADER LOADING BEFORE A FIGHT" : "FIRST START ONLY");
-        present_progress((float)f);
+        if (!display_splash_prep(pct, eta, loadall)) present_progress((float)f);      /* before the first frame the window's loading screen shows it */
         if (tk() - tlog > 10 * fq.QuadPart) { tlog = tk(); printf("nvn_vk_prep: %s screen: %d %%, %lld of about %lld stages, %.0f s so far, about %d s left\n", loadall ? "loading" : "first-run", pct, (long long)dn, (long long)(qd + left_files * 90), el, eta); fflush(stdout); }
         Sleep(100);
     }
     g_prep_urgent = 0;
     g_ovl.screen = 0;
+    display_splash_prep(-1, -1, 0);
     double el = (double)(tk() - t0) / (double)fq.QuadPart;
     if (loadall) {
         if (stopped) printf("nvn_vk_prep: LOADING SHADERS stopped after %.1f s (the window was closed)\n", el);

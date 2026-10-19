@@ -10,7 +10,8 @@ unit still finds it):
   - every fighter's costume folders fighter/<name>/c00..c07 (models, textures, motions of all 8 costumes), and the
     costume-dependent UI portraits and voice / sound banks found by name (chara_<n>_<name>_<cc>, vc_/se_<name>_c<cc>),
     so every costume works although the coverage runs used the first one;
-  - with --keep-movies, every stream entry the opening and menus may play is not added: movies come only from the logs.
+  - every audio stream and every movie (WebM stream entries) whole: a movie the game does not find makes it loop on
+    loading screens that cannot be skipped.
 Everything else (other stages, World of Light, Spirits, items, assist trophies, bosses, their music and effects) is not
 copied. A read of something missing is zero-filled and logged by the runtime ("arcpack: MISSING ..."): add that run's
 log and pack again. No game content in this file; the output is your own game data and stays on your PC.
@@ -174,13 +175,16 @@ def main():
     print('costumes: %d fighter folders, %d UI fighter folders, %d portrait / sound files -> %d more units' % (dirs, uidirs, files, len(used) - before))
     for i in used: keep.append(units[i])
     # every audio stream (NUS3: music, victory themes, which the game picks at random) is kept; videos (WebM) only as logged
-    audio = []
+    audio, video = [], []
     with open(arc, 'rb') as fa:
         for s_, n_ in stream_entries:
             fa.seek(s_)
-            if fa.read(4) == b'NUS3': audio.append((s_, n_))
-    keep += audio
-    print('audio streams kept whole: %d (%.0f MB); videos only as logged' % (len(audio), sum(n for _, n in audio) / 2**20))
+            m = fa.read(4)
+            if m == b'NUS3': audio.append((s_, n_))
+            elif m == bytes((0x1a, 0x45, 0xdf, 0xa3)): video.append((s_, n_))      # every WebM movie: a missing one makes the game
+                                                                       # loop on loading screens that cannot be skipped
+    keep += audio + video
+    print('audio streams kept whole: %d (%.0f MB); movies kept whole: %d (%.0f MB)' % (len(audio), sum(n for _, n in audio) / 2**20, len(video), sum(n for _, n in video) / 2**20))
     keep.append((0, 0x1000))
     keep.append((A.fs_off, size - A.fs_off))
     # ---- merge and write (4 KB rounding can pass the end of the file: clip)

@@ -268,6 +268,15 @@ static void speed_init(void) {
  * nothing draws the window (it showed white). Until the first present the window is painted here with GDI: dark
  * background, the name, "Caricamento" and a moving bar; a 50 ms timer animates it and stops at the first frame. */
 static DWORD g_splash_t0;
+/* The first-run shader preparation (nvn_vk_draw.c prep_first_hold) holds the game before its first frame: while this
+ * screen is up it shows the preparation here (percentage, the bar, time left) instead of presenting its own screen,
+ * which drawn over this one put the two texts on top of each other. */
+static volatile int g_splash_prep_pct = -1, g_splash_prep_eta = -1, g_splash_prep_load;
+int display_splash_prep(int pct, int eta_s, int loading) {      /* 1: the loading screen shows it (the caller presents nothing); pct < 0 ends it; loading: the shaders are loaded at start (not the first-run preparation) */
+    g_splash_prep_pct = pct; g_splash_prep_eta = eta_s; g_splash_prep_load = loading;
+    if (pct >= 0 && g_hwnd && g_frames == 0) { InvalidateRect(g_hwnd, NULL, FALSE); return 1; }
+    return 0;
+}
 static void splash_paint(HWND h) {
     PAINTSTRUCT ps;
     HDC dc = BeginPaint(h, &ps);
@@ -302,15 +311,33 @@ static void splash_paint(HWND h) {
             by += sm;
         }
         DWORD el = GetTickCount() - g_splash_t0;
-        char txt[32]; snprintf(txt, sizeof txt, "Caricamento%.*s", (int)(el / 400 % 4), "...");
+        int prep = g_splash_prep_pct >= 0;
+        char txt[64], right[48] = "";
+        if (prep) {
+            snprintf(txt, sizeof txt, "%s%.*s", g_splash_prep_load ? "Caricamento shader" : "Preparazione shader", (int)(el / 400 % 4), "...");
+            snprintf(right, sizeof right, "%d %%", g_splash_prep_pct);
+        } else snprintf(txt, sizeof txt, "Caricamento%.*s", (int)(el / 400 % 4), "...");
         int bw = w / 3, bx = (w - bw) / 2, bh = sm / 3 > 3 ? sm / 3 : 3;
         RECT r4 = {bx, by, bx + bw, by + sm * 2};
         SetTextColor(m, RGB(200, 200, 205)); DrawTextA(m, txt, -1, &r4, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+        if (right[0]) DrawTextA(m, right, -1, &r4, DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
         RECT track = {bx, by + sm * 2 + sm / 2, bx + bw, by + sm * 2 + sm / 2 + bh};
         HBRUSH tb = CreateSolidBrush(RGB(60, 60, 66)); FillRect(m, &track, tb); DeleteObject(tb);
-        int seg = bw / 4, pos = (int)(el / 4 % (unsigned)(bw + seg)) - seg;      /* a segment that runs along the track */
-        RECT run = {bx + (pos < 0 ? 0 : pos), track.top, bx + (pos + seg > bw ? bw : pos + seg), track.bottom};
+        RECT run;
+        if (prep) { RECT r = {bx, track.top, bx + bw * g_splash_prep_pct / 100, track.bottom}; run = r; }      /* the preparation: how much is done */
+        else {
+            int seg = bw / 4, pos = (int)(el / 4 % (unsigned)(bw + seg)) - seg;      /* a segment that runs along the track */
+            RECT r = {bx + (pos < 0 ? 0 : pos), track.top, bx + (pos + seg > bw ? bw : pos + seg), track.bottom}; run = r;
+        }
         if (run.right > run.left) { HBRUSH rb = CreateSolidBrush(RGB(232, 40, 40)); FillRect(m, &run, rb); DeleteObject(rb); }
+        if (prep) {                                                       /* under the bar: time left, and that it happens once */
+            char l2[96];
+            const char *why = g_splash_prep_load ? "niente attese prima delle partite" : "solo al primo avvio";
+            if (g_splash_prep_eta >= 0) snprintf(l2, sizeof l2, "circa %d:%02d rimanenti  -  %s", g_splash_prep_eta / 60, g_splash_prep_eta % 60, why);
+            else snprintf(l2, sizeof l2, "%s", why);
+            RECT r5 = {0, track.bottom + sm / 2, w, track.bottom + sm / 2 + sm * 2};
+            SetTextColor(m, RGB(140, 140, 150)); DrawTextA(m, l2, -1, &r5, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+        }
         BitBlt(dc, 0, 0, w, ht, m, 0, 0, SRCCOPY);
         SelectObject(m, of); DeleteObject(fb); DeleteObject(fs);
         SelectObject(m, old); DeleteObject(bm); DeleteDC(m);
