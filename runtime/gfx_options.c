@@ -127,7 +127,7 @@ static const char *const k_default_ini =
 "; aspect = stretch | keep      (Vulkan)\r\n"
 ";   stretch: the picture fills the window whatever its shape. keep: the game's 16:9 proportions, with black bars\r\n"
 ";   left and right (or above and below) when the window has another shape.\r\n"
-"aspect = stretch\r\n"
+"aspect = keep\r\n"
 "\r\n"
 "; frame_time_overlay = off | on\r\n"
 ";   on: the average frame time of the last second in the window title ('.. fps - 16.67 ms per frame') and as a\r\n"

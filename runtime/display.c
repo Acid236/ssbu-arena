@@ -466,9 +466,9 @@ int display_window_mode(void) { return g_full ? (g_topmost ? 2 : 1) : 0; }
 static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
     if (m == WM_PAINT && g_frames == 0) { splash_paint(h); return 0; }
     if (m == WM_TIMER && w == 1) { if (g_frames) KillTimer(h, 1); else InvalidateRect(h, NULL, FALSE); return 0; }
-    if (m == WM_EXITSIZEMOVE) place_save(h);
+    if (m == WM_EXITSIZEMOVE && !g_full) place_save(h);      /* F11 borderless: not a window place */
     if (m == WM_CLOSE) {                             /* the exit request: nn::oe decides (nnmisc.c oe_exit_request) whether the game ends now or after its exit-request handling section */
-        place_save(h);
+        if (!g_full) place_save(h);
         printf("\nwindow closed by the user after %lld frames\n", (long long)g_frames);
         { extern volatile LONG g_display_close; InterlockedExchange(&g_display_close, 1); }      /* session 14: a hold of ours (the first-run shader preparation) ends at once */
         if (!oe_exit_request()) report_and_exit(0);
@@ -480,7 +480,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
         if (!g_frames) { RECT rc; GetClientRect(h, &rc); FillRect((HDC)w, &rc, (HBRUSH)GetStockObject(BLACK_BRUSH)); }
         return 1;
     }
-    if (m == WM_SIZING && !g_full) { sizing_keep_aspect(h, w, (RECT *)l); return TRUE; }
+    if (m == WM_SIZING && !g_full && gfx_options()->aspect) {      /* aspect = stretch (launcher "Stirata"): any shape */ sizing_keep_aspect(h, w, (RECT *)l); return TRUE; }
     if (m == WM_KEYDOWN && w == VK_F11 && !(l & (1 << 30))) { toggle_fullscreen(h); return 0; }      /* bit 30: auto-repeat of a held key */
     if (m == WM_APP + 0x51) { window_mode_set(h, (int)w); return 0; }                                 /* U1: the settings menu (menu.cpp) */
     if (m == WM_APP + 0x52) { window_size_set(h, (int)w, (int)l); return 0; }
