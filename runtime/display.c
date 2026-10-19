@@ -245,6 +245,67 @@ static void speed_init(void) {
 }
 
 int oe_exit_request(void);                            /* nnmisc.c */
+/* PR #24 (v1Ta44): the game's picture is 16:9 (its window texture is 1920x1080). The renderers place it with display_fit;
+ * the windowed frame keeps that shape while it is dragged (WM_SIZING), and F11 switches between the window and a
+ * borderless window over the whole monitor it is on. */
+#define ASPECT_W 16
+#define ASPECT_H 9
+void display_fit(int sw, int sh, int dw, int dh, int out[4]) {      /* the largest rectangle of sw:sh in dw x dh, centred: x, y, w, h */
+    out[0] = 0; out[1] = 0; out[2] = dw; out[3] = dh;
+    if (sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0) return;
+    if ((long long)dw * sh > (long long)dh * sw) { out[2] = (int)((long long)dh * sw / sh); out[0] = (dw - out[2]) / 2; }      /* wider: bars left and right */
+    else if ((long long)dw * sh < (long long)dh * sw) { out[3] = (int)((long long)dw * sh / sw); out[1] = (dh - out[3]) / 2; }  /* taller: bars above and below */
+    if (dw - out[2] <= 2 && dh - out[3] <= 2) { out[0] = 0; out[1] = 0; out[2] = dw; out[3] = dh; }   /* within 2 px of 16:9 (1366x768): fill, no bars */
+    {   static int last[4] = {-1, -1, -1, -1}, said;
+        if (memcmp(last, out, sizeof last) && said++ < 20) { memcpy(last, out, sizeof last); printf("display: picture %dx%d at %d,%d in %dx%d\n", out[2], out[3], out[0], out[1], dw, dh); fflush(stdout); }
+    }
+}
+static void sizing_keep_aspect(HWND h, WPARAM edge, RECT *r) {
+    RECT frame = {0, 0, 0, 0};
+    AdjustWindowRectEx(&frame, (DWORD)GetWindowLongPtrA(h, GWL_STYLE), FALSE, (DWORD)GetWindowLongPtrA(h, GWL_EXSTYLE));
+    int fw = frame.right - frame.left, fh = frame.bottom - frame.top;
+    int cw = r->right - r->left - fw, ch = r->bottom - r->top - fh;
+    if (edge == WMSZ_TOP || edge == WMSZ_BOTTOM) cw = ch * ASPECT_W / ASPECT_H;      /* the edge dragged decides; corners follow the width */
+    else ch = cw * ASPECT_H / ASPECT_W;
+    if (edge == WMSZ_TOP || edge == WMSZ_BOTTOM || edge == WMSZ_RIGHT || edge == WMSZ_LEFT) {
+        if (edge == WMSZ_TOP || edge == WMSZ_BOTTOM) r->right = r->left + cw + fw;
+        else r->bottom = r->top + ch + fh;
+    } else {
+        if (edge == WMSZ_TOPLEFT || edge == WMSZ_TOPRIGHT) r->top = r->bottom - ch - fh; else r->bottom = r->top + ch + fh;
+    }
+}
+static int g_full;                                    /* F11 state: 1 = borderless over the monitor */
+static WINDOWPLACEMENT g_windowed;
+static int g_have_windowed;
+static void toggle_fullscreen(HWND h) {
+    if (!g_full) {
+        MONITORINFO mi;
+        memset(&mi, 0, sizeof mi); mi.cbSize = sizeof mi;
+        if (!GetMonitorInfoA(MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST), &mi)) return;
+        g_windowed.length = sizeof g_windowed;
+        g_have_windowed = GetWindowPlacement(h, &g_windowed);
+        SetWindowLongPtrA(h, GWL_STYLE, (LONG_PTR)(WS_POPUP | WS_VISIBLE));
+        SetWindowPos(h, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top, mi.rcMonitor.right - mi.rcMonitor.left, mi.rcMonitor.bottom - mi.rcMonitor.top,
+                     SWP_FRAMECHANGED | SWP_NOOWNERZORDER);
+    } else {
+        SetWindowLongPtrA(h, GWL_STYLE, (LONG_PTR)(WS_OVERLAPPEDWINDOW | WS_VISIBLE));
+        SetWindowPos(h, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED | SWP_NOOWNERZORDER);      /* window = fullscreen in graphics.ini made it topmost */
+        if (g_have_windowed) SetWindowPlacement(h, &g_windowed);
+        else {                                        /* started borderless / fullscreen: the configured client size, centred */
+            const GfxOptions *go = gfx_options();
+            RECT r = {0, 0, go->width, go->width * ASPECT_H / ASPECT_W};
+            MONITORINFO mi;
+            memset(&mi, 0, sizeof mi); mi.cbSize = sizeof mi;
+            GetMonitorInfoA(MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST), &mi);
+            AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
+            int w = r.right - r.left, wh = r.bottom - r.top;
+            SetWindowPos(h, NULL, mi.rcWork.left + (mi.rcWork.right - mi.rcWork.left - w) / 2, mi.rcWork.top + (mi.rcWork.bottom - mi.rcWork.top - wh) / 2, w, wh,
+                         SWP_NOZORDER | SWP_NOOWNERZORDER);
+        }
+    }
+    g_full = !g_full;
+    printf("display: F11: %s\n", g_full ? "borderless over the monitor" : "window"); fflush(stdout);
+}
 static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
     if (m == WM_CLOSE) {                             /* the exit request: nn::oe decides (nnmisc.c oe_exit_request) whether the game ends now or after its exit-request handling section */
         printf("\nwindow closed by the user after %lld frames\n", (long long)g_frames);
@@ -258,6 +319,8 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
         if (!g_frames) { RECT rc; GetClientRect(h, &rc); FillRect((HDC)w, &rc, (HBRUSH)GetStockObject(BLACK_BRUSH)); }
         return 1;
     }
+    if (m == WM_SIZING && !g_full) { sizing_keep_aspect(h, w, (RECT *)l); return TRUE; }
+    if (m == WM_KEYDOWN && w == VK_F11 && !(l & (1 << 30))) { toggle_fullscreen(h); return 0; }      /* bit 30: auto-repeat of a held key */
     return DefWindowProcA(h, m, w, l);
 }
 
@@ -277,6 +340,7 @@ static DWORD WINAPI window_thread(LPVOID arg) {
      * over the primary monitor (fullscreen: also topmost). */
     const GfxOptions *go = gfx_options();
     DWORD style = go->window_mode ? WS_POPUP : WS_OVERLAPPEDWINDOW;
+    g_full = go->window_mode != 0;
     int cw = go->width, ch = go->height, px = CW_USEDEFAULT, py = CW_USEDEFAULT;
     if (go->window_mode) {
         MONITORINFO mi;

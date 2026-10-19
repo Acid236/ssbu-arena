@@ -3364,11 +3364,24 @@ swap: ;
             }
             memcpy(fl_s4, s4, sizeof fl_s4);           /* PR #8: taken BEFORE rs_reduce: fl_capture reads this rectangle of vt itself, not of a reduction step */
             VTex *src = vt;
-            if (vt->rs && vt->sx > 1.0f) rs_reduce(&src, s4, (int)V.extent.width, (int)V.extent.height);      /* PR #8 (stephenjayakar): track O, supersampling: halved in 2:1 steps to at most twice the window */
+            /* PR #24 (v1Ta44): the picture keeps its shape (display.c display_fit): black bars when the window is not 16:9 */
+            void display_fit(int sw, int sh, int dw, int dh, int out[4]);
+            int d4[4];
+            display_fit(16, 9, (int)V.extent.width, (int)V.extent.height, d4);
+            if (vt->rs && vt->sx > 1.0f) rs_reduce(&src, s4, d4[2], d4[3]);      /* PR #8 (stephenjayakar): track O, supersampling: halved in 2:1 steps to at most twice the picture */
             memset(&b, 0, sizeof b);
             b.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT; b.srcSubresource.layerCount = 1; b.dstSubresource = b.srcSubresource;
             b.srcOffsets[0].x = s4[0]; b.srcOffsets[0].y = s4[1]; b.srcOffsets[1].x = s4[0] + s4[2]; b.srcOffsets[1].y = s4[1] + s4[3]; b.srcOffsets[1].z = 1;
-            b.dstOffsets[1].x = (int32_t)V.extent.width; b.dstOffsets[1].y = (int32_t)V.extent.height; b.dstOffsets[1].z = 1;
+            if (d4[2] != (int)V.extent.width || d4[3] != (int)V.extent.height) {
+                VkClearColorValue z; memset(&z, 0, sizeof z); z.float32[3] = 1.0f;
+                vkCmdClearColorImage(R.cmd, V.images[index], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &z, 1, &sr);
+                VkImageMemoryBarrier ib; memset(&ib, 0, sizeof ib);      /* the clear is written before the blit writes over it */
+                ib.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER; ib.srcAccessMask = ib.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                ib.oldLayout = ib.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL; ib.srcQueueFamilyIndex = ib.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                ib.image = V.images[index]; ib.subresourceRange = sr;
+                vkCmdPipelineBarrier(R.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &ib);
+            }
+            b.dstOffsets[0].x = d4[0]; b.dstOffsets[0].y = d4[1]; b.dstOffsets[1].x = d4[0] + d4[2]; b.dstOffsets[1].y = d4[1] + d4[3]; b.dstOffsets[1].z = 1;
             if (g_pt_on > 0) pt_mark((int)V.extent.width, (int)V.extent.height, 0, 0, 0, 1, 2);
             CKPT_OP("present blit (swapchain image, index, w)", V.images[index], index, vt->w, 0);
             vkCmdBlitImage(R.cmd, src->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, V.images[index], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &b, VK_FILTER_LINEAR);      /* PR #8: src = vt, or the last reduction step */
