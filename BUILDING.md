@@ -4,6 +4,22 @@ The repository holds only this project's own tools and runtime. Nothing that com
 software is in it, with one stated exception: a list of function names (see "The SDK function list"). Everything else of that kind (the lifted C code, the lifted system-library code, the generated headers and
 tables, the script-module libraries) is **generated on your PC from your own dump**, into `build/` (ignored by git).
 
+## The short way: one click
+
+1. Install Python 3.10 or newer (tick "Add python.exe to PATH") and the MSVC Build Tools (the installer gives the command
+   if they are missing).
+2. Download this repository (Code, Download ZIP) and unpack it, or `git clone` it.
+3. Double-click **`Install SSBU.bat`**. A window asks for your own files: the base game (`.nsp`, `.xci` or `.nsz`), the
+   13.0.4 update (`.nsp` or `.nsz`) and your `prod.keys`, or a dump folder you already have. The installer makes the dump,
+   downloads the missing tools from their official pages (each archive is checked against the SHA-256 written in
+   `scripts/install.py` before it is used), then builds. The first build takes 30 minutes to a few hours; if it stops,
+   double-click it again and it goes on from there.
+4. Double-click **`Play SSBU.bat`**.
+
+The rest of this page is the same build done by hand, step by step.
+
+## By hand
+
 ```
 git clone https://github.com/Denkishi/ssbu-recomp
 cd ssbu-recomp
