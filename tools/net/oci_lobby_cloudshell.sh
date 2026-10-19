@@ -9,13 +9,14 @@
 #   2. the firewall of that VCN: UDP $PORT (the lobby) and TCP 80 / 443 (the status page) open to the internet;
 #   3. an SSH key pair in Cloud Shell (~/.ssh/ssbu_lobby): it stays in your Cloud Shell, nothing is printed;
 #   4. the VM "ssbu-lobby": shape $SHAPE (default VM.Standard.A1.Flex, 1 OCPU, 6 GB; SHAPE=VM.Standard.E2.1.Micro for the
-#      small AMD one), Ubuntu 24.04, public IP; "Out of capacity" is retried every $RETRY seconds until it works;
+#      small AMD one), Ubuntu 24.04, public IP; "Out of capacity" is retried every $RETRY s (default 120), "too many
+#      requests" after 300 s, until it works;
 #   5. the lobby on the VM (tools/net/ssbu_lobby.py + deploy_lobby.sh from this repository, systemd service).
 # At the end it prints the server's public address: players use online_server = <address>:<port>.
-# Options (environment): VCN_NAME, SHAPE, OCPUS, MEMORY_GB, PORT (39500), RETRY (60), REPO_RAW (raw URL of this repo).
+# Options (environment): VCN_NAME, SHAPE, OCPUS, MEMORY_GB, PORT (39500), RETRY (120), REPO_RAW (raw URL of this repo).
 set -euo pipefail
 VCN_NAME="${VCN_NAME:-ssbu-vcn}"; SHAPE="${SHAPE:-VM.Standard.A1.Flex}"; OCPUS="${OCPUS:-1}"; MEMORY_GB="${MEMORY_GB:-6}"
-PORT="${PORT:-39500}"; RETRY="${RETRY:-60}"; NAME=ssbu-lobby
+PORT="${PORT:-39500}"; RETRY="${RETRY:-120}"; NAME=ssbu-lobby
 REPO_RAW="${REPO_RAW:-https://raw.githubusercontent.com/Denkishi/ssbu-recomp/main}"
 C="${OCI_TENANCY:?run this in Oracle Cloud Shell (OCI_TENANCY is not set)}"
 say() { printf '%s  %s\n' "$(date +%H:%M:%S)" "$*"; }
@@ -76,6 +77,7 @@ if [ -z "$ID" ] || [ "$ID" = "null" ]; then
           --subnet-id "$SUBNET" --image-id "$IMG" --display-name "$NAME" --assign-public-ip true \
           --ssh-authorized-keys-file ~/.ssh/ssbu_lobby.pub --wait-for-state RUNNING --output json > /tmp/ssbu_vm.json 2> /tmp/ssbu_vm.err; do
     if grep -qi "capacity" /tmp/ssbu_vm.err; then say "   Milan has no free $SHAPE right now: trying again in $RETRY s (leave this tab open)"; sleep "$RETRY"
+    elif grep -qi "TooManyRequests\|\"status\": 429" /tmp/ssbu_vm.err; then say "   Oracle says too many requests: waiting 300 s, then trying again"; sleep 300
     else cat /tmp/ssbu_vm.err; exit 1; fi
   done
   ID=$(python3 -c 'import json; print(json.load(open("/tmp/ssbu_vm.json"))["data"]["id"])')
