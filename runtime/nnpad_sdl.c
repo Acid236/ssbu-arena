@@ -554,6 +554,29 @@ static void sensors(const Dev *d, NnPadState *o) {
     o->accel[0] = -a[0] / SDL_STANDARD_GRAVITY; o->accel[1] = a[1] / SDL_STANDARD_GRAVITY; o->accel[2] = -a[2] / SDL_STANDARD_GRAVITY;
     o->gyro[0] = -g[0] / 6.2831853f; o->gyro[1] = g[1] / 6.2831853f; o->gyro[2] = -g[2] / 6.2831853f;
 }
+/* U1, the settings menu (menu.cpp): the Home / Guide button and the Capture / Share button (SDL misc1) open it; while the
+ * menu exists in this run they are taken out of every mapping, so the game never sees them (a controllers.ini that maps
+ * them to a Pro button loses that button then). */
+int menu_enabled(void);
+static int menu_owns(const Dev *d, Src s) {
+    static int on = -1;
+    if (on < 0) on = menu_enabled();
+    return on && d->gp && !s.raw && s.kind == SK_BTN && (s.idx == SDL_GAMEPAD_BUTTON_GUIDE || s.idx == SDL_GAMEPAD_BUTTON_MISC1);
+}
+unsigned nnpad_menu_keys(void) {                      /* bit 0: a Home / Guide button is down, bit 1: a Capture / Share button (any controller) */
+    unsigned r = 0;
+    if (!g_sdl_ok) return 0;
+    nnpad_poll(0);
+    lock();
+    for (int i = 0; i < MAXDEV; i++) {
+        const Dev *d = &g_dev[i];
+        if (!d->used || d->ignored || !d->gp) continue;
+        if (SDL_GetGamepadButton(d->gp, SDL_GAMEPAD_BUTTON_GUIDE)) r |= 1;
+        if (SDL_GetGamepadButton(d->gp, SDL_GAMEPAD_BUTTON_MISC1)) r |= 2;
+    }
+    unlock();
+    return r;
+}
 static void dev_state(const Dev *d, NnPadState *o) {      /* lock held */
     float dz = EFF(d, dz), outer = EFF(d, outer), trig = EFF(d, trig);
     const DevCfg *dc = dev_cfg(d);
@@ -565,6 +588,7 @@ static void dev_state(const Dev *d, NnPadState *o) {      /* lock held */
         Src s[4]; int n;
         if (dc && dc->nmap[b] >= 0) { n = dc->nmap[b]; memcpy(s, dc->map[b], sizeof s); } else n = def_map(d, labels, b, s);
         for (int k = 0; k < n; k++) {
+            if (menu_owns(d, s[k])) continue;                    /* U1: Home / Guide and Capture open the settings menu, never the game */
             float x = src_val(d, s[k]);
             int axis = s[k].kind == SK_AXP || s[k].kind == SK_AXN || s[k].kind == SK_AXF;
             float thr = axis && (b == 8 || b == 9 || (!s[k].raw && s[k].idx >= 4)) ? trig : 0.5f;
@@ -1131,3 +1155,65 @@ int nnpad_selftest(const NnHidHooks *h) {
     printf("PAD SELFTEST %s (%d/%d)\n", g_t_fail ? "FAILED" : "PASSED", g_t_pass, g_t_pass + g_t_fail);
     return g_t_fail;
 }
+
+/* ================================================================ U1, the settings menu (menu.cpp)
+ * The keyboard bindings: shown, and changed by writing the [keyboard] section of controllers.ini (the file is read again
+ * within a second, check_config: a new key works at once; `player` is fixed once resolved and needs a restart). */
+const char *nnpad_kb_label(int idx) { return idx >= 0 && idx < 24 ? g_kbn[idx] : ""; }
+void nnpad_vk_name(int vk, char *o, int n) {         /* the spelling parse_vk reads back */
+    if (!vk) { snprintf(o, (size_t)n, "none"); return; }
+    if ((vk >= 'A' && vk <= 'Z') || (vk >= '0' && vk <= '9')) { snprintf(o, (size_t)n, "%c", vk); return; }
+    switch (vk) {
+    case VK_LEFT: snprintf(o, (size_t)n, "LEFT"); return; case VK_UP: snprintf(o, (size_t)n, "UP"); return;
+    case VK_RIGHT: snprintf(o, (size_t)n, "RIGHT"); return; case VK_DOWN: snprintf(o, (size_t)n, "DOWN"); return;
+    case VK_RETURN: snprintf(o, (size_t)n, "ENTER"); return; case VK_BACK: snprintf(o, (size_t)n, "BACKSPACE"); return;
+    case VK_SPACE: snprintf(o, (size_t)n, "SPACE"); return; case VK_TAB: snprintf(o, (size_t)n, "TAB"); return;
+    case VK_ESCAPE: snprintf(o, (size_t)n, "ESC"); return; case VK_SHIFT: snprintf(o, (size_t)n, "SHIFT"); return;
+    case VK_CONTROL: snprintf(o, (size_t)n, "CTRL"); return; case VK_MENU: snprintf(o, (size_t)n, "ALT"); return;
+    }
+    if (vk >= VK_F1 && vk <= VK_F12) { snprintf(o, (size_t)n, "F%d", vk - VK_F1 + 1); return; }
+    if (vk >= VK_NUMPAD0 && vk <= VK_NUMPAD9) { snprintf(o, (size_t)n, "NUM%d", vk - VK_NUMPAD0); return; }
+    snprintf(o, (size_t)n, "0x%02X", vk);
+}
+int nnpad_kb_player_cfg(void) { nnpad_kb_vk(0); return g_cfg.kb_player; }      /* -2 auto, -1 none, 0..7 (the file's value) */
+static void kb_write(void) {                          /* lock held */
+    char body[2048], nm[16];
+    int o = snprintf(body, sizeof body, "; written by the settings menu (F1); key names: a letter or digit, LEFT UP RIGHT DOWN ENTER BACKSPACE SPACE TAB ESC SHIFT CTRL ALT F1..F12 NUM0..NUM9, 0x.. or none\r\n");
+    o += snprintf(body + o, sizeof body - (size_t)o, "player = %s\r\n", g_cfg.kb_player == -2 ? "auto" : g_cfg.kb_player == -1 ? "none" : (snprintf(nm, sizeof nm, "%d", g_cfg.kb_player + 1), nm));
+    for (int i = 0; i < 24 && o < (int)sizeof body - 64; i++) { nnpad_vk_name(g_cfg.kb_vk[i], nm, sizeof nm); o += snprintf(body + o, sizeof body - (size_t)o, "%s = %s\r\n", g_kbn[i], nm); }
+    ini_replace_section(g_cfg.path, "[keyboard]", body);
+    g_cfg.mtime = file_mtime(g_cfg.path);             /* what is in memory is what was written: no reload needed */
+    say("nn::pad: [keyboard] of %s written (settings menu)\n", g_cfg.path);
+}
+void nnpad_kb_bind(int idx, int vk) {
+    if (idx < 0 || idx >= 24) return;
+    nnpad_kb_vk(0);
+    lock();
+    g_cfg.kb_vk[idx] = vk;
+    kb_write();
+    unlock();
+}
+void nnpad_kb_player_set(int p) {                     /* -2 auto, -1 none, 0..7: used from the next start */
+    nnpad_kb_vk(0);
+    lock();
+    g_cfg.kb_player = p < -2 ? -2 : p > 7 ? 7 : p;
+    kb_write();
+    unlock();
+}
+int nnpad_describe(char *out, int n) {               /* one line per device: "player N: name (type)"; returns the number of devices */
+    int k = 0, o = 0;
+    out[0] = 0;
+    if (!g_cs_ready) return 0;
+    lock();
+    for (int i = 0; i < MAXDEV && o < n - 1; i++) {
+        const Dev *d = &g_dev[i];
+        if (!d->used) continue;
+        k++;
+        if (d->ignored) o += snprintf(out + o, (size_t)(n - o), "(ignored) %s\n", d->name);
+        else o += snprintf(out + o, (size_t)(n - o), "player %d: %s (%s%s)\n", d->slot + 1, d->name, d->gp ? type_name(d->gtype) : "raw joystick, guessed layout", d->wireless ? ", wireless" : "");
+        if (o >= n) o = n - 1;
+    }
+    unlock();
+    return k;
+}
+const char *nnpad_config_path(void) { nnpad_kb_vk(0); return g_cfg.path; }

@@ -472,7 +472,9 @@ static uint64_t desired_language(void) {
     const char *env = getenv("SSBU_LANGUAGE");
     wchar_t wname[LOCALE_NAME_MAX_LENGTH] = L"";
     ULONG count = 0, size = 0;
+    const char *gfx_language(void);                   /* U1: graphics.ini language = auto | <code> (gfx_options.c; the settings menu writes it) */
     if (env && env[0]) snprintf(name, sizeof name, "%s", env);
+    else if (gfx_language()[0]) snprintf(name, sizeof name, "%s", gfx_language());
     else {
         /* the display language of the user interface, not the regional format */
         wchar_t list[512];
@@ -610,6 +612,7 @@ static void aoc_load(void) {
     }
     g_aoc_n = n;
 }
+int nnaoc_owned(const int **list) { if (g_aoc_n < 0) return -1; if (list) *list = g_aoc; return g_aoc_n; }      /* U1, the settings menu: what nn::aoc answers (-1 = the game has not asked yet) */
 static void aoc_CountAddOnContent(Ctx *c) { if (g_aoc_n < 0) aoc_load(); RET(g_aoc_n); }
 static void aoc_ListAddOnContent(Ctx *c) {                 /* (int *out, int offset, int count) -> number written */
     if (g_aoc_n < 0) aoc_load();

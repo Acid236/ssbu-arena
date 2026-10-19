@@ -20,7 +20,10 @@ CLANG = os.environ.get('RECOMP_CLANG', r'C:\llvm-8.0.0\bin\clang.exe')      # sc
 CFLAGS = ['-c', '-O1', '-w', '-fno-strict-aliasing', '-I', HERE, '-I', GEN]
 HOST_SOURCES = ['hostrt.c', 'boot.c', 'nnsdk.c', 'libcxx.c', 'os_threads.c', 'nvn_stub.c', 'nvn_gl.c', 'nvn_vk.c', 'mx_translate.c', 'tex_decode.c', 'nnfs.c', 'clib.c', 'nntime.c', 'nnhid.c', 'nnpad_sdl.c','sdkdata.c', 'display.c', 'nnpl.c', 'nnfontll.c', 'nnmovie.c', 'nnmisc.c', 'nnaudio.c', 'nnro.c', 'nro_registry.c', 'nnmovie_mf.c', 'nniostream.c', 'nncxxrt.c', 'nncxxlib.c', 'nnlibc2.c',
                 'sdklift_gen.c', 'sdklift_rt.c', 'nnsdk2.c', 'nnmii.c', 'nnapplet.c', 'nnalbum.c', 'nnnet.c', 'nnfsdir.c', 'nnunwind.c', 'nvn_sdk.c', 'nvn_c4.c', 'nvn_c5.c', 'hitch.c', 'gfx_options.c', 'debug_mode.c', 'r1_state.c',
-                'loose_host.c']    # the new fighters' file layer (loose_files.c): off unless SSBU_CHARACTERS / SSBU_LOOSE_FILES is set
+                'loose_host.c', 'osk.c', 'nnldn.c', 'net_relay.c']    # the new fighters' file layer (loose_files.c): off unless SSBU_CHARACTERS / SSBU_LOOSE_FILES is set
+# nnldn.c / net_relay.c: online play over the game's Local Wireless (plan/phases/N3_local_wireless_online.md), off unless SSBU_ONLINE
+# (taken only when present: a tree without the online files, e.g. a public one before they are published, still links)
+HOST_SOURCES[:] = [n for n in HOST_SOURCES if n not in ('nnldn.c', 'net_relay.c') or os.path.exists(os.path.join(HERE, n))]
 # A handful of files hold functions so large that clang -O1 needs more than an hour on them;
 # pass --opt=-O0 to compile whatever is still missing without optimization.
 OPT = next((a.split('=', 1)[1] for a in sys.argv if a.startswith('--opt=')), '-O1')
@@ -77,7 +80,17 @@ HOST_FLAGS = ['-O1', '-g', '-w', '-fno-strict-aliasing', '-I', HERE, '-I', GEN, 
               '-I', os.path.join(os.environ.get('SDL3_ROOT', os.path.join(HERE, '..', 'reference', 'upstream', 'SDL3-3.4.18-VC', 'SDL3-3.4.18')), 'include'),
               '-I', os.path.join(os.environ.get('VULKAN_HEADERS', os.path.join(HERE, '..', 'reference', 'upstream', 'Vulkan-Headers')), 'include')]      # Khronos headers for nvn_vk.c (track V)
 SDL_DIR = os.path.join(os.environ.get('SDL3_ROOT', os.path.join(HERE, '..', 'reference', 'upstream', 'SDL3-3.4.18-VC', 'SDL3-3.4.18')), 'lib', 'x64')      # SDL3 for nnpad_sdl.c; SDL3.dll is copied beside the exe at link (SDL3_ROOT / VULKAN_HEADERS: scripts\setup.py)
-LIBS = ['-luser32', '-lgdi32', '-lwinmm', '-lmfplat', '-lmfreadwrite', '-lmfuuid', '-lole32', '-lshlwapi']
+# U1 (plan\phases\U1_settings_menu.md): the settings menu (F1) is C++ on Dear ImGui v1.91.9b (MIT; the pinned archive and
+# its SHA-256 are in the public tree's scripts\install.py, TOOLS 'imgui'). IMGUI_ROOT = its folder (scripts\setup.py --imgui
+# sets it); default: reference\upstream\imgui-1.91.9b beside the study tree. Compiled by the same clang as C++14 without
+# exceptions or RTTI, objects beside the host's. Without imgui.h there, menu_stub.c is built instead: no menu (F1 does
+# nothing; the log says why), everything else the same.
+IMGUI = os.environ.get('IMGUI_ROOT') or os.path.join(HERE, '..', 'reference', 'upstream', 'imgui-1.91.9b')
+HAVE_IMGUI = os.path.isfile(os.path.join(IMGUI, 'imgui.h')) and os.path.isfile(os.path.join(IMGUI, 'imgui.cpp'))
+CXX_SOURCES = ([os.path.join(HERE, 'menu.cpp')] + [os.path.join(IMGUI, n) for n in ('imgui.cpp', 'imgui_draw.cpp', 'imgui_tables.cpp', 'imgui_widgets.cpp')]
+               if HAVE_IMGUI else [])
+CXX_FLAGS = ['-x', 'c++', '-std=c++14', '-O1', '-g', '-w', '-fno-exceptions', '-fno-rtti', '-D_CRT_SECURE_NO_WARNINGS', '-DIMGUI_USER_CONFIG="menu_imconfig.h"', '-I', HERE, '-I', IMGUI]
+LIBS = ['-luser32', '-lgdi32', '-lwinmm', '-lmfplat', '-lmfreadwrite', '-lmfuuid', '-lole32', '-lshlwapi', '-lshell32']
 
 
 def debug_link_flags(out):
@@ -112,7 +125,8 @@ def build_game_dll():
 
 def compile_host(job):
     src, obj = job
-    r = subprocess.run([CLANG, '-c'] + HOST_FLAGS + [src, '-o', obj], capture_output=True, text=True)
+    flags = CXX_FLAGS if src.endswith('.cpp') else HOST_FLAGS
+    r = subprocess.run([CLANG, '-c'] + flags + [src, '-o', obj], capture_output=True, text=True)
     return src, r.returncode, (r.stdout + r.stderr)[-3000:]
 
 
@@ -128,10 +142,18 @@ def cmd_link():
     # nvn_vk.c includes the other nvn_vk*.c files as one translation unit: an edit of one of them must rebuild nvn_vk.obj
     newest_vk = max(os.path.getmtime(os.path.join(HERE, n)) for n in os.listdir(HERE) if n.startswith('nvn_vk') and n.endswith('.c'))
     objs, jobs = [], []
-    for n in HOST_SOURCES + ['gamedll.c']:
+    if not HAVE_IMGUI:
+        print('settings menu: Dear ImGui not found in %s (IMGUI_ROOT): built without it (menu_stub.c; F1 does nothing)' % IMGUI)
+    for n in HOST_SOURCES + ['gamedll.c'] + ([] if HAVE_IMGUI else ['menu_stub.c']):
         src, obj = os.path.join(HERE, n), os.path.join(objdir, n[:-2] + '.obj')
         objs.append(obj)
         if not os.path.exists(obj) or os.path.getmtime(obj) < max(os.path.getmtime(src), newest_dep, newest_vk if n == 'nvn_vk.c' else 0):
+            jobs.append((src, obj))
+    for src in CXX_SOURCES:                          # U1: the settings menu (C++); imgui's own files depend on their source and menu_imconfig.h only
+        obj = os.path.join(objdir, os.path.splitext(os.path.basename(src))[0] + '_cxx.obj')
+        objs.append(obj)
+        dep = newest_dep if src.endswith('menu.cpp') else os.path.getmtime(os.path.join(HERE, 'menu_imconfig.h'))
+        if not os.path.exists(obj) or os.path.getmtime(obj) < max(os.path.getmtime(src), dep):
             jobs.append((src, obj))
     failed = 0
     with concurrent.futures.ThreadPoolExecutor(16) as pool:
@@ -144,7 +166,11 @@ def cmd_link():
     r = subprocess.run([CLANG] + objs + [os.path.join(HERE, GAME_DLL[:-4] + '.lib'), os.path.join(SDL_DIR, 'SDL3.lib')] + LIBS + debug_link_flags(out) + ['-o', out], capture_output=True, text=True, errors='replace')
     if r.returncode == 0:
         import shutil
-        shutil.copy2(os.path.join(SDL_DIR, 'SDL3.dll'), os.path.join(HERE, 'SDL3.dll'))
+        try:
+            shutil.copy2(os.path.join(SDL_DIR, 'SDL3.dll'), os.path.join(HERE, 'SDL3.dll'))
+        except PermissionError:                  # a running game holds the copy beside it (the same file): keep it
+            if not os.path.exists(os.path.join(HERE, 'SDL3.dll')):
+                raise
     print((r.stdout + r.stderr)[-4000:])                 # link.exe reports its errors on stdout
     if r.returncode == 0:
         print('linked %s: %.1f MB in %.1fs (%d host files recompiled)' % (out, os.path.getsize(out) / 1048576.0, time.time() - t0, len(jobs)))

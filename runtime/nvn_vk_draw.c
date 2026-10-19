@@ -3073,7 +3073,62 @@ static void ovl_text(uint32_t index, int x, int y, int dot, const char *s) {
         }
     }
 }
+/* The on-screen keyboard (osk.c): its picture, drawn there with GDI, copied over the presented frame (inside the
+ * picture's 16:9 rectangle). Three staging buffers in turn, so that a new picture is never written into one a frame
+ * still in flight reads. The image takes the swapchain's format (UNORM or SRGB) so the blit keeps the values. */
+int osk_active(void); int osk_take(uint32_t *dst, LONG *seen); void osk_size(int *w, int *h);      /* osk.c */
+static struct { VkImage img; VMem mem; VkFormat fmt; int made, w, h, cur; LONG seen; VkBuffer buf[3]; VMem bmem[3]; } g_osk;
+static PresentJob g_osk_job;                       /* the last real present: shown again under the keyboard */
+static int g_osk_job_ok;
+long long nvn_vk_presents(void) { return (long long)g_vk_frames; }
+static void vk_present2(void *arg, int progress);
+void nvn_vk_osk_redraw_job(void *arg) { (void)arg; if (V.alive && g_osk_job_ok) vk_present2(&g_osk_job, 1); }
+static void osk_draw(uint32_t index) {
+    if (!osk_active()) return;
+    VkFormat fmt = V.format.format;
+    if (!g_osk.buf[0]) {
+        osk_size(&g_osk.w, &g_osk.h);
+        for (int i = 0; i < 3; i++) g_osk.buf[i] = vbuf_new((uint64_t)g_osk.w * g_osk.h * 4, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, &g_osk.bmem[i]);
+    }
+    if (g_osk.made && g_osk.fmt != fmt) { cmd_wait_all(); vkDestroyImage(V.device, g_osk.img, NULL); vmem_free(g_osk.mem); g_osk.made = 0; }
+    int fresh = 0;
+    if (!g_osk.made) {
+        VkImageCreateInfo ci = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+        VkMemoryRequirements rq;
+        ci.imageType = VK_IMAGE_TYPE_2D; ci.format = fmt; ci.extent.width = (uint32_t)g_osk.w; ci.extent.height = (uint32_t)g_osk.h; ci.extent.depth = 1;
+        ci.mipLevels = 1; ci.arrayLayers = 1; ci.samples = VK_SAMPLE_COUNT_1_BIT; ci.tiling = VK_IMAGE_TILING_OPTIMAL;
+        ci.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT; ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE; ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        VKC(vkCreateImage(V.device, &ci, NULL, &g_osk.img));
+        vkGetImageMemoryRequirements(V.device, g_osk.img, &rq);
+        g_osk.mem = vmem_alloc(rq, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0);
+        VKC(vkBindImageMemory(V.device, g_osk.img, g_osk.mem.mem, g_osk.mem.off));
+        g_osk.made = 1; g_osk.fmt = fmt; g_osk.seen = -1; fresh = 1;
+    }
+    int next = (g_osk.cur + 1) % 3;
+    if (osk_take((uint32_t *)g_osk.bmem[next].map, &g_osk.seen)) {
+        g_osk.cur = next;
+        image_barrier(g_osk.img, VK_IMAGE_ASPECT_COLOR_BIT, fresh ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        VkBufferImageCopy cp;
+        memset(&cp, 0, sizeof cp);
+        cp.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT; cp.imageSubresource.layerCount = 1;
+        cp.imageExtent.width = (uint32_t)g_osk.w; cp.imageExtent.height = (uint32_t)g_osk.h; cp.imageExtent.depth = 1;
+        vkCmdCopyBufferToImage(R.cmd, g_osk.buf[next], g_osk.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &cp);
+        image_barrier(g_osk.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    } else if (fresh) return;                      /* nothing to show yet */
+    void display_fit(int sw, int sh, int dw, int dh, int out[4]);
+    int d4[4];
+    display_fit(16, 9, (int)V.extent.width, (int)V.extent.height, d4);
+    VkImageBlit b;
+    memset(&b, 0, sizeof b);
+    b.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT; b.srcSubresource.layerCount = 1; b.dstSubresource = b.srcSubresource;
+    b.srcOffsets[1].x = g_osk.w; b.srcOffsets[1].y = g_osk.h; b.srcOffsets[1].z = 1;
+    b.dstOffsets[0].x = d4[0]; b.dstOffsets[0].y = d4[1]; b.dstOffsets[1].x = d4[0] + d4[2]; b.dstOffsets[1].y = d4[1] + d4[3]; b.dstOffsets[1].z = 1;
+    vkCmdBlitImage(R.cmd, g_osk.img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, V.images[index], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &b, VK_FILTER_LINEAR);
+}
+static void menu_vk_draw(uint32_t index);          /* U1: the settings menu (nvn_vk_menu.c, included below) */
 static void overlay_draw(uint32_t index) {
+    osk_draw(index);
+    menu_vk_draw(index);                           /* U1: over the keyboard; returns at once unless SSBU_MENU / graphics.ini menu = on */
     if (g_ovl.on < 0) g_ovl.on = !(getenv("SSBU_VK_PROGRESS") && !atoi(getenv("SSBU_VK_PROGRESS")));
     if ((!g_ovl.on && !g_ovl.screen) || g_ovl.thick <= 0) return;
     if (g_ovl.thick < 8) g_ovl_frames++;
@@ -3140,6 +3195,7 @@ static void present_flush(void) {
     if (r == VK_SUCCESS || r == VK_SUBOPTIMAL_KHR) { LONG64 nowt = tk(); if (g_gap_prev && nowt - g_gap_prev > g_gap_max) g_gap_max = nowt - g_gap_prev; g_gap_prev = nowt; g_wd_beat = nowt; }
 }
 void nvn_vk_present_flush_job(void *arg) { (void)arg; if (V.alive) present_flush(); }
+#include "nvn_vk_menu.c"                          /* U1: the settings menu over the picture (menu.cpp builds it) */
 #include "nvn_vk_flash.c"                         /* session 13: the white-flash detector (fl_pass, fl_capture, fl_shutdown) */
 /* nvn_vk_m4.c m4_barrier, render thread, g_sh_lock NOT held: the held loading screen once more, with the bar at `frac` */
 static void present_progress(float frac) { if (!g_ovl.bar_arg) return; g_ovl.frac = frac; g_ovl.thick = 8; vk_present2(g_ovl.bar_arg, 1); g_ovl.thick = 0; }
@@ -3236,6 +3292,7 @@ static void vk_present2(void *arg, int progress) {
         if (wt > 0 && frame == wt && !progress) { printf("nvn_vk_watchdog: TEST: the render thread is held %d s at frame %lld (SSBU_VK_WD_TEST)\n", ws, (long long)frame); fflush(stdout); wt = -1; Sleep((DWORD)ws * 1000); }
     }
     if (progress) goto swap;
+    if (j != &g_osk_job) { g_osk_job = *j; g_osk_job_ok = 1; }      /* osk.c: what to show again under the keyboard */
     if (g_tl_t0 && g_tl_first) { LONG64 now = tk(); g_tl_sum[0] += g_tl_first - g_tl_t0; g_tl_sum[1] += g_tl_last - g_tl_t0; g_tl_sum[2] += now - g_tl_t0; g_tl_n++; g_tl_first = 0; }
     if (g_pt_on > 0 && g_in_fight) g_pt_frames++;
     if (j->win) for (int i = 0; i < j->win->count && i < 8; i++) wintex_note(j->win->tex[i]);

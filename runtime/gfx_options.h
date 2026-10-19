@@ -18,4 +18,13 @@ typedef struct {
     int shader_load;        /* 2026-10-16 (appended): 0 start (on a prepared PC every shader of the game's data is loaded into memory before the first frame, behind a "LOADING SHADERS" screen: no shader work at the loading screens before a fight), 1 loading (as before: each at its loading screen);  env SSBU_VK_LOAD_AT_START=0/1 wins */
 } GfxOptions;
 const GfxOptions *gfx_options(void);      /* any thread; read once (the file is written with defaults when it does not exist) */
+/* U1 (settings menu, menu.cpp): the keys of graphics.ini that are not in GfxOptions, and the writer */
+int gfx_latency(void);                    /* latency = normal 0 | low 1 | lowest 2 */
+int gfx_runahead(void);                   /* runahead = off 0 | on 1 */
+int gfx_stats_overlay(void);              /* stats_overlay = off 0 | on 1 (menu.cpp, F2) */
+int gfx_menu(void);                       /* menu = off 0 | on 1 (the in-game settings menu, F1) */
+int gfx_volume(void);                     /* volume = auto -1 | 0..100 (the copies a person plays; nnaudio.c) */
+const char *gfx_language(void);           /* language = auto "" | a language code of the game (nnmisc.c) */
+void gfx_set_overlay(int on);             /* frame_time_overlay, changed while running */
+int gfx_ini_set(const char *key, const char *value);      /* writes `key = value` into graphics.ini (the line replaced, comments kept; appended when missing); 1 = written */
 #endif

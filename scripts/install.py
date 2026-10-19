@@ -41,6 +41,10 @@ TOOLS = {   # checked 2026-10-19: SDL3 and glslang equal GitHub's own asset dige
                 os.path.join('include', 'glslang', 'Include', 'glslang_c_interface.h')),
     'llvm': ('https://releases.llvm.org/9.0.0/LLVM-9.0.0-win64.exe',
              '71ed99a6720945d76b6772584735f2ed472f12719dff184a0b1a6a35047b8863', 'llvm', os.path.join('bin', 'clang.exe')),
+    # Dear ImGui (MIT), optional: GitHub publishes no digest for tag archives, so this hash is the archive checked on
+    # 2026-10-19 (2,021,831 bytes)
+    'imgui': ('https://github.com/ocornut/imgui/archive/refs/tags/v1.91.9b.zip',
+              'fd37507c8476a6d14cc7c4b352401f31bcbd0f0d995d35390811e968c466f46e', 'imgui', 'imgui.h'),
 }
 
 
@@ -197,15 +201,20 @@ def step_tools(dump):
         sys.exit('3. Tools: the MSVC Build Tools are missing. Install them with this command (it asks for administrator rights), then '
                  'start the installer again:\n\n  winget install Microsoft.VisualStudio.2022.BuildTools --override "--quiet --wait '
                  '--add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"\n')
+    extra = []                                  # Dear ImGui is optional (the F1 menu): setup.py --only deps passes without it
+    try:
+        extra = ['--imgui', fetch('imgui')]
+    except (Exception, SystemExit) as e:        # fetch() exits on a bad hash; only the menu is lost
+        say('3. Tools: WARNING: Dear ImGui not available (%s): the settings menu (F1) is left out of the build' % e)
     if subprocess.run([sys.executable, os.path.join(REPO, 'scripts', 'setup.py'), '--only', 'deps', '--dump', dump], capture_output=True).returncode == 0:
         say('3. Tools: all found where setup.py looks')
-        return []
+        return extra
     args = []
     for name, flag in (('llvm', '--llvm'), ('sdl3', '--sdl3'), ('vulkan-headers', '--vulkan-headers'), ('glslang', '--glslang')):
         args += [flag, fetch(name)]
     args += ['--suyu', fetch_suyu()]
     say('3. Tools: all there')
-    return args
+    return args + extra
 
 
 def main():

@@ -275,6 +275,7 @@ static void sizing_keep_aspect(HWND h, WPARAM edge, RECT *r) {
     }
 }
 static int g_full;                                    /* F11 state: 1 = borderless over the monitor */
+static volatile LONG g_topmost;                       /* U1: window = fullscreen (borderless and topmost) */
 static WINDOWPLACEMENT g_windowed;
 static int g_have_windowed;
 static void toggle_fullscreen(HWND h) {
@@ -304,8 +305,29 @@ static void toggle_fullscreen(HWND h) {
         }
     }
     g_full = !g_full;
+    if (!g_full) g_topmost = 0;                      /* U1: back to the window = not topmost (set above) */
     printf("display: F11: %s\n", g_full ? "borderless over the monitor" : "window"); fflush(stdout);
 }
+/* U1, the settings menu (menu.cpp, render thread) asks; the window thread does it (WM_APP + 0x51 / 0x52 posted to the window).
+ * mode: 0 windowed, 1 borderless over the monitor, 2 the same and topmost (graphics.ini window = windowed | borderless | fullscreen). */
+static void window_mode_set(HWND h, int mode) {
+    if ((mode != 0) != (g_full != 0)) toggle_fullscreen(h);
+    SetWindowPos(h, mode == 2 ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOOWNERZORDER);
+    InterlockedExchange(&g_topmost, mode == 2);
+    printf("display: window mode %s (settings menu)\n", mode == 2 ? "fullscreen (borderless, topmost)" : mode ? "borderless" : "windowed"); fflush(stdout);
+}
+static void window_size_set(HWND h, int cw, int ch) {
+    if (g_full) { g_have_windowed = 0; printf("display: window size %dx%d kept for the windowed mode (settings menu)\n", cw, ch); fflush(stdout); return; }
+    RECT r = {0, 0, cw, ch}, cur;
+    AdjustWindowRectEx(&r, (DWORD)GetWindowLongPtrA(h, GWL_STYLE), FALSE, (DWORD)GetWindowLongPtrA(h, GWL_EXSTYLE));
+    GetWindowRect(h, &cur);
+    SetWindowPos(h, NULL, cur.left, cur.top, r.right - r.left, r.bottom - r.top, SWP_NOZORDER | SWP_NOOWNERZORDER);
+    printf("display: window client %dx%d (settings menu)\n", cw, ch); fflush(stdout);
+}
+static HWND g_hwnd_menu;                               /* g_hwnd, for the functions below (set by window_thread) */
+void display_set_window_mode(int mode) { if (g_hwnd_menu) PostMessageA(g_hwnd_menu, WM_APP + 0x51, (WPARAM)mode, 0); }
+void display_set_client_size(int w, int h) { if (g_hwnd_menu) PostMessageA(g_hwnd_menu, WM_APP + 0x52, (WPARAM)w, (LPARAM)h); }
+int display_window_mode(void) { return g_full ? (g_topmost ? 2 : 1) : 0; }
 static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
     if (m == WM_CLOSE) {                             /* the exit request: nn::oe decides (nnmisc.c oe_exit_request) whether the game ends now or after its exit-request handling section */
         printf("\nwindow closed by the user after %lld frames\n", (long long)g_frames);
@@ -321,6 +343,20 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
     }
     if (m == WM_SIZING && !g_full) { sizing_keep_aspect(h, w, (RECT *)l); return TRUE; }
     if (m == WM_KEYDOWN && w == VK_F11 && !(l & (1 << 30))) { toggle_fullscreen(h); return 0; }      /* bit 30: auto-repeat of a held key */
+    if (m == WM_APP + 0x51) { window_mode_set(h, (int)w); return 0; }                                 /* U1: the settings menu (menu.cpp) */
+    if (m == WM_APP + 0x52) { window_size_set(h, (int)w, (int)l); return 0; }
+    {   int menu_wndproc(void *hwnd, unsigned msg, uintptr_t w, intptr_t l);      /* U1 (menu.cpp): F1 opens / closes; the menu takes the mouse and keys while open */
+        if (menu_wndproc(h, m, (uintptr_t)w, (intptr_t)l)) return 0; }
+    {   /* the on-screen keyboard (osk.c) takes the PC keyboard while it is open; this window is an ANSI one: its WM_CHAR
+         * carries a character of the system code page, made UTF-16 here */
+        int osk_key(UINT msg, WPARAM w);
+        if (m == WM_CHAR) {
+            char a = (char)w;
+            wchar_t u = 0;
+            if (w < 0x80 || MultiByteToWideChar(CP_ACP, 0, &a, 1, &u, 1) != 1) u = (wchar_t)w;
+            if (osk_key(WM_CHAR, (WPARAM)u)) return 0;
+        } else if (m == WM_KEYDOWN && osk_key(WM_KEYDOWN, w)) return 0;
+    }
     return DefWindowProcA(h, m, w, l);
 }
 
@@ -367,6 +403,7 @@ static DWORD WINAPI window_thread(LPVOID arg) {
                                  r.right - r.left, r.bottom - r.top, NULL, NULL, wc.hInstance, NULL);
         ShowWindow(g_hwnd, SW_SHOWNOACTIVATE);
     }
+    g_hwnd_menu = g_hwnd; g_topmost = go->window_mode == 2;      /* U1 (settings menu) */
     InterlockedExchange(&g_ready, 1);
     MSG msg;
     while (GetMessageA(&msg, NULL, 0, 0) > 0) { TranslateMessage(&msg); DispatchMessageA(&msg); }

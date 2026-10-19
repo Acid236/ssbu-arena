@@ -47,6 +47,7 @@ One command, eleven resumable steps. When it ends it prints how to start the gam
 | Source checkout of a yuzu-family emulator (only `src/core/hle/service/mii/` is read, by `tools/lifter/gen_sdktest.py`, for the reference data of the self-test) | suyu | any yuzu-lineage open-source repository that still has `src/core/hle/service/mii/types/raw_data.cpp` |
 | A GPU with a Vulkan 1.3 driver (to run, not to build) | | your GPU vendor |
 | Media Foundation (movies) with the Microsoft Store codecs **VP9 Video Extensions** and **Web Media Extensions 2.x** (the movies' Vorbis sound; without it the opening movie stays black; Windows N editions also need the Media Feature Pack) | part of Windows + the two Store packages | Microsoft Store. Check with PowerShell: `Get-AppxPackage *WebMediaExtensions*, *VP9VideoExtensions* \| Select Name, Version`. The log line `no Vorbis decoder on this PC` names the missing one; `SSBU_SKIP_MOVIES=1` skips every movie meanwhile |
+| Dear ImGui (MIT, ocornut/imgui), source folder with `imgui.h` and `imgui.cpp`; **optional**: the in-game settings menu (F1), left out of the build without it | v1.91.9b | https://github.com/ocornut/imgui/releases/tag/v1.91.9b; `scripts/install.py` downloads it into `deps\imgui` and checks its SHA-256 |
 | libopus as a DLL (the music and the game's other Opus sounds; **without it they are silent**, the rest runs) | 1.6.1, built from source as below | the source release from https://opus-codec.org/downloads/ (check it against Xiph's `SHA256SUMS`), or MSYS2's `mingw-w64-ucrt-x86_64-opus` |
 
 Unpack SDL3, Vulkan-Headers, glslang and the emulator checkout anywhere and give the folders with `--sdl3`,
@@ -169,6 +170,35 @@ Options are environment variables, set with `--env NAME=VALUE` (full list: comme
 `SSBU_RENDERER=vk|gl`, `SSBU_SHOW=1` (show the window of a test exe), `SSBU_STRICT=1|report|path` (list the host
 functions that are not the real behaviour), `SSBU_TRACE`, `SSBU_PAD_BACKEND=xinput`, `SSBU_FIXED_SEED=<n>`.
 Pad mapping file and tools: `ssbu_native.exe --pad-test`, `--pad-map <n>`.
+
+## In-game menu (F1)
+
+A settings menu drawn over the game's picture (Dear ImGui, Vulkan renderer only). It is **off by default**: turn it on with
+`SSBU_MENU=1` or `menu = on` in `config\graphics.ini` (`SSBU_MENU=0` wins over the file).
+
+- **F1**, or a controller's Home/Guide or Capture/Share button, opens and closes it; **+** or **Esc** also close it. Those
+  controller buttons never reach the game.
+- While it is open the game keeps running but gets no input from the pads and the keyboard.
+- Pages: Display, Graphics, Audio, Input, Add-on content, Language, Log (with **Export log**), About. Every control is marked
+  **[live]** (acts at once) or **[restart]** (saved now, used at the next start).
+- **F2** shows a small stats overlay (fps, frame time, online state, run-ahead), menu open or not.
+
+It is built only when Dear ImGui v1.91.9b is found: `scripts/install.py` downloads it into `deps\imgui` and checks its
+SHA-256, or give a folder with `python scripts/setup.py ... --imgui <folder with imgui.h>`, or set `IMGUI_ROOT`. Without it
+the build still works, and F1 only writes a log line saying why there is no menu.
+
+## On-screen keyboard
+
+When the game asks for text (a name, for example) a Switch-style keyboard is drawn over the picture (Vulkan renderer).
+Controller: d-pad or left stick move, **A** types the key, **B** deletes, **Y** space, **X** symbols page, **L / R** move the
+text cursor, **ZL** or the left stick button = shift, **+** confirms, **-** cancels. The PC keyboard works too: type,
+Backspace/Delete, Left/Right/Home/End, Enter confirms, Esc cancels. `SSBU_SWKBD=dialog` uses the old Windows dialog
+instead (the OpenGL path always does).
+
+## Third-party code
+
+Dear ImGui (MIT, https://github.com/ocornut/imgui) is compiled into the runtime when found, as described above; its licence
+text stays in the downloaded folder.
 
 ## Troubleshooting
 

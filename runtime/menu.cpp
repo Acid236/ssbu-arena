@@ -1,0 +1,806 @@
+/* U1: the in-game settings menu, in the style of Ship of Harkinian (the Ocarina of Time PC port): Dear ImGui (MIT,
+ * reference\upstream\imgui-1.91.9b) drawn over the game's picture. Design, keys, proofs: plan\phases\U1_settings_menu.md.
+ *
+ * Open / close: F1 on the keyboard; on a controller the Home / Guide button (like the Switch's HOME menu), or the
+ * Capture / Share button; + or Esc also close it. Those two buttons never reach the game while the menu exists (nnpad_sdl.c).
+ * While it is open the game gets nothing from the real pads and keyboard
+ * (nnhid.c asks menu_input_blocked), and after it closes, nothing until every pad button is released.
+ * The game is not paused: it keeps running under the menu (a fight goes on; the players' inputs are held).
+ *
+ * Threads: the window thread (display.c wndproc) queues mouse and key messages here; the render thread (nvn_vk_menu.c,
+ * included by nvn_vk_draw.c) calls menu_frame once per presented frame: the ImGui frame is built and drawn there.
+ * Settings are written to config\graphics.ini (gfx_ini_set), the keyboard bindings to controllers.ini (nnpad_sdl.c),
+ * the add-on content list to config\dlc.txt. Each control says whether it acts at once [live] or at the next start [restart].
+ *
+ * Log page: the runtime's own output, read back from the file stdout is redirected to (gioca.bat, the test runners):
+ * the last LOG_MAX lines in memory, a filter, auto-scroll, "Export log" (logs\ssbu_log_<time>.txt beside the exe, then the
+ * folder is opened in Explorer: from that button only). Stats overlay (F2 or the menu; graphics.ini stats_overlay):
+ * frames per second, frame time, the online state of net_stats.h, run-ahead.
+ *
+ * Off unless SSBU_MENU=1 or graphics.ini menu = on (SSBU_MENU=0 wins). SSBU_MENU_TEST=<presented frame>: the test hook
+ * (opens the menu, changes frame_time_overlay through the same code as the control, pictures of the Graphics and Log
+ * pages and of the stats overlay with the menu closed, read back from the swapchain image into BMPs; "menu: test:" lines). */
+#include <windows.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <math.h>
+#include <shellapi.h>
+#include "imgui.h"
+#include "net_stats.h"
+extern "C" {
+#include "gfx_options.h"
+#include "menu.h"
+uint64_t nnhid_menu_buttons(void);                                   /* nnhid.c: every pad, Npad bit order, no effect on the game */
+void display_set_window_mode(int mode); void display_set_client_size(int w, int h); int display_window_mode(void);      /* display.c */
+int nnaudio_volume(void); void nnaudio_set_volume(int percent);     /* nnaudio.c */
+int nnpad_kb_vk(int idx); void nnpad_kb_bind(int idx, int vk); void nnpad_kb_player_set(int p); int nnpad_kb_player_cfg(void);      /* nnpad_sdl.c */
+const char *nnpad_kb_label(int idx); void nnpad_vk_name(int vk, char *o, int n); int nnpad_describe(char *out, int n); const char *nnpad_config_path(void);
+int nnaoc_owned(const int **list);                                   /* nnmisc.c */
+long long nvn_front_presents(void); void nvn_front_osk_redraw(void); /* nvn_gl.c */
+const char *nvn_vk_device_name(void);                                /* nvn_vk_menu.c */
+int osk_active(void);                                                /* osk.c */
+int r1_ra_phase(void);                                               /* r1_state.c (read only): 0 = run-ahead not running now */
+}
+
+enum { B_A = 0, B_B, B_X, B_Y, B_LS, B_RS, B_L, B_R, B_ZL, B_ZR, B_PLUS, B_MINUS, B_LEFT, B_UP, B_RIGHT, B_DOWN, B_HOME, B_CAPTURE };
+#define BIT(b) (1ull << (b))
+
+/* ------------------------------------------------------------------ state shared between threads */
+static volatile LONG g_open, g_guard, g_toggle_req;
+static int g_enabled = -1;
+extern "C" int menu_enabled(void) {
+    if (g_enabled < 0) {
+        const char *e = getenv("SSBU_MENU"), *t = getenv("SSBU_MENU_TEST");
+        int on = e && e[0] ? atoi(e) != 0 : gfx_menu();
+        if (t && t[0]) on = 1;
+        g_enabled = on;
+        if (on) { printf("menu: settings menu on (F1, or the Home / Guide or Capture / Share button of a controller; %s)\n", e && e[0] ? "SSBU_MENU" : t && t[0] ? "SSBU_MENU_TEST" : "graphics.ini menu = on"); fflush(stdout); }
+    }
+    return g_enabled;
+}
+extern "C" int menu_is_open(void) { return g_enabled > 0 && g_open; }
+extern "C" int menu_input_blocked(void) { return g_enabled > 0 && (g_open || g_guard); }
+extern "C" void menu_request_toggle(void) { InterlockedIncrement(&g_toggle_req); }
+/* net_stats.h: the default answer until the online code defines net_stats_get itself */
+extern "C" void net_stats_get_default(NetStats *o) { memset(o, 0, sizeof *o); o->state = NET_OFFLINE; o->ping_ms = -1; }
+#pragma comment(linker, "/alternatename:net_stats_get=net_stats_get_default")
+static volatile LONG g_stats_req;                    /* F2 */
+static int g_asserts;
+extern "C" void menu_assert_fail(const char *what, const char *file, int line) {
+    if (g_asserts++ < 10) { const char *f = strrchr(file, '\\'); printf("menu: ImGui check failed: %s (%s:%d)\n", what, f ? f + 1 : file, line); fflush(stdout); }
+}
+
+/* the window's messages, queued by the window thread, read by the render thread */
+enum { EV_MOVE = 1, EV_BTN, EV_WHEEL, EV_KEY, EV_CHAR };
+struct Ev { int type, a, b; };
+static CRITICAL_SECTION g_qcs;
+static INIT_ONCE g_qonce = INIT_ONCE_STATIC_INIT;
+static Ev g_q[256];
+static int g_qn;
+static BOOL CALLBACK q_init(PINIT_ONCE, PVOID, PVOID *) { InitializeCriticalSection(&g_qcs); return TRUE; }
+static void q_push(int type, int a, int b) {
+    InitOnceExecuteOnce(&g_qonce, q_init, NULL, NULL);
+    EnterCriticalSection(&g_qcs);
+    if (g_qn < 256) { g_q[g_qn].type = type; g_q[g_qn].a = a; g_q[g_qn].b = b; g_qn++; }
+    LeaveCriticalSection(&g_qcs);
+}
+static int q_take(Ev *out, int max) {
+    InitOnceExecuteOnce(&g_qonce, q_init, NULL, NULL);
+    EnterCriticalSection(&g_qcs);
+    int n = g_qn < max ? g_qn : max;
+    memcpy(out, g_q, sizeof(Ev) * (size_t)n);
+    g_qn = 0;
+    LeaveCriticalSection(&g_qcs);
+    return n;
+}
+
+extern "C" int menu_wndproc(void *hwnd, unsigned m, uintptr_t w, intptr_t l) {
+    (void)hwnd;
+    if (!menu_enabled()) return 0;
+    if (m == WM_KEYDOWN && w == VK_F1) { if (!(l & (1 << 30))) menu_request_toggle(); return 1; }
+    if (m == WM_KEYDOWN && w == VK_F2) { if (!(l & (1 << 30))) InterlockedIncrement(&g_stats_req); return 1; }      /* the stats overlay */
+    if (!g_open) return 0;
+    switch (m) {
+    case WM_MOUSEMOVE: q_push(EV_MOVE, (short)LOWORD(l), (short)HIWORD(l)); return 0;
+    case WM_LBUTTONDOWN: case WM_LBUTTONUP: q_push(EV_BTN, 0, m == WM_LBUTTONDOWN); return 1;
+    case WM_RBUTTONDOWN: case WM_RBUTTONUP: q_push(EV_BTN, 1, m == WM_RBUTTONDOWN); return 1;
+    case WM_MBUTTONDOWN: case WM_MBUTTONUP: q_push(EV_BTN, 2, m == WM_MBUTTONDOWN); return 1;
+    case WM_MOUSEWHEEL: q_push(EV_WHEEL, GET_WHEEL_DELTA_WPARAM(w), 0); return 1;
+    case WM_KEYDOWN: case WM_KEYUP: q_push(EV_KEY, (int)w, m == WM_KEYDOWN); return 1;
+    case WM_CHAR: {                                   /* the window is an ANSI one: a character of the system code page */
+        char a = (char)w; wchar_t u = 0;
+        if (w < 0x80 || MultiByteToWideChar(CP_ACP, 0, &a, 1, &u, 1) != 1) u = (wchar_t)w;
+        q_push(EV_CHAR, (int)u, 0); return 1; }
+    }
+    return 0;
+}
+
+/* ------------------------------------------------------------------ the settings */
+static const char *const k_window[] = {"windowed", "borderless", "fullscreen"};
+static const char *const k_vsync[] = {"clock", "on", "off", "mailbox", "display", "auto"};      /* GfxOptions.present */
+static const char *const k_latency[] = {"normal", "low", "lowest"};
+static const char *const k_renderer[] = {"vulkan", "opengl"};
+static const int k_aniso_v[] = {0, 2, 4, 8, 16};
+static const char *const k_aniso[] = {"game", "2", "4", "8", "16"};
+static const char *const k_profile[] = {"custom", "low"};
+static const char *const k_wait[] = {"hold", "skip"};
+static const char *const k_prepare[] = {"first_run", "background", "off"};
+static const char *const k_load[] = {"start", "loading"};
+static const char *const k_console[] = {"docked", "handheld"};
+static const char *const k_onoff[] = {"off", "on"};
+static const char *const k_lang[] = {"auto", "ja", "en-US", "en-GB", "fr", "fr-CA", "de", "it", "es", "es-419", "zh-Hans", "zh-Hant", "ko", "nl", "ru"};
+static const char *const k_lang_name[] = {"auto (Windows display language)", "Japanese", "English (US)", "English (UK)", "French", "French (Canada)", "German", "Italian",
+                                          "Spanish (Spain)", "Spanish (Latin America)", "Chinese (simplified)", "Chinese (traditional)", "Korean", "Dutch", "Russian"};
+static const int k_sizes[][2] = {{1280, 720}, {1600, 900}, {1920, 1080}, {2560, 1440}, {3840, 2160}};
+static const char *const k_size_name[] = {"1280 x 720", "1600 x 900", "1920 x 1080", "2560 x 1440", "3840 x 2160"};
+#define N(a) ((int)(sizeof(a) / sizeof((a)[0])))
+
+struct Settings {
+    int window, size, vsync, latency, renderer, aniso, profile, wait, prepare, load, console, overlay, volume, runahead, lang, kb_player, stats;
+    float scale;
+    char gpu[64];
+};
+static Settings S, S0;               /* S0 = what this run started with (restart marks) */
+static char g_lang_start[16];
+static int g_sections_inited;
+
+static int idx_of(const char *const *names, int n, const char *v) { for (int i = 0; i < n; i++) if (!_stricmp(names[i], v)) return i; return 0; }
+static void settings_init(int cw, int ch) {
+    const GfxOptions *o = gfx_options();
+    memset(&S, 0, sizeof S);
+    S.window = o->window_mode; S.vsync = o->present >= 0 && o->present < N(k_vsync) ? o->present : 5; S.latency = gfx_latency(); S.renderer = o->renderer;
+    S.aniso = 0; for (int i = 0; i < N(k_aniso_v); i++) if (k_aniso_v[i] == o->aniso) S.aniso = i;
+    S.profile = o->profile; S.wait = o->shader_skip; S.prepare = o->shader_prepare; S.load = o->shader_load; S.console = o->handheld; S.overlay = o->overlay;
+    S.volume = gfx_volume(); S.runahead = gfx_runahead(); S.scale = o->scale;
+    snprintf(S.gpu, sizeof S.gpu, "%s", o->gpu[0] ? o->gpu : "auto");
+    S.lang = idx_of(k_lang, N(k_lang), gfx_language()[0] ? gfx_language() : "auto");
+    snprintf(g_lang_start, sizeof g_lang_start, "%s", k_lang[S.lang]);
+    S.size = -1; for (int i = 0; i < N(k_sizes); i++) if (k_sizes[i][0] == o->width && k_sizes[i][1] == o->height) S.size = i;
+    S.kb_player = nnpad_kb_player_cfg();
+    S.stats = gfx_stats_overlay();
+    S0 = S;
+    (void)cw; (void)ch;
+}
+static void ini(const char *key, const char *value) { gfx_ini_set(key, value); }
+static int restart_pending(void) {
+    return S.vsync != S0.vsync || S.latency != S0.latency || S.renderer != S0.renderer || S.aniso != S0.aniso || S.profile != S0.profile || S.wait != S0.wait ||
+           S.prepare != S0.prepare || S.load != S0.load || S.console != S0.console || S.runahead != S0.runahead || S.lang != S0.lang || S.kb_player != S0.kb_player ||
+           fabsf(S.scale - S0.scale) > 0.001f || strcmp(S.gpu, S0.gpu);
+}
+static void apply_stats(int on) {            /* live: the stats box (F2) */
+    S.stats = on;
+    ini("stats_overlay", k_onoff[on]);
+}
+static void apply_overlay(int on) {          /* live: title bar + log line (display.c reads it every second) + the picture (below) */
+    S.overlay = on;
+    gfx_set_overlay(on);
+    ini("frame_time_overlay", k_onoff[on]);
+}
+
+/* ------------------------------------------------------------------ add-on content list (config\dlc.txt) */
+struct DlcLine { char text[160]; int index, entry, on; };
+static DlcLine *g_dlc;
+static int g_dlc_n, g_dlc_loaded, g_dlc_dirty;
+static char g_dlc_path[MAX_PATH];
+static int dlc_entry(const char *p) {        /* the index of an entry line (nnmisc.c aoc_parse, simplified: 0x.., decimal or the 16-digit id), 0 = none */
+    while (*p == ' ' || *p == '\t') p++;
+    char *e = NULL;
+    unsigned long long v;
+    if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) v = strtoull(p + 2, &e, 16);
+    else { size_t nd = strspn(p, "0123456789abcdefABCDEF"); v = nd == 16 ? strtoull(p, &e, 16) : strtoull(p, &e, 10); }
+    if (!e || e == p) return 0;
+    if (v > 0xfff) v = v > 0x01006A800016E000ULL + 0x1000 && v < 0x01006A800016E000ULL + 0x2000 ? v - 0x01006A800016E000ULL - 0x1000 : 0;
+    return v > 0 && v < 0x1000 ? (int)v : 0;
+}
+static void dlc_load(void) {
+    const char *e = getenv("SSBU_DLC_LIST");
+    if (e && e[0]) snprintf(g_dlc_path, sizeof g_dlc_path, "%s", e);
+    else { char exe[MAX_PATH], tmp[MAX_PATH + 32]; GetModuleFileNameA(NULL, exe, MAX_PATH); char *s = strrchr(exe, '\\'); if (s) *s = 0; snprintf(tmp, sizeof tmp, "%s\\..\\config\\dlc.txt", exe); if (!_fullpath(g_dlc_path, tmp, MAX_PATH)) snprintf(g_dlc_path, sizeof g_dlc_path, "%s", tmp); }
+    free(g_dlc); g_dlc = NULL; g_dlc_n = 0;
+    FILE *f = fopen(g_dlc_path, "r");
+    char ln[256];
+    int cap = 0;
+    while (f && fgets(ln, sizeof ln, f)) {
+        ln[strcspn(ln, "\r\n")] = 0;
+        if (g_dlc_n == cap) { cap = cap ? cap * 2 : 64; g_dlc = (DlcLine *)realloc(g_dlc, sizeof(DlcLine) * (size_t)cap); }
+        DlcLine *d = &g_dlc[g_dlc_n++];
+        memset(d, 0, sizeof *d);
+        snprintf(d->text, sizeof d->text, "%s", ln);
+        const char *p = ln;
+        while (*p == ' ' || *p == '\t') p++;
+        if (!strncmp(p, "#off ", 5) && dlc_entry(p + 5)) { d->entry = 1; d->on = 0; d->index = dlc_entry(p + 5); }
+        else if (*p != '#' && dlc_entry(p)) { d->entry = 1; d->on = 1; d->index = dlc_entry(p); }
+    }
+    if (f) fclose(f);
+    g_dlc_loaded = 1; g_dlc_dirty = 0;
+}
+static void dlc_save(void) {
+    char bak[MAX_PATH + 8];
+    snprintf(bak, sizeof bak, "%s.bak", g_dlc_path);
+    CopyFileA(g_dlc_path, bak, FALSE);
+    FILE *f = fopen(g_dlc_path, "w");
+    if (!f) { printf("menu: %s could NOT be written\n", g_dlc_path); return; }
+    for (int i = 0; i < g_dlc_n; i++) {
+        DlcLine *d = &g_dlc[i];
+        const char *p = d->text;
+        while (*p == ' ' || *p == '\t') p++;
+        if (!d->entry) fprintf(f, "%s\n", d->text);
+        else if (!strncmp(p, "#off ", 5)) fprintf(f, d->on ? "%s\n" : "#off %s\n", p + 5);
+        else fprintf(f, d->on ? "%s\n" : "#off %s\n", p);
+    }
+    fclose(f);
+    printf("menu: %s written (old copy: %s); the game reads it at the next start\n", g_dlc_path, bak);
+    fflush(stdout);
+    dlc_load();
+}
+
+/* ------------------------------------------------------------------ the ImGui side */
+static int g_im_ready, g_section, g_section_req = -1, g_capture = -1;
+static float g_base_h;
+static unsigned char *g_font_px;
+static int g_font_w, g_font_h;
+static ImVector<ImDrawVert> g_vtx;
+static ImVector<ImDrawIdx> g_idx;
+static ImVector<MenuCmd> g_cmd;
+static LARGE_INTEGER g_qpf, g_last_t;
+static float g_ft[120];
+static int g_ft_pos;
+static uint64_t g_pad_prev;
+static long long g_closed_at, g_frame;
+static char g_pads[1024];
+static ULONGLONG g_pads_at;
+enum { SEC_DISPLAY, SEC_GRAPHICS, SEC_AUDIO, SEC_INPUT, SEC_DLC, SEC_LANG, SEC_LOG, SEC_ABOUT, SEC_N };
+static const char *const k_sections[SEC_N] = {"Display", "Graphics", "Audio", "Input", "Add-on content", "Language", "Log", "About"};
+
+static ImGuiKey vk_key(int vk) {
+    if (vk >= 'A' && vk <= 'Z') return (ImGuiKey)(ImGuiKey_A + (vk - 'A'));
+    if (vk >= '0' && vk <= '9') return (ImGuiKey)(ImGuiKey_0 + (vk - '0'));
+    if (vk >= VK_F1 && vk <= VK_F12) return (ImGuiKey)(ImGuiKey_F1 + (vk - VK_F1));
+    switch (vk) {
+    case VK_TAB: return ImGuiKey_Tab; case VK_LEFT: return ImGuiKey_LeftArrow; case VK_RIGHT: return ImGuiKey_RightArrow; case VK_UP: return ImGuiKey_UpArrow;
+    case VK_DOWN: return ImGuiKey_DownArrow; case VK_PRIOR: return ImGuiKey_PageUp; case VK_NEXT: return ImGuiKey_PageDown; case VK_HOME: return ImGuiKey_Home;
+    case VK_END: return ImGuiKey_End; case VK_INSERT: return ImGuiKey_Insert; case VK_DELETE: return ImGuiKey_Delete; case VK_BACK: return ImGuiKey_Backspace;
+    case VK_SPACE: return ImGuiKey_Space; case VK_RETURN: return ImGuiKey_Enter; case VK_ESCAPE: return ImGuiKey_Escape;
+    case VK_SHIFT: return ImGuiKey_LeftShift; case VK_CONTROL: return ImGuiKey_LeftCtrl; case VK_MENU: return ImGuiKey_LeftAlt;
+    }
+    return ImGuiKey_None;
+}
+
+static void im_init(int h) {
+    ImGui::CreateContext();
+    ImGuiIO &io = ImGui::GetIO();
+    io.IniFilename = NULL; io.LogFilename = NULL;
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad;
+    io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
+    io.BackendPlatformName = "ssbu_menu (display.c window messages)";
+    io.BackendRendererName = "nvn_vk_menu (Vulkan, dynamic rendering)";
+    ImGui::StyleColorsDark();
+    ImGuiStyle &st = ImGui::GetStyle();
+    st.WindowRounding = 6.0f; st.FrameRounding = 4.0f; st.GrabRounding = 4.0f; st.WindowBorderSize = 1.0f;
+    st.Colors[ImGuiCol_WindowBg].w = 0.92f;
+    float px = (float)h / 40.0f;
+    if (px < 15.0f) px = 15.0f;
+    if (px > 40.0f) px = 40.0f;
+    g_base_h = (float)h;
+    char font[MAX_PATH];
+    UINT n = GetWindowsDirectoryA(font, MAX_PATH);
+    snprintf(font + n, sizeof font - n, "\\Fonts\\segoeui.ttf");
+    ImFont *f = GetFileAttributesA(font) != INVALID_FILE_ATTRIBUTES ? io.Fonts->AddFontFromFileTTF(font, px) : NULL;
+    if (!f) { ImFontConfig c; c.SizePixels = px; io.Fonts->AddFontDefault(&c); }
+    st.ScaleAllSizes(px / 15.0f);
+    int bpp = 0;
+    io.Fonts->GetTexDataAsRGBA32(&g_font_px, &g_font_w, &g_font_h, &bpp);
+    io.Fonts->SetTexID((ImTextureID)1);
+    QueryPerformanceFrequency(&g_qpf);
+    g_im_ready = 1;
+    printf("menu: Dear ImGui %s ready: font %s %.0f px, atlas %dx%d\n", ImGui::GetVersion(), f ? font : "(built-in)", px, g_font_w, g_font_h);
+    fflush(stdout);
+}
+extern "C" const unsigned char *menu_font_rgba(int *w, int *h) { *w = g_font_w; *h = g_font_h; return g_font_px; }
+
+/* the pad, read every frame (also while the menu is closed: the combination that opens it) */
+static void pad_feed(ImGuiIO &io, uint64_t b) {
+    struct { int bit; ImGuiKey k; } m[] = {
+        {B_A, ImGuiKey_GamepadFaceDown}, {B_B, ImGuiKey_GamepadFaceRight}, {B_Y, ImGuiKey_GamepadFaceLeft}, {B_X, ImGuiKey_GamepadFaceUp},
+        {B_ZL, ImGuiKey_GamepadL2}, {B_ZR, ImGuiKey_GamepadR2}, {B_LEFT, ImGuiKey_GamepadDpadLeft}, {B_RIGHT, ImGuiKey_GamepadDpadRight},
+        {B_UP, ImGuiKey_GamepadDpadUp}, {B_DOWN, ImGuiKey_GamepadDpadDown}};
+    for (size_t i = 0; i < sizeof m / sizeof m[0]; i++) io.AddKeyEvent(m[i].k, (b & BIT(m[i].bit)) != 0);
+}
+
+static void tag(int restart, int changed) {
+    ImGui::SameLine();
+    if (!restart) ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.45f, 1.0f), "[live]");
+    else ImGui::TextColored(changed ? ImVec4(1.0f, 0.75f, 0.2f, 1.0f) : ImVec4(0.6f, 0.6f, 0.6f, 1.0f), changed ? "[restart: changed]" : "[restart]");
+}
+static bool combo(const char *label, int *v, const char *const *names, int n) { return ImGui::Combo(label, v, names, n); }
+static void help(const char *s) { ImGui::PushTextWrapPos(0.0f); ImGui::TextDisabled("%s", s); ImGui::PopTextWrapPos(); }
+
+static void sec_display(int cw, int ch) {
+    int wm = display_window_mode();
+    S.window = wm;
+    if (combo("Window", &S.window, k_window, N(k_window))) { display_set_window_mode(S.window); ini("window", k_window[S.window]); }
+    tag(0, 0);
+    help("F11 also switches between the window and borderless at any time. Fullscreen = borderless and always on top (no display mode change).");
+    int sz = S.size < 0 ? 0 : S.size;
+    if (combo("Window size", &sz, k_size_name, N(k_size_name))) {
+        S.size = sz;
+        char v[16];
+        display_set_client_size(k_sizes[sz][0], k_sizes[sz][1]);
+        snprintf(v, sizeof v, "%d", k_sizes[sz][0]); ini("width", v);
+        snprintf(v, sizeof v, "%d", k_sizes[sz][1]); ini("height", v);
+    }
+    tag(0, 0);
+    ImGui::TextDisabled("now %d x %d (the windowed size is kept for later when borderless)", cw, ch);
+    ImGui::Separator();
+    if (combo("Vsync / pacing", &S.vsync, k_vsync, N(k_vsync))) ini("vsync", k_vsync[S.vsync]);
+    tag(1, S.vsync != S0.vsync);
+    help("auto: 'display' on a 60/120/240 Hz monitor, else 'clock'. display: the game's clock is the monitor's refresh. clock: our own 60 Hz clock. off: no wait, tearing. on: FIFO (two clocks). mailbox: as clock, mailbox only.");
+    if (combo("Input latency", &S.latency, k_latency, N(k_latency))) ini("latency", k_latency[S.latency]);
+    tag(1, S.latency != S0.latency);
+    if (combo("Renderer", &S.renderer, k_renderer, N(k_renderer))) ini("renderer", k_renderer[S.renderer]);
+    tag(1, S.renderer != S0.renderer);
+    ImGui::InputText("GPU", S.gpu, sizeof S.gpu);
+    if (ImGui::IsItemDeactivatedAfterEdit()) ini("gpu", S.gpu[0] ? S.gpu : "auto");
+    tag(1, strcmp(S.gpu, S0.gpu) != 0);
+    ImGui::TextDisabled("in use: %s   (auto, a number of the list in the log, or a part of the name)", nvn_vk_device_name());
+}
+static void sec_graphics(void) {
+    if (ImGui::SliderFloat("Resolution scale", &S.scale, 0.25f, 2.0f, "%.2f")) S.scale = floorf(S.scale * 20.0f + 0.5f) / 20.0f;
+    if (ImGui::IsItemDeactivatedAfterEdit()) { char v[16]; snprintf(v, sizeof v, "%.2f", S.scale); ini("resolution_scale", v); }
+    tag(1, fabsf(S.scale - S0.scale) > 0.001f);
+    ImGui::TextDisabled("1.00 = 1920 x 1080 inside; 0.50 = 960 x 540 (weak GPU); above 1 = supersampling (strong GPU)");
+    if (combo("Anisotropic filtering", &S.aniso, k_aniso, N(k_aniso))) ini("anisotropic_filtering", k_aniso[S.aniso]);
+    tag(1, S.aniso != S0.aniso);
+    if (combo("Profile", &S.profile, k_profile, N(k_profile))) ini("profile", k_profile[S.profile]);
+    tag(1, S.profile != S0.profile);
+    ImGui::TextDisabled("low = scale 0.50, filtering game, vsync clock (those three keys are then not used)");
+    if (combo("Shader wait", &S.wait, k_wait, N(k_wait))) ini("shader_wait", k_wait[S.wait]);
+    tag(1, S.wait != S0.wait);
+    if (combo("Shader preparation", &S.prepare, k_prepare, N(k_prepare))) ini("shader_prepare", k_prepare[S.prepare]);
+    tag(1, S.prepare != S0.prepare);
+    if (combo("Shader loading", &S.load, k_load, N(k_load))) ini("shader_load", k_load[S.load]);
+    tag(1, S.load != S0.load);
+    if (combo("Console mode", &S.console, k_console, N(k_console))) ini("console_mode", k_console[S.console]);
+    tag(1, S.console != S0.console);
+    bool ov = S.overlay != 0;
+    if (ImGui::Checkbox("Frame time overlay", &ov)) apply_overlay(ov);
+    tag(0, 0);
+    ImGui::TextDisabled("in the picture (top left), in the window title and as a 'frame-time:' log line every second");
+    bool so = S.stats != 0;
+    if (ImGui::Checkbox("Stats overlay (F2)", &so)) apply_stats(so);
+    tag(0, 0);
+    ImGui::TextDisabled("top right: fps, frame time, online state, ping, input delay, rollback, run-ahead");
+}
+static void sec_audio(void) {
+    int cur = nnaudio_volume();
+    int v = S.volume < 0 ? (cur >= 0 ? cur : 100) : S.volume;
+    if (cur < 0) ImGui::BeginDisabled();
+    if (ImGui::SliderInt("Volume", &v, 0, 100, "%d %%")) { S.volume = v; nnaudio_set_volume(v); }
+    if (ImGui::IsItemDeactivatedAfterEdit()) { char t[8]; snprintf(t, sizeof t, "%d", S.volume); ini("volume", t); }
+    if (cur < 0) ImGui::EndDisabled();
+    tag(0, 0);
+    if (cur < 0) help("No sound device in this copy (test copies, SSBU_AUDIO_MUTE): the volume is saved for the copies a person plays.");
+    if (ImGui::Button("Volume: auto (100 %)")) { S.volume = -1; nnaudio_set_volume(100); ini("volume", "auto"); }
+    ImGui::Separator();
+    help("Music and sound effects apart: the game's own Options > Sound (it mixes them itself; the PC gets the finished mix, and this volume scales all of it).");
+}
+static void sec_input(void) {
+    if (combo("Run-ahead (one frame less delay)", &S.runahead, k_onoff, N(k_onoff))) ini("runahead", k_onoff[S.runahead]);
+    tag(1, S.runahead != S0.runahead);
+    help("Costs a second pass of each fight frame on the CPU; needs the build with dirty-page marks. Leave it off on a weak PC.");
+    ImGui::Separator();
+    static const char *const kp[] = {"auto", "nobody", "1", "2", "3", "4", "5", "6", "7", "8"};
+    int p = S.kb_player + 2;
+    if (combo("Keyboard plays as player", &p, kp, N(kp))) { S.kb_player = p - 2; nnpad_kb_player_set(S.kb_player); }
+    tag(1, S.kb_player != S0.kb_player);
+    ImGui::Text("Keyboard keys");
+    tag(0, 0);
+    ImGui::TextDisabled("%s, [keyboard]", nnpad_config_path());
+    if (g_capture >= 0) ImGui::TextColored(ImVec4(1, 0.8f, 0.2f, 1), "Press the key for %s (Esc = cancel)", nnpad_kb_label(g_capture));
+    if (ImGui::BeginTable("kb", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit)) {
+        for (int i = 0; i < 24; i++) {
+            char name[16];
+            nnpad_vk_name(nnpad_kb_vk(i), name, sizeof name);
+            ImGui::PushID(i);
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0); ImGui::TextUnformatted(nnpad_kb_label(i));
+            ImGui::TableSetColumnIndex(1); ImGui::TextUnformatted(g_capture == i ? "..." : name);
+            ImGui::TableSetColumnIndex(2);
+            if (ImGui::SmallButton("Change")) g_capture = i;
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Clear")) nnpad_kb_bind(i, 0);
+            ImGui::PopID();
+        }
+        ImGui::EndTable();
+    }
+    ImGui::Separator();
+    ImGui::Text("Controllers");
+    if (GetTickCount64() - g_pads_at > 1000) { g_pads_at = GetTickCount64(); if (!nnpad_describe(g_pads, sizeof g_pads)) snprintf(g_pads, sizeof g_pads, "(none connected)\n"); }
+    ImGui::TextUnformatted(g_pads);
+    help("A controller's buttons: ssbu_native.exe --pad-map <player> (asks for each button, writes controllers.ini; read again at once). "
+         "Menu: F1, or the Home / Guide (or Capture / Share) button; + or Esc closes it. While the menu is open the game gets no input.");
+}
+static void sec_dlc(void) {
+    const int *own = NULL;
+    int n = nnaoc_owned(&own);
+    if (!g_dlc_loaded) dlc_load();
+    if (n >= 0) ImGui::Text("The game was told of %d owned add-on content(s).", n); else ImGui::Text("The game has not asked for its add-on contents yet.");
+    ImGui::TextDisabled("%s  (tools_audit\\dlc_list.py writes it from your own DLC dumps)", g_dlc_path);
+    int entries = 0;
+    for (int i = 0; i < g_dlc_n; i++) entries += g_dlc[i].entry;
+    if (!entries) help("No entry in the list: no add-on content is owned (DLC fighters, stages and costumes stay locked).");
+    ImGui::BeginChild("dlc", ImVec2(0, ImGui::GetContentRegionAvail().y - ImGui::GetFrameHeightWithSpacing() * 1.5f), ImGuiChildFlags_None);
+    for (int i = 0; i < g_dlc_n; i++) {
+        DlcLine *d = &g_dlc[i];
+        if (!d->entry) continue;
+        const char *c = strchr(d->text, '#');
+        if (c == d->text) c = strchr(c + 1, '#');
+        char label[200];
+        snprintf(label, sizeof label, "0x%03x  %s##%d", d->index, c ? c + 1 : "", i);
+        bool on = d->on != 0;
+        if (ImGui::Checkbox(label, &on)) { d->on = on; g_dlc_dirty = 1; }
+    }
+    ImGui::EndChild();
+    if (!g_dlc_dirty) ImGui::BeginDisabled();
+    if (ImGui::Button("Save the list")) dlc_save();
+    if (!g_dlc_dirty) ImGui::EndDisabled();
+    ImGui::SameLine();
+    if (ImGui::Button("Read it again")) dlc_load();
+    tag(1, g_dlc_dirty);
+}
+static void sec_lang(void) {
+    if (combo("Language", &S.lang, k_lang_name, N(k_lang_name))) ini("language", k_lang[S.lang]);
+    tag(1, S.lang != S0.lang);
+    help("The language the game is told (nn::oe::GetDesiredLanguage). SSBU_LANGUAGE=<code> wins over this setting.");
+}
+/* ------------------------------------------------------------------ the Log page: the file stdout goes to, read back */
+#define LOG_MAX 5000
+static char *g_log[LOG_MAX];
+static int g_log_head, g_log_n, g_log_state, g_log_auto = 1;      /* state: 0 not tried, 1 reading, -1 stdout is not a file */
+static HANDLE g_log_h = INVALID_HANDLE_VALUE;
+static char g_log_path[MAX_PATH + 8], g_log_part[1024], g_export_msg[MAX_PATH + 64];
+static int g_log_partn;
+static ImGuiTextFilter g_log_filter;
+static void log_add(const char *s, int n) {
+    char *l = (char *)malloc((size_t)n + 1);
+    if (!l) return;
+    memcpy(l, s, (size_t)n); l[n] = 0;
+    int at = (g_log_head + g_log_n) % LOG_MAX;
+    if (g_log_n == LOG_MAX) { free(g_log[g_log_head]); g_log_head = (g_log_head + 1) % LOG_MAX; at = (g_log_head + LOG_MAX - 1) % LOG_MAX; } else g_log_n++;
+    g_log[at] = l;
+}
+static const char *log_line(int i) { return g_log[(g_log_head + i) % LOG_MAX]; }
+static void log_poll(void) {
+    if (g_log_state == 0) {
+        HANDLE so = GetStdHandle(STD_OUTPUT_HANDLE);
+        g_log_state = -1;
+        if (so && so != INVALID_HANDLE_VALUE && GetFileType(so) == FILE_TYPE_DISK && GetFinalPathNameByHandleA(so, g_log_path, MAX_PATH, FILE_NAME_NORMALIZED)) {
+            g_log_h = CreateFileA(g_log_path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, 0, NULL);
+            if (g_log_h != INVALID_HANDLE_VALUE) {
+                LARGE_INTEGER sz, at;
+                GetFileSizeEx(g_log_h, &sz);
+                at.QuadPart = sz.QuadPart > (2 << 20) ? sz.QuadPart - (2 << 20) : 0;      /* the last 2 MB at most */
+                SetFilePointerEx(g_log_h, at, NULL, FILE_BEGIN);
+                g_log_state = 1;
+                if (at.QuadPart) g_log_partn = -1;                                      /* the first (cut) line is dropped */
+            }
+        }
+    }
+    if (g_log_state != 1) return;
+    fflush(stdout);
+    static char buf[256 * 1024];
+    DWORD got = 0;
+    for (int k = 0; k < 4 && ReadFile(g_log_h, buf, sizeof buf, &got, NULL) && got; k++) {
+        for (DWORD i = 0; i < got; i++) {
+            char ch = buf[i];
+            if (ch == '\n') { if (g_log_partn >= 0) { while (g_log_partn && g_log_part[g_log_partn - 1] == '\r') g_log_partn--; log_add(g_log_part, g_log_partn); } g_log_partn = 0; }
+            else if (g_log_partn >= 0 && g_log_partn < (int)sizeof g_log_part - 1) g_log_part[g_log_partn++] = ch;
+        }
+    }
+}
+static int log_export(char *out, int n) {             /* logs\ssbu_log_<date>_<time>.txt beside the exe; 1 = written */
+    char dir[MAX_PATH];
+    GetModuleFileNameA(NULL, dir, MAX_PATH);
+    char *s = strrchr(dir, '\\');
+    if (s) *s = 0;
+    strncat(dir, "\\logs", sizeof dir - strlen(dir) - 1);
+    CreateDirectoryA(dir, NULL);
+    SYSTEMTIME t;
+    GetLocalTime(&t);
+    snprintf(out, (size_t)n, "%s\\ssbu_log_%04d%02d%02d_%02d%02d%02d.txt", dir, t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond);
+    FILE *f = fopen(out, "wb");
+    if (!f) return 0;
+    for (int i = 0; i < g_log_n; i++) { fputs(log_line(i), f); fputs("\r\n", f); }
+    int ok = !fclose(f);
+    printf("menu: log exported: %s (%d lines)\n", out, g_log_n);
+    fflush(stdout);
+    return ok;
+}
+static void sec_log(void) {
+    log_poll();
+    if (g_log_state != 1) { help("The output of this run does not go to a file (started from a console without '> file'): nothing to show. gioca.bat writes it to logs_gioco\\gioca.log."); return; }
+    g_log_filter.Draw("Filter (a,b = either; -x = without)", ImGui::GetFontSize() * 16);
+    ImGui::SameLine();
+    bool au = g_log_auto != 0;
+    if (ImGui::Checkbox("Auto-scroll", &au)) g_log_auto = au;
+    ImGui::SameLine();
+    if (ImGui::Button("Export log")) {
+        char path[MAX_PATH + 64];
+        if (log_export(path, sizeof path)) {
+            snprintf(g_export_msg, sizeof g_export_msg, "written: %s", path);
+            char *s = strrchr(path, '\\');
+            if (s) *s = 0;
+            ShellExecuteA(NULL, "open", path, NULL, NULL, SW_SHOWNORMAL);      /* the folder, in Explorer: this button only */
+        } else snprintf(g_export_msg, sizeof g_export_msg, "could NOT be written: %s", path);
+    }
+    ImGui::TextDisabled("%s - %d lines kept (the last %d)%s%s", g_log_path + (strncmp(g_log_path, "\\\\?\\", 4) ? 0 : 4), g_log_n, LOG_MAX, g_export_msg[0] ? " - " : "", g_export_msg);
+    ImGui::BeginChild("log", ImVec2(0, 0), ImGuiChildFlags_Borders, ImGuiWindowFlags_HorizontalScrollbar);
+    static ImVector<int> idx;
+    idx.resize(0);
+    for (int i = 0; i < g_log_n; i++) if (!g_log_filter.IsActive() || g_log_filter.PassFilter(log_line(i))) idx.push_back(i);
+    ImGuiListClipper clip;
+    clip.Begin(idx.Size);
+    while (clip.Step()) for (int i = clip.DisplayStart; i < clip.DisplayEnd; i++) ImGui::TextUnformatted(log_line(idx[i]));
+    clip.End();
+    if (g_log_auto) ImGui::SetScrollHereY(1.0f);
+    ImGui::EndChild();
+}
+
+/* ------------------------------------------------------------------ the stats overlay (F2), top right */
+static void draw_stats(void) {
+    float sum = 0;
+    int n = 0;
+    for (int i = 0; i < 120; i++) if (g_ft[i] > 0) { sum += g_ft[i]; n++; }
+    float avg = n ? sum / (float)n : 0;
+    NetStats ns;
+    memset(&ns, 0, sizeof ns);
+    net_stats_get(&ns);
+    static int ra_cfg = -1;
+    if (ra_cfg < 0) { const char *e = getenv("SSBU_RUNAHEAD"); ra_cfg = e ? (e[0] && e[0] != '0') : gfx_runahead(); }
+    ImGuiIO &io = ImGui::GetIO();
+    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x - 8, g_open ? ImGui::GetFrameHeight() + 8 : 8), ImGuiCond_Always, ImVec2(1.0f, 0.0f));
+    ImGui::SetNextWindowBgAlpha(0.6f);
+    ImGui::Begin("##stats", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
+                 ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoSavedSettings);
+    ImGui::Text("%.0f fps  %.2f ms", avg > 0 ? 1000.0f / avg : 0.0f, avg);
+    static const char *const st[] = {"Offline", "Connecting...", "Online - connected", "Disconnected"};
+    ImVec4 col = ns.state == NET_CONNECTED ? ImVec4(0.45f, 0.9f, 0.45f, 1) : ns.state == NET_CONNECTING ? ImVec4(1, 0.8f, 0.2f, 1) : ns.state == NET_DISCONNECTED ? ImVec4(1, 0.4f, 0.4f, 1) : ImVec4(0.7f, 0.7f, 0.7f, 1);
+    if (ns.state == NET_CONNECTED) ImGui::TextColored(col, "%s (%d players)", st[2], ns.players);
+    else ImGui::TextColored(col, "%s", ns.state >= 0 && ns.state <= 3 ? st[ns.state] : "?");
+    if (ns.state == NET_CONNECTED || ns.state == NET_CONNECTING) {
+        if (ns.ping_ms >= 0) ImGui::Text("ping %d ms  delay %d f", ns.ping_ms, ns.delay); else ImGui::Text("ping -  delay %d f", ns.delay);
+        ImGui::Text("rollback %d / %d f", ns.rollback_last, ns.rollback_max);
+    }
+    ImGui::Text("run-ahead %s", !ra_cfg ? "off" : r1_ra_phase() ? "on (running)" : "on");
+    ImGui::End();
+}
+
+static void sec_about(void) {
+    ImGui::Text("SSBU native: Super Smash Bros. Ultimate, statically recompiled for Windows");
+    ImGui::Text("Runtime built %s %s (study tree)", __DATE__, __TIME__);
+    ImGui::Text("Renderer: Vulkan on %s", nvn_vk_device_name());
+    ImGui::Text("Settings menu: Dear ImGui %s (MIT licence, Omar Cornut and contributors)", ImGui::GetVersion());
+    ImGui::Text("graphics.ini: %s", gfx_options()->path);
+    ImGui::Text("controllers.ini: %s", nnpad_config_path());
+    ImGui::Separator();
+    help("No game content is part of this program: it runs the game files you dumped from your own console.");
+}
+
+static void draw_overlay(void) {
+    float sum = 0;
+    int n = 0;
+    for (int i = 0; i < 120; i++) if (g_ft[i] > 0) { sum += g_ft[i]; n++; }
+    float avg = n ? sum / (float)n : 0;
+    ImGui::SetNextWindowPos(ImVec2(8, g_open ? ImGui::GetFrameHeight() + 8 : 8), ImGuiCond_Always);      /* below the menu bar while the menu is open */
+    ImGui::SetNextWindowBgAlpha(0.55f);
+    ImGui::Begin("##frametime", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
+                 ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoSavedSettings);
+    ImGui::Text("%.2f ms  %.0f fps", avg, avg > 0 ? 1000.0f / avg : 0.0f);
+    ImGui::PlotLines("##ft", g_ft, 120, g_ft_pos, NULL, 0.0f, 33.4f, ImVec2(ImGui::GetFontSize() * 9, ImGui::GetFontSize() * 2.5f));
+    ImGui::End();
+}
+
+static void draw_menu(int cw, int ch) {
+    if (ImGui::BeginMainMenuBar()) {
+        ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.2f, 1.0f), "SSBU native");
+        for (int i = 0; i < SEC_N; i++) if (ImGui::MenuItem(k_sections[i], NULL, g_section == i)) g_section = i;
+        ImGui::TextDisabled("   F1 / Home: close   L / R: section");
+        ImGui::EndMainMenuBar();
+    }
+    ImGuiIO &io = ImGui::GetIO();
+    ImVec2 size(io.DisplaySize.x * 0.62f, io.DisplaySize.y * 0.78f);
+    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.53f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(size, ImGuiCond_Always);
+    char title[64];
+    snprintf(title, sizeof title, "%s###settings", k_sections[g_section]);
+    if (g_section_req >= 0) ImGui::SetNextWindowFocus();
+    ImGui::Begin(title, NULL, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings);
+    g_section_req = -1;
+    ImGui::BeginChild("body", ImVec2(0, -ImGui::GetFrameHeightWithSpacing() * (restart_pending() ? 2.2f : 1.2f)), ImGuiChildFlags_NavFlattened);
+    ImGui::PushItemWidth(ImGui::GetFontSize() * 14);
+    switch (g_section) {
+    case SEC_DISPLAY: sec_display(cw, ch); break;
+    case SEC_GRAPHICS: sec_graphics(); break;
+    case SEC_AUDIO: sec_audio(); break;
+    case SEC_INPUT: sec_input(); break;
+    case SEC_DLC: sec_dlc(); break;
+    case SEC_LANG: sec_lang(); break;
+    case SEC_LOG: sec_log(); break;
+    default: sec_about(); break;
+    }
+    ImGui::PopItemWidth();
+    ImGui::EndChild();
+    if (restart_pending()) ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1.0f), "Saved. The settings marked [restart: changed] take effect at the next start.");
+    if (ImGui::Button("Close")) menu_request_toggle();
+    ImGui::SameLine();
+    ImGui::TextDisabled("Settings are saved at once (config\\graphics.ini)");
+    ImGui::End();
+}
+
+static void set_open(int on) {
+    if (on == (g_open != 0)) return;
+    if (on) {
+        InterlockedExchange(&g_open, 1);
+        InterlockedExchange(&g_guard, 1);
+        g_section_req = g_section;
+        g_capture = -1;
+        g_dlc_loaded = 0;
+        printf("menu: opened at presented frame %lld\n", g_frame);
+    } else {
+        InterlockedExchange(&g_open, 0);
+        g_closed_at = g_frame;
+        g_capture = -1;
+        printf("menu: closed at presented frame %lld\n", g_frame);
+    }
+    fflush(stdout);
+}
+
+/* while the menu is open and the game shows nothing new (a loading wait), the last frame is shown again with the menu over it */
+static DWORD WINAPI redraw_thread(LPVOID) {
+    long long seen = -1;
+    ULONGLONG at = 0;
+    for (;;) {
+        Sleep(50);
+        if (!g_open || osk_active()) { seen = -1; continue; }
+        long long p = nvn_front_presents();
+        ULONGLONG now = GetTickCount64();
+        if (p != seen) { seen = p; at = now; continue; }
+        if (now - at > 100) nvn_front_osk_redraw();
+    }
+}
+
+/* ------------------------------------------------------------------ SSBU_MENU_TEST */
+static long long g_test_at = -2;
+static int g_test_step;
+static char g_shot_path[MAX_PATH];
+static int g_shot_req;
+static void test_shot(const char *what) {
+    const char *dir = getenv("SSBU_SHOT_DIR");
+    snprintf(g_shot_path, sizeof g_shot_path, "%s%smenu_test_%s.bmp", dir ? dir : "", dir ? "/" : "", what);
+    g_shot_req = 1;
+}
+static void test_tick(void) {
+    if (g_test_at == -2) { const char *e = getenv("SSBU_MENU_TEST"); g_test_at = e && e[0] ? atoll(e) : -1; }
+    if (g_test_at < 0 || g_frame < g_test_at) return;
+    long long t = g_frame - g_test_at;
+    static long long step_at;
+    switch (g_test_step) {
+    case 0: set_open(1); printf("menu: test: opened; input to the game blocked = %d\n", menu_input_blocked()); g_test_step = 1; step_at = t; break;
+    case 1: if (t - step_at < 5) break;
+        g_section = SEC_GRAPHICS; g_section_req = g_section; printf("menu: test: section Graphics\n");
+        {   int was = S.overlay;
+            apply_overlay(!was);
+            FILE *f = fopen(gfx_options()->path, "rb");
+            char ln[256], got[256] = "(not found)";
+            while (f && fgets(ln, sizeof ln, f)) if (!strncmp(ln, "frame_time_overlay", 18)) { ln[strcspn(ln, "\r\n")] = 0; snprintf(got, sizeof got, "%s", ln); }
+            if (f) fclose(f);
+            printf("menu: test: frame_time_overlay changed to %s; the file now says \"%s\"; live value %d\n", k_onoff[S.overlay], got, gfx_options()->overlay); }
+        g_test_step = 2; step_at = t; break;
+    case 2: if (t - step_at >= 10) { test_shot("graphics"); g_test_step = 3; } break;
+    case 4: g_section = SEC_LOG; g_section_req = g_section; printf("menu: test: section Log\n"); g_test_step = 5; step_at = t; break;
+    case 5: if (t - step_at >= 10) {
+            char path[MAX_PATH + 64];
+            printf("menu: test: log page: %d lines read from %s; export %s\n", g_log_n, g_log_state == 1 ? g_log_path : "(stdout is not a file)", log_export(path, sizeof path) ? path : "FAILED");
+            test_shot("log"); g_test_step = 6; } break;
+    case 7: apply_stats(1); set_open(0); printf("menu: test: stats overlay on, menu closed\n"); g_test_step = 8; step_at = t; break;
+    case 8: if (t - step_at >= 10) { test_shot("stats"); g_test_step = 9; } break;
+    case 10: apply_stats(0); apply_overlay(!S.overlay); printf("menu: test: stats overlay and frame time overlay back as they were\n"); g_test_step = 11; break;
+    case 11: if (!g_guard) { printf("menu: test: closed; input to the game blocked = %d (released) at frame %lld\n", menu_input_blocked(), g_frame); g_test_step = 12; } break;
+    }
+    fflush(stdout);
+}
+extern "C" int menu_shot_wanted(char *path, int n) {
+    if (!g_shot_req) return 0;
+    g_shot_req = 0;
+    snprintf(path, (size_t)n, "%s", g_shot_path);
+    return 1;
+}
+extern "C" void menu_shot_done(const char *path, int w, int h, int ok) {
+    printf("menu: test: picture %s %dx%d %s; draw data of that frame: %d vertices, %d indices, %d commands\n", path, w, h, ok ? "written" : "NOT written", g_vtx.Size, g_idx.Size, g_cmd.Size);
+    fflush(stdout);
+    if (g_test_step == 3 || g_test_step == 6 || g_test_step == 9) g_test_step++;
+}
+
+/* ------------------------------------------------------------------ once per presented frame (render thread) */
+extern "C" int menu_frame(int width, int height, MenuDraw *out) {
+    if (!menu_enabled() || width <= 0 || height <= 0) return 0;
+    long long fr = nvn_front_presents();
+    int fresh = fr != g_frame;
+    g_frame = fr;
+    {   LARGE_INTEGER now; QueryPerformanceCounter(&now);
+        if (!g_qpf.QuadPart) QueryPerformanceFrequency(&g_qpf);
+        if (fresh && g_last_t.QuadPart) { g_ft[g_ft_pos] = (float)((double)(now.QuadPart - g_last_t.QuadPart) * 1000.0 / (double)g_qpf.QuadPart); g_ft_pos = (g_ft_pos + 1) % 120; }
+        if (fresh) g_last_t = now; }
+    if (!g_sections_inited) { settings_init(width, height); g_sections_inited = 1; CreateThread(NULL, 0, redraw_thread, NULL, 0, NULL); }
+    test_tick();
+    uint64_t b = nnhid_menu_buttons(), down = b & ~g_pad_prev;
+    g_pad_prev = b;
+    if (down & (BIT(B_HOME) | BIT(B_CAPTURE))) menu_request_toggle();      /* nnhid_menu_buttons bits 16 / 17: never seen by the game */
+    if (g_open && (down & BIT(B_PLUS))) menu_request_toggle();
+    for (LONG t = InterlockedExchange(&g_toggle_req, 0); t > 0; t--) set_open(!g_open);
+    if (!g_open && g_guard && b == 0 && g_frame - g_closed_at >= 6) InterlockedExchange(&g_guard, 0);      /* closed and every pad button released */
+    for (LONG t = InterlockedExchange(&g_stats_req, 0); t > 0; t--) apply_stats(!S.stats);
+    if (!g_open && !S.overlay && !S.stats) { Ev drop[8]; while (q_take(drop, 8) == 8) continue; return 0; }
+    if (!g_im_ready) im_init(height);
+    ImGuiIO &io = ImGui::GetIO();
+    io.DisplaySize = ImVec2((float)width, (float)height);
+    io.FontGlobalScale = g_base_h > 0 ? (float)height / g_base_h : 1.0f;
+    {   static LARGE_INTEGER prev; LARGE_INTEGER now; QueryPerformanceCounter(&now);
+        float dt = prev.QuadPart ? (float)((double)(now.QuadPart - prev.QuadPart) / (double)g_qpf.QuadPart) : 1.0f / 60.0f;
+        io.DeltaTime = dt > 0.0f && dt < 1.0f ? dt : 1.0f / 60.0f; prev = now; }
+    Ev ev[256];
+    int n = q_take(ev, 256);
+    for (int i = 0; i < n && g_open; i++) {
+        Ev &e = ev[i];
+        if (e.type == EV_KEY && g_capture >= 0 && e.b) {                      /* a new keyboard binding */
+            if (e.a != VK_ESCAPE) nnpad_kb_bind(g_capture, e.a);
+            g_capture = -1;
+            continue;
+        }
+        switch (e.type) {
+        case EV_MOVE: io.AddMousePosEvent((float)e.a, (float)e.b); break;
+        case EV_BTN: io.AddMouseButtonEvent(e.a, e.b != 0); break;
+        case EV_WHEEL: io.AddMouseWheelEvent(0.0f, (float)e.a / (float)WHEEL_DELTA); break;
+        case EV_CHAR: io.AddInputCharacterUTF16((ImWchar16)e.a); break;
+        case EV_KEY:
+            if (e.a == VK_ESCAPE && e.b && !ImGui::IsAnyItemActive() && !ImGui::IsPopupOpen(NULL, ImGuiPopupFlags_AnyPopupId)) { menu_request_toggle(); break; }
+            if (e.a == VK_CONTROL) io.AddKeyEvent(ImGuiMod_Ctrl, e.b != 0);
+            if (e.a == VK_SHIFT) io.AddKeyEvent(ImGuiMod_Shift, e.b != 0);
+            if (e.a == VK_MENU) io.AddKeyEvent(ImGuiMod_Alt, e.b != 0);
+            if (vk_key(e.a) != ImGuiKey_None) io.AddKeyEvent(vk_key(e.a), e.b != 0);
+            break;
+        }
+    }
+    pad_feed(io, g_open && g_capture < 0 ? b : 0);
+    if (g_open && (down & BIT(B_L))) { g_section = (g_section + SEC_N - 1) % SEC_N; g_section_req = g_section; }
+    if (g_open && (down & BIT(B_R))) { g_section = (g_section + 1) % SEC_N; g_section_req = g_section; }
+    io.MouseDrawCursor = false;
+    ImGui::NewFrame();
+    if (S.overlay) draw_overlay();
+    if (S.stats) draw_stats();
+    if (g_open) draw_menu(width, height);
+    ImGui::Render();
+    ImDrawData *dd = ImGui::GetDrawData();
+    g_vtx.resize(0); g_idx.resize(0); g_cmd.resize(0);
+    for (int i = 0; i < dd->CmdListsCount; i++) {
+        const ImDrawList *dl = dd->CmdLists[i];
+        uint32_t vbase = (uint32_t)g_vtx.Size, ibase = (uint32_t)g_idx.Size;
+        for (int k = 0; k < dl->VtxBuffer.Size; k++) g_vtx.push_back(dl->VtxBuffer[k]);
+        for (int k = 0; k < dl->IdxBuffer.Size; k++) g_idx.push_back(dl->IdxBuffer[k]);
+        for (int k = 0; k < dl->CmdBuffer.Size; k++) {
+            const ImDrawCmd &c = dl->CmdBuffer[k];
+            if (c.UserCallback || !c.ElemCount) continue;
+            MenuCmd m;
+            m.clip[0] = c.ClipRect.x - dd->DisplayPos.x; m.clip[1] = c.ClipRect.y - dd->DisplayPos.y;
+            m.clip[2] = c.ClipRect.z - dd->DisplayPos.x; m.clip[3] = c.ClipRect.w - dd->DisplayPos.y;
+            m.idx_off = ibase + c.IdxOffset; m.vtx_off = vbase + c.VtxOffset; m.count = c.ElemCount;
+            g_cmd.push_back(m);
+        }
+    }
+    if (!g_cmd.Size) return 0;
+    out->vtx = g_vtx.Data; out->idx = g_idx.Data; out->cmd = g_cmd.Data;
+    out->nvtx = g_vtx.Size; out->nidx = g_idx.Size; out->ncmd = g_cmd.Size;
+    out->disp_w = dd->DisplaySize.x; out->disp_h = dd->DisplaySize.y;
+    return 1;
+}

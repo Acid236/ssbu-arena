@@ -18,6 +18,13 @@ static int g_gfx_latency = L1_LATENCY_DEFAULT;      /* track L1: latency = norma
 int gfx_latency(void) { gfx_options(); return g_gfx_latency; }
 static int g_gfx_runahead;                           /* track R1 round 5: runahead = off 0 | on 1 (r1_state.c); read with gfx_runahead() */
 int gfx_runahead(void) { gfx_options(); return g_gfx_runahead; }
+static int g_gfx_menu, g_gfx_volume = -1;          /* U1: menu = off | on; volume = auto | 0..100 */
+static char g_gfx_language[16];                      /* U1: language = auto ("") | a code */
+int gfx_menu(void) { gfx_options(); return g_gfx_menu; }
+static int g_gfx_stats;                              /* U1: stats_overlay = off | on */
+int gfx_stats_overlay(void) { gfx_options(); return g_gfx_stats; }
+int gfx_volume(void) { gfx_options(); return g_gfx_volume; }
+const char *gfx_language(void) { gfx_options(); return g_gfx_language; }
 
 static const char *const k_default_ini =
 "; graphics.ini: display and rendering options of the native build (read once at start by gfx_options.c).\r\n"
@@ -120,7 +127,26 @@ static const char *const k_default_ini =
 "; frame_time_overlay = off | on\r\n"
 ";   on: the average frame time of the last second in the window title ('.. fps - 16.67 ms per frame') and as a\r\n"
 ";   'frame-time:' line in the log. (Bars drawn into the picture are not implemented yet.)\r\n"
-"frame_time_overlay = off\r\n";
+"frame_time_overlay = off\r\n"
+"\r\n"
+"; menu = off | on\r\n"
+";   on: the settings menu over the game (F1, or hold - and press the right stick on a controller). It changes the keys of\r\n"
+";   this file and writes them here; the menu marks which ones need a restart. SSBU_MENU=1 / 0 wins over this key.\r\n"
+"menu = off\r\n"
+"\r\n"
+"; stats_overlay = off | on      (with menu = on)\r\n"
+";   on: a small box in the top right corner over the game: frames per second, frame time, online state, ping, input\r\n"
+";   delay, rollback frames, run-ahead. F2 (or the menu) switches it and writes this key.\r\n"
+"stats_overlay = off\r\n"
+"\r\n"
+"; volume = auto | 0 .. 100\r\n"
+";   The sound volume of the copies a person plays (ssbu_native.exe, ssbu_user.exe). auto = 100. Test copies stay silent;\r\n"
+";   SSBU_VOLUME=<0..100> wins. Music and effects apart: the game's own Options > Sound.\r\n"
+"volume = auto\r\n"
+"\r\n"
+"; language = auto | ja | en-US | en-GB | fr | fr-CA | de | it | es | es-419 | zh-Hans | zh-Hant | ko | nl | ru\r\n"
+";   auto: the Windows display language. SSBU_LANGUAGE=<code> wins. Read at start.\r\n"
+"language = auto\r\n";
 
 #define GFX_LOW_SCALE 0.5f
 #define GFX_LOW_SCALE_TEXT "0.50"
@@ -189,6 +215,10 @@ static BOOL CALLBACK opt_load(PINIT_ONCE once, PVOID arg, PVOID *ctx) {
         else if (!_stricmp(key, "latency")) g_gfx_latency = !_stricmp(val, "lowest") ? 2 : !_stricmp(val, "low") ? 1 : 0;      /* track L1 (display.c latency_mode) */
         else if (!_stricmp(key, "shader_prepare")) o->shader_prepare = !_stricmp(val, "background") ? 1 : !_stricmp(val, "off") ? 2 : 0;
         else if (!_stricmp(key, "shader_load")) o->shader_load = !_stricmp(val, "loading");
+        else if (!_stricmp(key, "stats_overlay")) g_gfx_stats = !_stricmp(val, "on") || !strcmp(val, "1");      /* U1 (menu.cpp, F2) */
+        else if (!_stricmp(key, "menu")) g_gfx_menu = !_stricmp(val, "on") || !strcmp(val, "1");      /* U1 (menu.cpp) */
+        else if (!_stricmp(key, "volume")) { g_gfx_volume = -1; if (_stricmp(val, "auto")) { int v = atoi(val); g_gfx_volume = v < 0 ? 0 : v > 100 ? 100 : v; } }
+        else if (!_stricmp(key, "language")) { g_gfx_language[0] = 0; if (_stricmp(val, "auto")) snprintf(g_gfx_language, sizeof g_gfx_language, "%s", val); }
         else unknown++;
     }
     if (f) fclose(f);
@@ -209,4 +239,47 @@ static BOOL CALLBACK opt_load(PINIT_ONCE once, PVOID arg, PVOID *ctx) {
 const GfxOptions *gfx_options(void) {
     InitOnceExecuteOnce(&g_once, opt_load, NULL, NULL);
     return &g_opt;
+}
+
+/* ---- U1, the settings menu (menu.cpp): changes while running, and the writer of graphics.ini */
+void gfx_set_overlay(int on) { gfx_options(); g_opt.overlay = on != 0; }
+/* `key = value` into the file: the first line that sets the key (not a comment) is replaced, every other line stays as it
+ * is; a key that is not in the file is appended. Written to <file>.tmp, then moved over the file. */
+int gfx_ini_set(const char *key, const char *value) {
+    const GfxOptions *o = gfx_options();
+    static CRITICAL_SECTION cs;
+    static volatile LONG cs_ready;
+    if (InterlockedCompareExchange(&cs_ready, 1, 0) == 0) { InitializeCriticalSection(&cs); cs_ready = 2; }
+    while (cs_ready != 2) Sleep(0);
+    EnterCriticalSection(&cs);
+    FILE *f = fopen(o->path, "rb");
+    char *old = NULL;
+    long n = 0;
+    if (f) { fseek(f, 0, SEEK_END); n = ftell(f); fseek(f, 0, SEEK_SET); old = malloc((size_t)n + 1); if (old) { n = (long)fread(old, 1, (size_t)n, f); old[n] = 0; } fclose(f); }
+    size_t cap = (size_t)n + strlen(key) + strlen(value) + 64, o2 = 0, kl = strlen(key);
+    char *out = malloc(cap), tmp[MAX_PATH + 8];
+    int done = 0, ok = 0;
+    if (!out) { free(old); LeaveCriticalSection(&cs); return 0; }
+    for (char *p = old; p && *p; ) {
+        char *e = strchr(p, '\n');
+        size_t l = e ? (size_t)(e - p) + 1 : strlen(p);
+        const char *q = p, *r;
+        while (*q == ' ' || *q == '\t') q++;
+        for (r = q + kl; *r == ' ' || *r == '\t'; r++) ;
+        if (!done && !_strnicmp(q, key, kl) && *r == '=') { o2 += (size_t)sprintf(out + o2, "%s = %s\r\n", key, value); done = 1; }
+        else { memcpy(out + o2, p, l); o2 += l; }
+        p += l;
+    }
+    if (!done) { if (o2 && out[o2 - 1] != '\n') { out[o2++] = '\r'; out[o2++] = '\n'; } o2 += (size_t)sprintf(out + o2, "%s = %s\r\n", key, value); }
+    snprintf(tmp, sizeof tmp, "%s.tmp", o->path);
+    if ((f = fopen(tmp, "wb")) != NULL) {
+        ok = fwrite(out, 1, o2, f) == o2;
+        ok = !fclose(f) && ok;
+        ok = ok && MoveFileExA(tmp, o->path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+    }
+    printf("graphics options: %s = %s %s %s\n", key, value, ok ? "written to" : "could NOT be written to", o->path);
+    fflush(stdout);
+    free(old); free(out);
+    LeaveCriticalSection(&cs);
+    return ok;
 }

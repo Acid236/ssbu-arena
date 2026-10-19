@@ -178,10 +178,13 @@ static int has_name(const VkExtensionProperties *e, uint32_t n, const char *name
 
 /* ---------------------------------------------------------------- swapchain */
 static void wait_last_submit(void);
+static void menu_vk_views_drop(void);                  /* U1 (nvn_vk_menu.c): its views of the swapchain images */
+static int g_mu_shot_src;                               /* U1: the swapchain images can be read back (SSBU_MENU_TEST only) */
 static void swapchain_destroy(void) {
     if (!V.swapchain) return;
     wait_last_submit();                                  /* also resets the fence for the next submit */
     vkDeviceWaitIdle(V.device);
+    menu_vk_views_drop();
     vkDestroySwapchainKHR(V.device, V.swapchain, NULL);
     V.swapchain = NULL; V.image_count = 0;
 }
@@ -208,6 +211,9 @@ static int swapchain_create(void) {
     ci.imageExtent = ext;
     ci.imageArrayLayers = 1;
     ci.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    {   const char *mt = getenv("SSBU_MENU_TEST");             /* U1, test only: the settings menu's picture is read back from the swapchain image */
+        g_mu_shot_src = mt && mt[0] && (caps.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+        if (g_mu_shot_src) ci.imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT; }
     ci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
     ci.preTransform = caps.currentTransform;
     ci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;

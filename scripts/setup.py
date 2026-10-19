@@ -24,6 +24,8 @@ Environment variables named RECOMP_* / SSBU_* are removed from the children's en
 options below, from LLVM_ROOT / SDL3_ROOT / VULKAN_HEADERS / GLSLANG_ROOT / SUYU_ROOT, or from <repo>/deps/<name>.
 libopus (the music) is optional: --opus, OPUS_DLL or <repo>/deps/opus; without it the build ends with a warning and the
 game's Opus streams are silent.
+Dear ImGui v1.91.9b (the in-game settings menu, F1) is optional too: --imgui, IMGUI_ROOT or <repo>/deps/imgui (a folder holding
+imgui.h and imgui.cpp); without it the build works and the menu is left out.
 """
 import argparse
 import json
@@ -106,6 +108,8 @@ class Ctx:
             env['GLSLANG_ROOT'] = t['glslang']
         if 'suyu' in t:
             env['SUYU_ROOT'] = t['suyu']
+        if 'imgui' in t:
+            env['IMGUI_ROOT'] = t['imgui']
         env.update(extra)
         return env
 
@@ -209,6 +213,16 @@ def step_deps(cx):
         say('  libopus  %s (MSYS2: the runtime loads it from there)' % msys)
     else:
         say('  libopus  NOT FOUND: the game will run, but its music and other Opus sounds will be silent (--opus <opus.dll or its folder>, BUILDING.md)')
+
+    # Dear ImGui: the in-game settings menu (F1). Optional: without it the runtime builds with a stub and F1 only logs why.
+    found = find_first([a.imgui, os.environ.get('IMGUI_ROOT'), os.path.join(deps, 'imgui')],
+                       lambda d: os.path.exists(os.path.join(d, 'imgui.h')) and os.path.exists(os.path.join(d, 'imgui.cpp')))
+    if found:
+        cx.tools['imgui'] = found
+        say('  %-8s %s' % ('imgui', found))
+    else:
+        say('  WARNING: Dear ImGui not found: the settings menu (F1) will be left out of the build (--imgui <folder with imgui.h>, '
+            'IMGUI_ROOT, deps\\imgui, or scripts/install.py fetches it; BUILDING.md)')
 
     # the dump
     dump = a.dump
@@ -467,6 +481,7 @@ def main():
     ap.add_argument('--glslang', help='glslang windows-x86_64 release folder (include\\, lib\\)')
     ap.add_argument('--suyu', help='source checkout of a yuzu-family emulator (only src\\core\\hle\\service\\mii is read)')
     ap.add_argument('--opus', help='libopus DLL (opus.dll or libopus-0.dll) or the folder holding it: the music (optional, BUILDING.md)')
+    ap.add_argument('--imgui', help='Dear ImGui v1.91.9b source folder (imgui.h, imgui.cpp): the in-game settings menu (optional; BUILDING.md)')
     ap.add_argument('--sdk-roots', help='another list of SDK functions to lift (default: tools/lifter/sdklift_roots.txt)')
     ap.add_argument('--modules', help='script modules to build: all (default) or a comma list, e.g. lua2cpp_common,lua2cpp_mario')
     ap.add_argument('--redo', help='repeat this step')

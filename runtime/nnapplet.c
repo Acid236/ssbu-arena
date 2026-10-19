@@ -312,7 +312,13 @@ static void swkbd_ShowKeyboard(Ctx *c) {
         else {
             k.header = header; k.sub = sub; k.guide = guide; k.initial = initial;
             k.max_len = max_len; k.min_len = min_len; k.password = rd32(arg + KC_PASSWORD) == 1;
-            confirmed = kbd_run_dialog(&k);
+            /* our own on-screen keyboard (osk.c, controller or PC keyboard) where the Vulkan renderer runs; the old
+             * Windows dialog only on the OpenGL path or when SSBU_SWKBD=dialog */
+            int osk_run(const wchar_t *header, const wchar_t *guide, const wchar_t *initial, int max_len, int min_len, int password, wchar_t *out);
+            const char *sv = getenv("SSBU_SWKBD");
+            confirmed = sv && !strcmp(sv, "dialog") ? -1
+                      : osk_run(header[0] ? header : sub, guide, attempt ? k.text : initial, max_len, min_len, k.password, k.text);
+            if (confirmed < 0) confirmed = kbd_run_dialog(&k);
         }
         if (!confirmed) break;
         uint64_t bytes = kbd_store(string, k.text, utf8);
@@ -332,7 +338,10 @@ static void swkbd_ShowKeyboard(Ctx *c) {
                 else copy_w(message, check_buf, 1000);
                 trace_printf("     nn::swkbd text check -> %d \"%ls\"\n", verdict, message);
                 if (mode != 0) break;                      /* a scripted answer that is refused counts as cancelled */
-                if (verdict == 2 && MessageBoxW(NULL, message, L"Software keyboard", MB_YESNO | MB_ICONQUESTION | MB_TOPMOST) == IDYES) verdict = 0;
+                int osk_message(const wchar_t *msg, int question);      /* osk.c: the message over our keyboard (-1 = not here) */
+                int said = osk_message(message, verdict == 2);
+                if (said >= 0) { if (verdict == 2 && said == 1) verdict = 0; }
+                else if (verdict == 2 && MessageBoxW(NULL, message, L"Software keyboard", MB_YESNO | MB_ICONQUESTION | MB_TOPMOST) == IDYES) verdict = 0;
                 else if (verdict != 2) MessageBoxW(NULL, message, L"Software keyboard", MB_OK | MB_ICONWARNING | MB_TOPMOST);
                 if (verdict) { wcsncpy(initial, k.text, SWKBD_MAX_CHARS); initial[SWKBD_MAX_CHARS] = 0; continue; }
             }
@@ -432,6 +441,7 @@ static const ImportDef applet_imports[] = {
 };
 
 void register_nnapplet_imports(void) {
+    { void osk_test_start(void); osk_test_start(); }      /* osk.c: SSBU_OSK_TEST only */
     int n = (int)(sizeof applet_imports / sizeof applet_imports[0]);
     for (int i = 0; i < n; i++)
         if (!import_data(applet_imports[i].name)) printf("nnapplet: \"%s\" is not an import of the game (typo?)\n", applet_imports[i].name);

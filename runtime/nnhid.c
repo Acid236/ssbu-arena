@@ -360,6 +360,7 @@ typedef struct { DWORD packet; XGamepad pad; } XState;
 typedef struct { WORD left, right; } XVibration;
 typedef struct { BYTE type, subtype; WORD flags; XGamepad pad; XVibration vib; } XCaps;
 static DWORD (WINAPI *x_get_state)(DWORD, XState *);
+static DWORD (WINAPI *x_get_state_ex)(DWORD, XState *);      /* U1: XInputGetStateEx (ordinal 100): the same plus the Guide bit 0x0400; absent from some DLLs */
 static DWORD (WINAPI *x_set_state)(DWORD, XVibration *);
 static DWORD (WINAPI *x_get_caps)(DWORD, DWORD, XCaps *);
 static struct { int present, wireless, dropped; ULONGLONG checked, read; XState st; XVibration sent; } g_x[4];
@@ -446,6 +447,7 @@ static void hid_setup(void) {
         HMODULE m = LoadLibraryA(dlls[i]);
         if (!m) continue;
         x_get_state = (void *)GetProcAddress(m, "XInputGetState");
+        if (x_get_state) x_get_state_ex = (void *)GetProcAddress(m, (LPCSTR)(uintptr_t)100);
         x_set_state = (void *)GetProcAddress(m, "XInputSetState");
         x_get_caps = (void *)GetProcAddress(m, "XInputGetCapabilities");
     }
@@ -508,11 +510,13 @@ static int player_connected(uint32_t id) {
     return x_present(g_source[id]);
 }
 
+int menu_input_blocked(void);                                 /* U1 (menu.cpp) */
 /* Player 1 gets the test scripts (SSBU_PRESS / SSBU_SCRIPT / SSBU_SEQ); the keyboard's player gets the real keys. */
 static int key_for(uint32_t id, int vk, int kbidx) {         /* vk = the fixed key of the test scripts; kbidx = which configurable binding (controllers.ini) the real keyboard uses */
     int down = 0;
     if (id == 0) down = scripted(vk) || script_key(vk) || seq_key(vk);
-    if (!down && (int)id == g_keyboard_player) {
+    /* U1 (menu.cpp): while the settings menu is open the real keyboard is its own */
+    if (!down && (int)id == g_keyboard_player && !menu_input_blocked()) {
         int real = sdl_on() ? nnpad_kb_vk(kbidx) : vk;
         down = real && keyboard_ours() && (GetAsyncKeyState(real) & 0x8000) != 0;
     }
@@ -563,13 +567,13 @@ static void fill_pad(uint64_t out, uint32_t id, int style_is_fullkey) {
         NnPadState ps;
         if (nnpad_get((int)id, &ps)) {
             wired = ps.wired;
-            if (devices_live()) {
+            if (devices_live() && !menu_input_blocked()) {      /* U1: not while the settings menu is open (menu.cpp) */
                 buttons |= ps.buttons;
                 if (ps.lx || ps.ly) { lx = ps.lx; ly = ps.ly; }
                 if (ps.rx || ps.ry || !rx) { rx = ps.rx; ry = ps.ry; }
             }
         }
-    } else if (x_present(slot) && devices_live()) {
+    } else if (x_present(slot) && devices_live() && !menu_input_blocked()) {
         const XGamepad *g = &g_x[slot].st.pad;
         static const struct { WORD x; int pos, label; } xmap[] = {
             {0x1000, BTN_B, BTN_A}, {0x2000, BTN_A, BTN_B}, {0x4000, BTN_Y, BTN_X}, {0x8000, BTN_X, BTN_Y},
@@ -603,6 +607,46 @@ static void fill_pad(uint64_t out, uint32_t id, int style_is_fullkey) {
     wr32(out + 0x18, (uint32_t)rx);
     wr32(out + 0x1c, (uint32_t)ry);
     wr32(out + 0x20, wired ? 3 : 1);                          /* NpadAttribute: bit 0 connected, bit 1 wired */
+}
+
+/* Our own menus and the on-screen keyboard (osk.c): the buttons of EVERY connected pad together, in the Npad bit order
+ * above, the left stick as the d-pad bits; bit 16 = a Home / Guide button, bit 17 = a Capture / Share button (U1, the
+ * settings menu: those two are never part of the game's state). No side effect on the game's own polls (no sampling number, no input sequence,
+ * no recording). The keyboard is not here: the menus read keys from the window (display.c). 0 in scripted runs. */
+uint64_t nnhid_menu_buttons(void) {
+    hid_setup();
+    if (scripted_run() || !devices_live()) return 0;
+    uint64_t b = 0;
+    int lx = 0, ly = 0;
+    for (int id = 0; id < 8; id++) {
+        if (sdl_on()) {
+            NnPadState ps;
+            if (nnpad_get(id, &ps)) { b |= ps.buttons; if (abs(ps.lx) > abs(lx)) lx = ps.lx; if (abs(ps.ly) > abs(ly)) ly = ps.ly; }
+            continue;
+        }
+        int slot = g_source[id];
+        if (!x_present(slot)) continue;
+        const XGamepad *g = &g_x[slot].st.pad;
+        static const struct { WORD x; int pos, label; } xmap[] = {
+            {0x1000, BTN_B, BTN_A}, {0x2000, BTN_A, BTN_B}, {0x4000, BTN_Y, BTN_X}, {0x8000, BTN_X, BTN_Y},
+            {0x0100, BTN_L, BTN_L}, {0x0200, BTN_R, BTN_R}, {0x0010, BTN_PLUS, BTN_PLUS}, {0x0020, BTN_MINUS, BTN_MINUS},
+            {0x0040, BTN_STICK_L, BTN_STICK_L}, {0x0080, BTN_STICK_R, BTN_STICK_R},
+            {0x0001, BTN_UP, BTN_UP}, {0x0002, BTN_DOWN, BTN_DOWN}, {0x0004, BTN_LEFT, BTN_LEFT}, {0x0008, BTN_RIGHT, BTN_RIGHT},
+        };
+        for (size_t i = 0; i < sizeof xmap / sizeof xmap[0]; i++)
+            if (g->buttons & xmap[i].x) b |= 1ull << (g_label_layout ? xmap[i].label : xmap[i].pos);
+        if (g->lt >= 85) b |= 1ull << BTN_ZL;
+        if (g->rt >= 85) b |= 1ull << BTN_ZR;
+        if (abs(g->lx) > abs(lx)) lx = g->lx;
+        if (abs(g->ly) > abs(ly)) ly = g->ly;
+        { XState ex; if (x_get_state_ex && !g_x_synth && x_get_state_ex((DWORD)slot, &ex) == 0 && (ex.pad.buttons & 0x0400)) b |= 1ull << 16; }      /* U1: Guide */
+    }
+    if (sdl_on()) { unsigned nnpad_menu_keys(void); unsigned k = nnpad_menu_keys(); b |= (uint64_t)(k & 1) << 16 | (uint64_t)(k >> 1 & 1) << 17; }
+    if (lx < -STICK_MAX / 2) b |= 1ull << BTN_LEFT;
+    if (lx > STICK_MAX / 2) b |= 1ull << BTN_RIGHT;
+    if (ly > STICK_MAX / 2) b |= 1ull << BTN_UP;
+    if (ly < -STICK_MAX / 2) b |= 1ull << BTN_DOWN;
+    return b;
 }
 
 static void hid_InitializeNpad(Ctx *c) { (void)c; hid_setup(); }

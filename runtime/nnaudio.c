@@ -93,6 +93,7 @@ static unsigned g_rel_head, g_rel_tail;
 static LARGE_INTEGER g_freq;
 static LONGLONG g_clock_due;
 static float g_volume = 1.0f;                         /* output volume of the active device */
+static int g_host_percent = -1;                      /* U1: the host volume set at open (0..100), -1 before; nnaudio_set_volume changes it */
 static const char g_device_name[] = "AudioTvOutput";
 /* statistics, protected by g_lock */
 static unsigned long long g_total_appended, g_total_released, g_total_dropped, g_nonsilent_seconds;
@@ -272,11 +273,14 @@ static void audio_OpenDefaultAudioOut(Ctx *c) {       /* (AudioOut *, nn::os::Sy
             char exe[MAX_PATH] = "";
             GetModuleFileNameA(NULL, exe, sizeof exe);
             const char *base = strrchr(exe, '\\') ? strrchr(exe, '\\') + 1 : exe, *vol = getenv("SSBU_VOLUME");
-            int percent = vol ? atoi(vol) : (!_stricmp(base, "ssbu_native.exe") || !_stricmp(base, "ssbu_user.exe")) ? 100 : 0;
+            int gfx_volume(void);                     /* U1: graphics.ini volume = auto | 0..100, for the copies a person plays only (gfx_options.c) */
+            int person = !_stricmp(base, "ssbu_native.exe") || !_stricmp(base, "ssbu_user.exe");
+            int percent = vol ? atoi(vol) : person ? (gfx_volume() >= 0 ? gfx_volume() : 100) : 0;
             if (percent < 0) percent = 0;
             if (percent > 100) percent = 100;
             DWORD level = (DWORD)(0xffff * percent / 100);
             waveOutSetVolume(g_wave, level | level << 16);
+            g_host_percent = percent;
             printf("nn::audio: host volume %d%%%s\n", percent, percent ? "" : " (test copy: silent; SSBU_VOLUME=<0..100> to change)");
         }
     }
@@ -706,4 +710,17 @@ void register_audio_imports(void) {
     g_wake = CreateEventA(NULL, FALSE, FALSE, NULL);
     CreateThread(NULL, 0, audio_thread, NULL, 0, NULL);
     register_imports(audio_imports, (int)(sizeof audio_imports / sizeof audio_imports[0]));
+}
+
+/* U1, the settings menu (menu.cpp): the host output volume (the game's whole mix; music and effects apart are the game's
+ * own Options > Sound). -1 = no output device yet. */
+int nnaudio_volume(void) { return g_wave ? g_host_percent : -1; }
+void nnaudio_set_volume(int percent) {
+    if (percent < 0) percent = 0;
+    if (percent > 100) percent = 100;
+    if (!g_wave) return;
+    DWORD level = (DWORD)(0xffff * percent / 100);
+    waveOutSetVolume(g_wave, level | level << 16);
+    g_host_percent = percent;
+    printf("nn::audio: host volume %d%% (settings menu)\n", percent);
 }

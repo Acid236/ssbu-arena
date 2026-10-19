@@ -4732,6 +4732,12 @@ unsigned long nvn_front_present_tid(void) { return g_pf_main_tid; }      /* the 
  * render thread (in order with the other jobs; nobody waits for it). */
 void nvn_vk_present_flush_job(void *arg);              /* nvn_vk_draw.c */
 void nvn_front_post_present_flush(void) { if (g_vk) gl_post(nvn_vk_present_flush_job, NULL, 0); }
+/* osk.c, the on-screen keyboard: drawn by the Vulkan renderer only (the OpenGL path keeps the old text dialog) */
+void nvn_vk_osk_redraw_job(void *arg);                 /* nvn_vk_draw.c */
+long long nvn_vk_presents(void);                       /* nvn_vk_draw.c */
+int nvn_front_osk_ready(void) { return g_vk != 0; }
+void nvn_front_osk_redraw(void) { if (g_vk) gl_post(nvn_vk_osk_redraw_job, NULL, 0); }
+long long nvn_front_presents(void) { return g_vk ? nvn_vk_presents() : 0; }
 /* ---- Track L1 (input latency), early present. The game submits the commands of a frame's picture BEFORE it waits for the
  * window texture (nvnSyncWait on the acquire sync = display_wait_refresh), then reads the pad, runs that frame's logic and
  * only then calls nvnQueuePresentTexture for the picture it had finished before the wait (measured: tests\logs\vk13_l1t_*,
