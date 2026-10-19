@@ -115,7 +115,7 @@ def step_dump(a):
         return p
     base, upd = plain(a.base, 'base'), plain(a.update, 'update')
     say('2. Game files: making build\\dump (about 17 GB, several minutes)')
-    subprocess.run([sys.executable, os.path.join(ext, 'dump_folder.py'), base, upd, dump], check=True)
+    subprocess.run([sys.executable, os.path.join(ext, 'dump_folder.py'), base, upd, dump] + (['--firmware', a.firmware] if a.firmware else []), check=True)
     return dump
 
 
@@ -174,6 +174,7 @@ def step_tools(dump):
     ok = os.path.exists(vsw) and subprocess.run([vsw, '-latest', '-products', '*', '-requires', 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64',
                                                  '-property', 'installationPath'], capture_output=True, text=True).stdout.strip()
     if not ok:
+        say('3. Tools: the MSVC Build Tools are missing.')
         sys.exit('3. Tools: the MSVC Build Tools are missing. Install them with this command (it asks for administrator rights), then '
                  'start the installer again:\n\n  winget install Microsoft.VisualStudio.2022.BuildTools --override "--quiet --wait '
                  '--add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"\n')
@@ -191,7 +192,7 @@ def step_tools(dump):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument('--no-gui', action='store_true')
-    ap.add_argument('--base'), ap.add_argument('--update'), ap.add_argument('--keys'), ap.add_argument('--dump')
+    ap.add_argument('--base'), ap.add_argument('--update'), ap.add_argument('--keys'), ap.add_argument('--dump'), ap.add_argument('--firmware')
     ap.add_argument('--jobs', type=int)
     ap.add_argument('--prepare-only', action='store_true', help='stop before the build (steps 1-3 only)')
     a = ap.parse_args()
