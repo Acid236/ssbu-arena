@@ -87,7 +87,7 @@ IP=$(oci compute instance list-vnics --instance-id "$ID" --query 'data[0]."publi
 [ -n "$IP" ] && [ "$IP" != "null" ] || { say "the VM has no public IP: its subnet must be the public one"; exit 1; }
 
 say "5. the lobby on $IP"
-SSH=(ssh -i ~/.ssh/ssbu_lobby -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 "ubuntu@$IP")
+SSH=(ssh -n -i ~/.ssh/ssbu_lobby -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 "ubuntu@$IP")      # -n: run through "curl | bash", ssh must not read the rest of the script from stdin
 for i in $(seq 1 30); do "${SSH[@]}" true 2>/dev/null && break; sleep 10; done
 "${SSH[@]}" "set -e; mkdir -p ssbu && cd ssbu && curl -fsSLO $REPO_RAW/tools/net/ssbu_lobby.py && curl -fsSLO $REPO_RAW/tools/net/deploy_lobby.sh && sudo bash deploy_lobby.sh $PORT"
 say "DONE. Lobby address for the players: $IP:$PORT  (online_server = $IP:$PORT)"
