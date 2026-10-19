@@ -170,6 +170,7 @@ void nnnet_register_final(void) {                          /* after every other 
     register_imports(defs, (int)(sizeof defs / sizeof defs[0]));
     c4a_register();
     c5a_register();
+    { void nnldn_register(void); nnldn_register(); }      /* online play (nnldn.c): does nothing unless SSBU_ONLINE / online_server is set */
 }
 
 /* ---------------------------------------------------------------- self-test */

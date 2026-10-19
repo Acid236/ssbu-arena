@@ -20,6 +20,8 @@ Nothing has to be installed first.
    double-click it again and it goes on from there.
 3. Double-click **`Play SSBU.bat`** (your saves go to `build\saves`).
 
+Online play (experimental: Local Wireless over a LAN, a room code or a lobby server): [docs/ONLINE.md](docs/ONLINE.md).
+
 The rest of this page is the same build done by hand, step by step.
 
 ## By hand
