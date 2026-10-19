@@ -1608,6 +1608,9 @@ static void pw_gate(void) {
     printf("nvn_gl: shader preparation held the present of frame %lld for %.2f s (%lld jobs)%c", (long long)g_st.frames + 1, (double)(pf_now() - t0) / (double)freq, (long long)(g_shw_done - start_done), 10);
 }
 static DWORD WINAPI shd_worker(LPVOID arg) {
+#ifndef _WIN32
+    (void)arg; InterlockedIncrement(&g_shw_ctx_failed); return 0;      /* Linux build: no OpenGL renderer */
+#else
     PIXELFORMATDESCRIPTOR pfd;
     (void)arg;
     HWND w = CreateWindowExA(0, "STATIC", "", WS_POPUP, 0, 0, 8, 8, NULL, NULL, NULL, NULL);
@@ -1670,6 +1673,7 @@ static DWORD WINAPI shd_worker(LPVOID arg) {
         InterlockedIncrement64(&g_shw_done);
         free(j);
     }
+#endif
 }
 static void shd_workers_start(void) {
     const char *e = getenv("SSBU_SHADER_WORKERS");
@@ -3520,12 +3524,16 @@ static void save_bmp(const char *path, Tex *t) {
 
 /* Frame times (present to present) of the last 300 frames and CPU time per thread, printed with the frame-rate line. */
 #include <tlhelp32.h>
+#ifndef _WIN32
+#include <dirent.h>
+#endif
 static double g_pf_ft[300];
 static struct { DWORD tid; ULONGLONG cpu; } g_pf_thr[512];
 static int g_pf_nthr;
 static DWORD g_pf_main_tid;
 const char *guest_thread_name_of(DWORD tid);                             /* os_threads.c */
 static int pf_cmp_d(const void *a, const void *b) { double x = *(const double *)a, y = *(const double *)b; return x < y ? -1 : x > y; }
+#ifdef _WIN32
 static void pf_threads(double frames) {
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
     THREADENTRY32 te;
@@ -3562,6 +3570,46 @@ static void pf_threads(double frames) {
     }
     printf("\n");
 }
+#else
+static void pf_threads(double frames) {                 /* Linux build: /proc/self/task/<tid>/stat, utime + stime */
+    struct { DWORD tid; double ms; } top[512];
+    int n = 0;
+    double total = 0;
+    long hz = sysconf(_SC_CLK_TCK);
+    DIR *d = opendir("/proc/self/task");
+    struct dirent *de;
+    if (!d) return;
+    while ((de = readdir(d))) {
+        DWORD tid = (DWORD)strtoul(de->d_name, NULL, 10);
+        char sp[96], buf[512];
+        if (!tid) continue;
+        snprintf(sp, sizeof sp, "/proc/self/task/%lu/stat", (unsigned long)tid);
+        FILE *f = fopen(sp, "r");
+        if (!f) continue;
+        size_t k = fread(buf, 1, sizeof buf - 1, f); fclose(f); buf[k] = 0;
+        const char *rp = strrchr(buf, ')');
+        unsigned long long ut = 0, st = 0;
+        if (!rp || sscanf(rp + 2, "%*c %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u %llu %llu", &ut, &st) != 2) continue;
+        ULONGLONG cpu = (ut + st) * 10000000ull / (ULONGLONG)(hz > 0 ? hz : 100), prev = 0;
+        int i;
+        for (i = 0; i < g_pf_nthr && g_pf_thr[i].tid != tid; i++) {}
+        if (i < g_pf_nthr) prev = g_pf_thr[i].cpu; else if (g_pf_nthr < 512) { g_pf_thr[g_pf_nthr].tid = tid; i = g_pf_nthr++; }
+        if (i < 512) g_pf_thr[i].cpu = cpu;
+        if (n < 512) { top[n].tid = tid; top[n].ms = (double)(cpu - prev) / 10000.0 / frames; total += top[n].ms; n++; }
+    }
+    closedir(d);
+    printf("nvn_perf: cpu ms/frame by thread (all %.1f):", total);
+    for (int k = 0; k < 10; k++) {
+        int best = -1;
+        for (int i = 0; i < n; i++) if (top[i].ms > 0 && (best < 0 || top[i].ms > top[best].ms)) best = i;
+        if (best < 0 || top[best].ms < 0.05) break;
+        const char *g = guest_thread_name_of(top[best].tid);
+        printf(" %s %.1f", g ? g : top[best].tid == g_render_tid ? "render" : "host", top[best].ms);
+        top[best].ms = 0;
+    }
+    printf("\n");
+}
+#endif
 static DWORD WINAPI pf_threads_thread(LPVOID arg) { for (;;) { WaitForSingleObject((HANDLE)arg, INFINITE); pf_threads(300.0); } }
 static void pf_frame_mark(LONG64 frame) {
     static LONG64 last, freq, snap[PF_N], snapn[PF_N], b0[3];
@@ -3676,7 +3724,9 @@ static void job_present(void *arg) {
         glClearColor(0, 0, 0, 1);                 /* nothing has been drawn into the presented texture yet */
         glClear(GL_COLOR_BUFFER_BIT);
     }
+#ifdef _WIN32
     { LONG64 pf1 = pf_now(); HS_IN("SwapBuffers", 0); SwapBuffers(g_dc); HS_OUT(); pf_add(PF_SWAP, pf1); }
+#endif
     pf_add(PF_PRESENT, pf0);
     pf_frame_mark(frame);
     g_joblog_cur = frame;
@@ -3754,7 +3804,11 @@ static DWORD WINAPI render_thread(LPVOID arg) {
     (void)arg;
     pf_job_submit = g_rb->submit; pf_job_present = g_rb->present;
     g_joblog_frame = getenv("SSBU_JOBLOG") ? atoi(getenv("SSBU_JOBLOG")) : 0;
+#ifdef _WIN32
     PIXELFORMATDESCRIPTOR pfd;
+#else
+    int pfd = 0;
+#endif
     g_render_tid = GetCurrentThreadId();
     {   /* Round 17, MEASUREMENT: SSBU_RENDER_PRIO=1 above normal, 2 highest (default: normal, as before). The game's own
          * threads run above normal when the game asked for a priority under 16 (os_threads.c host_priority). */
@@ -3769,6 +3823,10 @@ static DWORD WINAPI render_thread(LPVOID arg) {
         render_loop();
         return 0;
     }
+#ifndef _WIN32
+    (void)pfd;
+    printf("nvn_gl: the OpenGL renderer is not part of the Linux build\n"); fflush(stdout); ExitProcess(5);
+#else
     g_dc = GetDC(g_hwnd);
     memset(&pfd, 0, sizeof pfd);
     pfd.nSize = sizeof pfd; pfd.nVersion = 1;
@@ -3835,6 +3893,7 @@ static DWORD WINAPI render_thread(LPVOID arg) {
     glClearColor(0, 0, 0, 1);
     glClear(GL_COLOR_BUFFER_BIT);
     SwapBuffers(g_dc);
+#endif
     fflush(stdout);
     shd_init();
     hitch_set_render();
@@ -3852,6 +3911,9 @@ void nvn_gl_start(void *hwnd) {
         if (e && e[0] && strcmp(e, "gl") && strcmp(e, "vk")) { printf("nvn: SSBU_RENDERER=%s is not a renderer (gl, vk)\n", e); fflush(stdout); ExitProcess(5); }
         /* Track V session 4: VULKAN IS THE DEFAULT. SSBU_RENDERER=gl|vk wins; else renderer = vulkan | opengl of config\graphics.ini. */
         g_vk = e && e[0] ? !strcmp(e, "vk") : !gfx_options()->renderer;
+#ifndef _WIN32
+        if (!g_vk) { printf("nvn: the OpenGL renderer is not part of the Linux build: Vulkan instead\n"); g_vk = 1; }
+#endif
         g_rb = g_vk ? &rb_vk : &rb_gl;
         printf("nvn: renderer: %s (%s)\n", g_vk ? "Vulkan (nvn_vk.c)" : "OpenGL (nvn_gl.c)", e && e[0] ? "SSBU_RENDERER" : "graphics.ini; the default is Vulkan");
     }
@@ -4371,7 +4433,11 @@ static void cmd_get_control_size(Ctx *c) { RET(cb_get(A0)->ctrl_size); }
 static void cmd_is_recording(Ctx *c) { RET(cb_get(A0)->recording); }
 /* L1 round 2, TEST ONLY (SSBU_L1_TRACE=1 with SSBU_L1=1): for the 5 presents after the first press, every command-buffer
  * recording, submission, fence, sync wait, window acquire and present, with the guest thread name and the guest return address. */
+#ifdef _WIN32
 int display_l1_trace(void); double display_l1_ms(void); const char *guest_thread_name_of(unsigned long tid);
+#else
+int display_l1_trace(void); double display_l1_ms(void); const char *guest_thread_name_of(DWORD tid);
+#endif
 #define L1T(...) do { if (display_l1_trace()) { char l1b_[240]; snprintf(l1b_, sizeof l1b_, __VA_ARGS__); printf("l1-trace: %+8.2f %-26s lr %09llx %s%c", display_l1_ms(), guest_thread_name_of(GetCurrentThreadId()) ? guest_thread_name_of(GetCurrentThreadId()) : "?", (unsigned long long)c->x[30], l1b_, 10); } } while (0)
 static void cmd_begin(Ctx *c) { L1T("begin recording cb %llx", (unsigned long long)A0); CmdBuf *cb = cb_get(A0); cb->len = 0; cb->recording = 1; cb->rec_cmd = cb->rec_ctrl = 0; cb->dispatches = 0; }
 static void cmd_end(Ctx *c) {

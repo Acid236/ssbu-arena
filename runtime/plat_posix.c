@@ -1,0 +1,1651 @@
+/* Linux build: the Win32 functions of plat/windows.h on POSIX. Compiled into the exe only off Windows. */
+#define _GNU_SOURCE
+#include "plat/windows.h"
+#include <errno.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <dirent.h>
+#include <fnmatch.h>
+#include <dlfcn.h>
+#include <link.h>
+#include <limits.h>
+#include <ucontext.h>
+#include <sys/uio.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/statvfs.h>
+#include <sys/time.h>
+#include <sys/resource.h>
+#include <sys/syscall.h>
+#include <sys/sysinfo.h>
+#include <linux/futex.h>
+#include <linux/userfaultfd.h>
+#include <linux/fs.h>
+#include <sys/ioctl.h>
+#include <SDL3/SDL.h>
+#include <sys/random.h>
+#include <signal.h>
+#include <pwd.h>
+#include <unwind.h>
+
+#undef fopen
+#undef remove
+#undef rename
+
+/* GetLastError: per thread, as on Windows; a failing POSIX call's errno becomes the nearest ERROR_ code (err_from_errno). */
+static __thread DWORD t_lasterr;
+DWORD GetLastError(void) { return t_lasterr; }
+void SetLastError(DWORD e) { t_lasterr = e; }
+static DWORD err_from_errno(int e) {
+    switch (e) {
+    case 0: return ERROR_SUCCESS;
+    case ENOENT: return ERROR_FILE_NOT_FOUND;
+    case ENOTDIR: return ERROR_PATH_NOT_FOUND;
+    case EACCES: case EPERM: case EROFS: return ERROR_ACCESS_DENIED;
+    case EBADF: return ERROR_INVALID_HANDLE;
+    case ENOMEM: return ERROR_NOT_ENOUGH_MEMORY;
+    case EEXIST: return ERROR_ALREADY_EXISTS;
+    case ENOTEMPTY: return ERROR_DIR_NOT_EMPTY;
+    case ENOSPC: return ERROR_DISK_FULL;
+    case EINVAL: return ERROR_INVALID_PARAMETER;
+    default: return 0x1F;    /* ERROR_GEN_FAILURE */
+    }
+}
+static BOOL fail_errno(void) { t_lasterr = err_from_errno(errno); return FALSE; }
+
+/* ================================================================ time */
+/* QueryPerformanceCounter: CLOCK_MONOTONIC in 100 ns units at a fixed 10 MHz frequency, which is what Windows 10/11 report. */
+static int64_t mono_ns(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec; }
+BOOL QueryPerformanceCounter(LARGE_INTEGER *t) { t->QuadPart = mono_ns() / 100; return TRUE; }
+BOOL QueryPerformanceFrequency(LARGE_INTEGER *f) { f->QuadPart = 10000000; return TRUE; }
+ULONGLONG GetTickCount64(void) { return (ULONGLONG)(mono_ns() / 1000000); }
+DWORD GetTickCount(void) { return (DWORD)GetTickCount64(); }
+#define EPOCH_1601 116444736000000000ULL           /* 100 ns intervals from 1601-01-01 to 1970-01-01 */
+static void ft_set(FILETIME *ft, uint64_t v) { ft->dwLowDateTime = (DWORD)v; ft->dwHighDateTime = (DWORD)(v >> 32); }
+static uint64_t ts_to_ft(const struct timespec *ts) { return EPOCH_1601 + (uint64_t)ts->tv_sec * 10000000ULL + (uint64_t)ts->tv_nsec / 100; }
+void GetSystemTimeAsFileTime(FILETIME *ft) { struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts); ft_set(ft, ts_to_ft(&ts)); }
+static void tm_to_st(const struct tm *tm, long ns, SYSTEMTIME *st) {
+    st->wYear = (WORD)(tm->tm_year + 1900); st->wMonth = (WORD)(tm->tm_mon + 1); st->wDayOfWeek = (WORD)tm->tm_wday; st->wDay = (WORD)tm->tm_mday;
+    st->wHour = (WORD)tm->tm_hour; st->wMinute = (WORD)tm->tm_min; st->wSecond = (WORD)tm->tm_sec; st->wMilliseconds = (WORD)(ns / 1000000);
+}
+void GetSystemTime(SYSTEMTIME *st) { struct timespec ts; struct tm tm; clock_gettime(CLOCK_REALTIME, &ts); gmtime_r(&ts.tv_sec, &tm); tm_to_st(&tm, ts.tv_nsec, st); }
+void GetLocalTime(SYSTEMTIME *st) { struct timespec ts; struct tm tm; clock_gettime(CLOCK_REALTIME, &ts); localtime_r(&ts.tv_sec, &tm); tm_to_st(&tm, ts.tv_nsec, st); }
+BOOL GetSystemTimes(FILETIME *idle, FILETIME *kernel, FILETIME *user) {
+    /* /proc/stat, USER_HZ ticks; kernel includes idle, as on Windows */
+    unsigned long long u = 0, n = 0, s = 0, i = 0, w = 0, q = 0, sq = 0;
+    FILE *f = fopen("/proc/stat", "r");
+    if (!f) return FALSE;
+    int got = fscanf(f, "cpu %llu %llu %llu %llu %llu %llu %llu", &u, &n, &s, &i, &w, &q, &sq);
+    fclose(f);
+    if (got < 4) return FALSE;
+    long hz = sysconf(_SC_CLK_TCK);
+    uint64_t k = 10000000ULL / (uint64_t)(hz > 0 ? hz : 100);
+    if (idle) ft_set(idle, (i + w) * k);
+    if (kernel) ft_set(kernel, (s + q + sq + i + w) * k);
+    if (user) ft_set(user, (u + n) * k);
+    return TRUE;
+}
+BOOL GetProcessTimes(HANDLE p, FILETIME *create, FILETIME *exit_, FILETIME *kernel, FILETIME *user) {
+    (void)p;
+    struct rusage ru;
+    getrusage(RUSAGE_SELF, &ru);
+    if (create) ft_set(create, 0);
+    if (exit_) ft_set(exit_, 0);
+    if (kernel) ft_set(kernel, (uint64_t)ru.ru_stime.tv_sec * 10000000ULL + (uint64_t)ru.ru_stime.tv_usec * 10);
+    if (user) ft_set(user, (uint64_t)ru.ru_utime.tv_sec * 10000000ULL + (uint64_t)ru.ru_utime.tv_usec * 10);
+    return TRUE;
+}
+/* Sleep(0) gives up the processor (sched_yield) as on Windows; other times are not rounded to a timer period (timeBeginPeriod is a no-op here). */
+void Sleep(DWORD ms) {
+    if (!ms) { sched_yield(); return; }
+    struct timespec ts = {ms / 1000, (long)(ms % 1000) * 1000000L};
+    while (nanosleep(&ts, &ts) && errno == EINTR) {}
+}
+
+/* ================================================================ condition variables, init-once */
+/* CONDITION_VARIABLE: a futex on a wake counter. As on Windows a waiter can return without a Wake (callers loop on their
+ * condition), and a timeout returns FALSE with ERROR_TIMEOUT. */
+static long futex(volatile uint32_t *a, int op, uint32_t v, const struct timespec *ts) { return syscall(SYS_futex, a, op, v, ts, NULL, 0); }
+static BOOL cv_wait(CONDITION_VARIABLE *cv, DWORD ms, void (*unlock)(void *), void (*lock)(void *), void *l) {
+    uint32_t seq = __atomic_load_n(&cv->seq, __ATOMIC_SEQ_CST);
+    unlock(l);
+    long r;
+    if (ms == INFINITE) r = futex(&cv->seq, FUTEX_WAIT_PRIVATE, seq, NULL);
+    else { struct timespec ts = {ms / 1000, (long)(ms % 1000) * 1000000L}; r = futex(&cv->seq, FUTEX_WAIT_PRIVATE, seq, &ts); }
+    int e = errno;
+    lock(l);
+    if (r == -1 && e == ETIMEDOUT) { t_lasterr = 1460; return FALSE; }      /* ERROR_TIMEOUT */
+    return TRUE;
+}
+static void cs_unlock(void *l) { pthread_mutex_unlock(l); }
+static void cs_lock(void *l) { pthread_mutex_lock(l); }
+static void srw_unlock(void *l) { pthread_rwlock_unlock(l); }
+static void srw_lock_x(void *l) { pthread_rwlock_wrlock(l); }
+static void srw_lock_s(void *l) { pthread_rwlock_rdlock(l); }
+BOOL SleepConditionVariableCS(CONDITION_VARIABLE *cv, CRITICAL_SECTION *cs, DWORD ms) { return cv_wait(cv, ms, cs_unlock, cs_lock, cs); }
+BOOL SleepConditionVariableSRW(CONDITION_VARIABLE *cv, SRWLOCK *l, DWORD ms, ULONG flags) {
+    return cv_wait(cv, ms, srw_unlock, (flags & CONDITION_VARIABLE_LOCKMODE_SHARED) ? srw_lock_s : srw_lock_x, l);
+}
+void WakeConditionVariable(CONDITION_VARIABLE *cv) { __atomic_add_fetch(&cv->seq, 1, __ATOMIC_SEQ_CST); futex(&cv->seq, FUTEX_WAKE_PRIVATE, 1, NULL); }
+void WakeAllConditionVariable(CONDITION_VARIABLE *cv) { __atomic_add_fetch(&cv->seq, 1, __ATOMIC_SEQ_CST); futex(&cv->seq, FUTEX_WAKE_PRIVATE, INT_MAX, NULL); }
+void InitializeCriticalSection(CRITICAL_SECTION *cs) {         /* a CRITICAL_SECTION is re-entrant on Windows: a recursive mutex */
+    pthread_mutexattr_t a;
+    pthread_mutexattr_init(&a);
+    pthread_mutexattr_settype(&a, PTHREAD_MUTEX_RECURSIVE);
+    pthread_mutex_init(cs, &a);
+    pthread_mutexattr_destroy(&a);
+}
+BOOL InitOnceExecuteOnce(INIT_ONCE *once, PINIT_ONCE_FN fn, PVOID param, PVOID *ctx) {
+    /* 0 not run, 1 running, 2 done. Per object (a callback may start another init-once); a failed callback lets the next caller retry. */
+    for (;;) {
+        int st = __atomic_load_n(&once->state, __ATOMIC_ACQUIRE);
+        if (st == 2) return TRUE;
+        if (st == 0 && __atomic_compare_exchange_n(&once->state, &st, 1, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            BOOL ok = fn(once, param, ctx);
+            __atomic_store_n(&once->state, ok ? 2 : 0, __ATOMIC_RELEASE);
+            return ok;
+        }
+        sched_yield();
+    }
+}
+
+/* ================================================================ handle objects */
+enum { PO_THREAD = 1, PO_EVENT, PO_SEM, PO_MUTEX, PO_TIMER, PO_FILE, PO_FIND, PO_MAPPING, PO_MODULE };
+typedef struct PlatObj {
+    int kind;
+    volatile int refs;
+    pthread_mutex_t m;
+    pthread_cond_t cv;
+    int signaled, manual;            /* events; threads: signaled = finished */
+    LONG count, maxcount;            /* semaphores */
+    pthread_t owner; int depth;      /* mutexes */
+    int64_t due_ns;                  /* timers: CLOCK_MONOTONIC deadline */
+    /* threads */
+    pthread_t th; pid_t tid; DWORD exit_code; int started;
+    LPTHREAD_START_ROUTINE fn; LPVOID arg;
+    /* files, finds, mappings */
+    int fd;
+    DIR *dir; char dir_path[MAX_PATH]; char pattern[MAX_PATH];
+    size_t map_size;
+} PlatObj;
+#define PSEUDO_PROCESS ((HANDLE)(intptr_t)-1)
+#define PSEUDO_THREAD ((HANDLE)(intptr_t)-2)
+
+static pthread_condattr_t g_cv_mono;
+static pthread_once_t g_cv_once = PTHREAD_ONCE_INIT;
+static void cv_attr_init(void) { pthread_condattr_init(&g_cv_mono); pthread_condattr_setclock(&g_cv_mono, CLOCK_MONOTONIC); }
+static PlatObj *obj_new(int kind) {
+    pthread_once(&g_cv_once, cv_attr_init);
+    PlatObj *o = calloc(1, sizeof *o);
+    o->kind = kind; o->refs = 1; o->fd = -1;
+    pthread_mutex_init(&o->m, NULL);
+    pthread_cond_init(&o->cv, &g_cv_mono);
+    return o;
+}
+static void obj_release(PlatObj *o) {
+    if (__atomic_sub_fetch(&o->refs, 1, __ATOMIC_ACQ_REL)) return;
+    if (o->fd >= 0) close(o->fd);
+    if (o->dir) closedir(o->dir);
+    pthread_mutex_destroy(&o->m);
+    pthread_cond_destroy(&o->cv);
+    free(o);
+}
+#define FD_TAG 0x7f0000000000ULL                 /* _get_osfhandle: FD_TAG + fd */
+#define PID_TAG 0x7e0000000000ULL                /* OpenProcess: PID_TAG + pid */
+static int is_tagged(HANDLE h, uint64_t tag) { return ((uint64_t)(uintptr_t)h & ~0xffffffffULL) == tag; }
+static int is_obj(HANDLE h) { return h && h != INVALID_HANDLE_VALUE && h != PSEUDO_THREAD && h != PSEUDO_PROCESS && !is_tagged(h, FD_TAG) && !is_tagged(h, PID_TAG); }
+
+/* threads */
+static __thread PlatObj *t_self;
+static void *thread_tramp(void *p) {
+    PlatObj *o = p;
+    t_self = o;
+    o->tid = (pid_t)syscall(SYS_gettid);
+    pthread_mutex_lock(&o->m);
+    while (!o->started) pthread_cond_wait(&o->cv, &o->m);     /* CREATE_SUSPENDED: held until ResumeThread */
+    pthread_mutex_unlock(&o->m);
+    DWORD r = o->fn(o->arg);
+    pthread_mutex_lock(&o->m);
+    o->exit_code = r; o->signaled = 1;
+    pthread_cond_broadcast(&o->cv);
+    pthread_mutex_unlock(&o->m);
+    obj_release(o);
+    return NULL;
+}
+HANDLE CreateThread(SECURITY_ATTRIBUTES *sa, SIZE_T stack, LPTHREAD_START_ROUTINE fn, LPVOID arg, DWORD flags, DWORD *tid) {
+    (void)sa;
+    PlatObj *o = obj_new(PO_THREAD);
+    o->fn = fn; o->arg = arg; o->refs = 2; o->started = !(flags & CREATE_SUSPENDED); o->exit_code = STILL_ACTIVE;
+    pthread_attr_t a;
+    pthread_attr_init(&a);
+    pthread_attr_setstacksize(&a, stack ? (stack < (1 << 20) ? (1 << 20) : stack) : (SIZE_T)8 << 20);   /* Windows default: 1 MB; ours: 8 MB */
+    pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED);
+    int e = pthread_create(&o->th, &a, thread_tramp, o);
+    pthread_attr_destroy(&a);
+    if (e) { free(o); t_lasterr = err_from_errno(e); return NULL; }
+    if (tid) { while (!__atomic_load_n(&o->tid, __ATOMIC_ACQUIRE)) sched_yield(); *tid = (DWORD)o->tid; }
+    return o;
+}
+DWORD ResumeThread(HANDLE h) {
+    if (!is_obj(h)) return (DWORD)-1;
+    PlatObj *o = h;
+    pthread_mutex_lock(&o->m);
+    DWORD was = o->started ? 0 : 1;
+    o->started = 1;
+    pthread_cond_broadcast(&o->cv);
+    pthread_mutex_unlock(&o->m);
+    return was;
+}
+DWORD SuspendThread(HANDLE h) { (void)h; return (DWORD)-1; }      /* pthreads cannot stop another thread: failure, which every caller (diagnostics) handles */
+HANDLE GetCurrentThread(void) { return PSEUDO_THREAD; }
+HANDLE GetCurrentProcess(void) { return PSEUDO_PROCESS; }
+DWORD GetCurrentThreadId(void) { static __thread DWORD id; if (!id) id = (DWORD)syscall(SYS_gettid); return id; }
+DWORD GetCurrentProcessId(void) { return (DWORD)getpid(); }
+DWORD GetThreadId(HANDLE h) { if (h == PSEUDO_THREAD) return GetCurrentThreadId(); return is_obj(h) && ((PlatObj *)h)->kind == PO_THREAD ? (DWORD)((PlatObj *)h)->tid : 0; }
+BOOL GetExitCodeThread(HANDLE h, DWORD *code) { if (!is_obj(h)) return FALSE; *code = ((PlatObj *)h)->exit_code; return TRUE; }
+BOOL SetThreadPriority(HANDLE h, int prio) { (void)h; (void)prio; return TRUE; }   /* no real-time scheduling without privileges */
+int GetThreadPriority(HANDLE h) { (void)h; return THREAD_PRIORITY_NORMAL; }
+DWORD_PTR SetThreadAffinityMask(HANDLE h, DWORD_PTR mask) {
+    pthread_t th = h == PSEUDO_THREAD ? pthread_self() : is_obj(h) ? ((PlatObj *)h)->th : 0;
+    if (!th || !mask) return 0;
+    cpu_set_t set; CPU_ZERO(&set);
+    for (int i = 0; i < 64; i++) if (mask >> i & 1) CPU_SET(i, &set);
+    if (pthread_setaffinity_np(th, sizeof set, &set)) return 0;
+    return ~(DWORD_PTR)0 >> (64 - (get_nprocs() < 64 ? get_nprocs() : 64));
+}
+/* The kernel's thread name: at most 15 characters (Windows keeps the whole description); non-ASCII becomes '?'. */
+HRESULT SetThreadDescription(HANDLE h, LPCWSTR name) {
+    pthread_t th = h == PSEUDO_THREAD ? pthread_self() : is_obj(h) ? ((PlatObj *)h)->th : 0;
+    char s[16];
+    int i = 0;
+    if (!th || !name) return E_FAIL;
+    for (; i < 15 && name[i]; i++) s[i] = name[i] < 128 ? (char)name[i] : '?';
+    s[i] = 0;
+    return pthread_setname_np(th, s) ? E_FAIL : S_OK;
+}
+BOOL GetProcessAffinityMask(HANDLE p, DWORD_PTR *proc, DWORD_PTR *sys) {
+    (void)p;
+    int n = get_nprocs();
+    DWORD_PTR m = n >= 64 ? ~(DWORD_PTR)0 : (((DWORD_PTR)1 << n) - 1);
+    if (proc) *proc = m;
+    if (sys) *sys = m;
+    return TRUE;
+}
+BOOL DuplicateHandle(HANDLE sp, HANDLE src, HANDLE tp, HANDLE *dst, DWORD access, BOOL inherit, DWORD opts) {
+    (void)sp; (void)tp; (void)access; (void)inherit; (void)opts;
+    if (src == PSEUDO_THREAD) {                    /* a real handle to the calling thread */
+        PlatObj *o = t_self;
+        if (o) { __atomic_add_fetch(&o->refs, 1, __ATOMIC_ACQ_REL); *dst = o; return TRUE; }
+        o = obj_new(PO_THREAD);
+        o->th = pthread_self(); o->tid = (pid_t)syscall(SYS_gettid); o->started = 1; o->exit_code = STILL_ACTIVE;
+        o->refs = 2; t_self = o;                   /* the thread's own reference is never dropped: it was not made by CreateThread */
+        *dst = o;
+        return TRUE;
+    }
+    if (!is_obj(src)) return FALSE;
+    __atomic_add_fetch(&((PlatObj *)src)->refs, 1, __ATOMIC_ACQ_REL);
+    *dst = src;
+    return TRUE;
+}
+
+/* events, semaphores, mutexes, timers. A wait takes the object as Windows does (ready_locked): an auto-reset event wakes ONE
+ * waiter and is reset by it, a manual-reset event stays signaled until ResetEvent; a mutex belongs to a thread and is
+ * re-entrant (an owner thread that ends without releasing it is not detected: no WAIT_ABANDONED); a waitable timer is
+ * one-shot (period and completion routine are not implemented; the runtime uses neither). */
+HANDLE CreateEventA(SECURITY_ATTRIBUTES *sa, BOOL manual, BOOL initial, LPCSTR name) { (void)sa; (void)name; PlatObj *o = obj_new(PO_EVENT); o->manual = manual; o->signaled = initial; return o; }
+BOOL SetEvent(HANDLE h) {
+    PlatObj *o = h;
+    pthread_mutex_lock(&o->m); o->signaled = 1;
+    if (o->manual) pthread_cond_broadcast(&o->cv); else pthread_cond_signal(&o->cv);
+    pthread_mutex_unlock(&o->m);
+    return TRUE;
+}
+BOOL ResetEvent(HANDLE h) { PlatObj *o = h; pthread_mutex_lock(&o->m); o->signaled = 0; pthread_mutex_unlock(&o->m); return TRUE; }
+HANDLE CreateSemaphoreA(SECURITY_ATTRIBUTES *sa, LONG initial, LONG maximum, LPCSTR name) { (void)sa; (void)name; PlatObj *o = obj_new(PO_SEM); o->count = initial; o->maxcount = maximum; return o; }
+BOOL ReleaseSemaphore(HANDLE h, LONG n, LONG *prev) {
+    PlatObj *o = h;
+    pthread_mutex_lock(&o->m);
+    if (prev) *prev = o->count;
+    if (o->count + n > o->maxcount) { pthread_mutex_unlock(&o->m); t_lasterr = 298; return FALSE; }   /* ERROR_TOO_MANY_POSTS */
+    o->count += n;
+    pthread_cond_broadcast(&o->cv);
+    pthread_mutex_unlock(&o->m);
+    return TRUE;
+}
+HANDLE CreateMutexA(SECURITY_ATTRIBUTES *sa, BOOL owned, LPCSTR name) {
+    (void)sa; (void)name;
+    PlatObj *o = obj_new(PO_MUTEX);
+    if (owned) { o->owner = pthread_self(); o->depth = 1; }
+    return o;
+}
+BOOL ReleaseMutex(HANDLE h) {
+    PlatObj *o = h;
+    pthread_mutex_lock(&o->m);
+    if (!o->depth || !pthread_equal(o->owner, pthread_self())) { pthread_mutex_unlock(&o->m); return FALSE; }
+    if (!--o->depth) pthread_cond_broadcast(&o->cv);
+    pthread_mutex_unlock(&o->m);
+    return TRUE;
+}
+HANDLE CreateWaitableTimerExW(SECURITY_ATTRIBUTES *sa, LPCWSTR name, DWORD flags, DWORD access) { (void)sa; (void)name; (void)flags; (void)access; return obj_new(PO_TIMER); }
+BOOL SetWaitableTimer(HANDLE h, const LARGE_INTEGER *due, LONG period, void *fn, LPVOID arg, BOOL resume) {
+    (void)period; (void)fn; (void)arg; (void)resume;
+    PlatObj *o = h;
+    int64_t d = due->QuadPart;
+    pthread_mutex_lock(&o->m);
+    if (d < 0) o->due_ns = mono_ns() + (-d) * 100;
+    else { FILETIME ft; GetSystemTimeAsFileTime(&ft); int64_t now = (int64_t)(((uint64_t)ft.dwHighDateTime << 32) | ft.dwLowDateTime); o->due_ns = mono_ns() + (d - now) * 100; }
+    o->signaled = 0;
+    pthread_mutex_unlock(&o->m);
+    return TRUE;
+}
+
+/* Is the object signaled for this thread? Takes it (auto-reset event, semaphore, mutex) when `take`. Called with o->m held. */
+static int ready_locked(PlatObj *o, int take) {
+    switch (o->kind) {
+    case PO_THREAD: return o->signaled;
+    case PO_EVENT: if (!o->signaled) return 0; if (take && !o->manual) o->signaled = 0; return 1;
+    case PO_SEM: if (o->count <= 0) return 0; if (take) o->count--; return 1;
+    case PO_MUTEX:
+        if (o->depth && !pthread_equal(o->owner, pthread_self())) return 0;
+        if (take) { o->owner = pthread_self(); o->depth++; }
+        return 1;
+    case PO_TIMER: if (o->signaled || (o->due_ns && mono_ns() >= o->due_ns)) { o->signaled = 1; return 1; } return 0;
+    default: return 1;
+    }
+}
+static void abs_deadline(struct timespec *ts, int64_t ns_from_now) {
+    int64_t t = mono_ns() + ns_from_now;
+    ts->tv_sec = t / 1000000000LL; ts->tv_nsec = t % 1000000000LL;
+}
+DWORD WaitForSingleObject(HANDLE h, DWORD ms) {
+    if (is_tagged(h, PID_TAG)) {                    /* a process: poll */
+        pid_t pid = (pid_t)((uintptr_t)h & 0xffffffff);
+        int64_t end = ms == INFINITE ? INT64_MAX : mono_ns() + (int64_t)ms * 1000000LL;
+        for (;;) { if (kill(pid, 0) && errno == ESRCH) return WAIT_OBJECT_0; if (mono_ns() >= end) return WAIT_TIMEOUT; Sleep(10); }
+    }
+    if (h == PSEUDO_THREAD || h == PSEUDO_PROCESS) { if (ms == INFINITE) for (;;) pause(); Sleep(ms); return WAIT_TIMEOUT; }
+    if (!is_obj(h)) { t_lasterr = ERROR_INVALID_HANDLE; return WAIT_FAILED; }
+    PlatObj *o = h;
+    struct timespec dl;
+    if (ms != INFINITE) abs_deadline(&dl, (int64_t)ms * 1000000LL);
+    pthread_mutex_lock(&o->m);
+    DWORD r = WAIT_OBJECT_0;
+    while (!ready_locked(o, 1)) {
+        if (o->kind == PO_TIMER) {                  /* a timer has nothing that signals it: sleep to its deadline */
+            int64_t left = o->due_ns - mono_ns();
+            if (!o->due_ns) left = INT64_MAX / 2;
+            if (ms != INFINITE && left > (int64_t)ms * 1000000LL) { pthread_mutex_unlock(&o->m); Sleep(ms); return WAIT_TIMEOUT; }
+            pthread_mutex_unlock(&o->m);
+            struct timespec ts = {left / 1000000000LL, left % 1000000000LL};
+            if (left > 0) while (nanosleep(&ts, &ts) && errno == EINTR) {}
+            pthread_mutex_lock(&o->m);
+            continue;
+        }
+        if (ms == INFINITE) pthread_cond_wait(&o->cv, &o->m);
+        else if (pthread_cond_timedwait(&o->cv, &o->m, &dl) == ETIMEDOUT) { if (!ready_locked(o, 1)) r = WAIT_TIMEOUT; break; }
+    }
+    pthread_mutex_unlock(&o->m);
+    return r;
+}
+DWORD WaitForMultipleObjects(DWORD n, const HANDLE *hs, BOOL all, DWORD ms) {
+    /* rare (diagnostic threads): polls every millisecond; with `all` the objects are taken one after another, not at once as on Windows */
+    int64_t end = ms == INFINITE ? INT64_MAX : mono_ns() + (int64_t)ms * 1000000LL;
+    for (;;) {
+        if (all) {
+            DWORD ok = 0;
+            for (DWORD i = 0; i < n; i++) { PlatObj *o = hs[i]; pthread_mutex_lock(&o->m); ok += ready_locked(o, 0) != 0; pthread_mutex_unlock(&o->m); }
+            if (ok == n) { for (DWORD i = 0; i < n; i++) { PlatObj *o = hs[i]; pthread_mutex_lock(&o->m); ready_locked(o, 1); pthread_mutex_unlock(&o->m); } return WAIT_OBJECT_0; }
+        } else for (DWORD i = 0; i < n; i++) {
+            PlatObj *o = hs[i];
+            pthread_mutex_lock(&o->m);
+            int r = ready_locked(o, 1);
+            pthread_mutex_unlock(&o->m);
+            if (r) return WAIT_OBJECT_0 + i;
+        }
+        if (mono_ns() >= end) return WAIT_TIMEOUT;
+        Sleep(1);
+    }
+}
+BOOL CloseHandle(HANDLE h) {
+    if (is_tagged(h, FD_TAG) || is_tagged(h, PID_TAG)) return TRUE;
+    if (!is_obj(h)) return h == PSEUDO_THREAD || h == PSEUDO_PROCESS;
+    PlatObj *o = h;
+    if (o->kind == PO_MAPPING) { obj_release(o); return TRUE; }
+    obj_release(o);
+    return TRUE;
+}
+void ExitProcess(UINT code) { fflush(NULL); _exit((int)code); }
+BOOL TerminateProcess(HANDLE p, UINT code) { if (p == PSEUDO_PROCESS) ExitProcess(code); return FALSE; }
+
+/* ================================================================ thread-local slots */
+DWORD TlsAlloc(void) { pthread_key_t k; return pthread_key_create(&k, NULL) ? TLS_OUT_OF_INDEXES : (DWORD)k; }
+BOOL TlsFree(DWORD i) { return pthread_key_delete((pthread_key_t)i) == 0; }
+LPVOID TlsGetValue(DWORD i) { return pthread_getspecific((pthread_key_t)i); }
+BOOL TlsSetValue(DWORD i, LPVOID v) { return pthread_setspecific((pthread_key_t)i, v) == 0; }
+/* FLS: the callback runs when a thread ends (pthread key destructor); Windows also runs it when a fiber is deleted. */
+DWORD FlsAlloc(PFLS_CALLBACK_FUNCTION cb) { pthread_key_t k; return pthread_key_create(&k, cb) ? FLS_OUT_OF_INDEXES : (DWORD)k; }
+BOOL FlsFree(DWORD i) { return pthread_key_delete((pthread_key_t)i) == 0; }
+PVOID FlsGetValue(DWORD i) { return pthread_getspecific((pthread_key_t)i); }
+BOOL FlsSetValue(DWORD i, PVOID v) { return pthread_setspecific((pthread_key_t)i, v) == 0; }
+
+/* ================================================================ fibers
+ * On ucontext. As on Windows a fiber can be resumed on another thread than the one it last ran on (the running fiber is
+ * per thread: t_fiber); swapcontext also saves and restores the signal mask, one system call per switch. The stack is
+ * reserved whole at creation (MAP_NORESERVE: pages are used as touched), not grown from a commit size. */
+typedef struct { ucontext_t uc; LPFIBER_START_ROUTINE fn; LPVOID param; void *stack; size_t stack_size; int is_thread; } Fiber;
+static __thread Fiber *t_fiber;
+LPVOID ConvertThreadToFiber(LPVOID param) {
+    if (t_fiber) return t_fiber;
+    Fiber *f = calloc(1, sizeof *f);
+    f->param = param; f->is_thread = 1;
+    t_fiber = f;
+    return f;
+}
+BOOL ConvertFiberToThread(void) { if (t_fiber && t_fiber->is_thread) free(t_fiber); t_fiber = NULL; return TRUE; }
+static void fiber_entry(void) { Fiber *f = t_fiber; f->fn(f->param); fprintf(stderr, "plat: a fiber returned\n"); ExitProcess(3); }
+LPVOID CreateFiberEx(SIZE_T commit, SIZE_T reserve, DWORD flags, LPFIBER_START_ROUTINE fn, LPVOID param) {
+    (void)commit; (void)flags;
+    Fiber *f = calloc(1, sizeof *f);
+    f->fn = fn; f->param = param;
+    f->stack_size = reserve ? reserve : (SIZE_T)1 << 20;
+    f->stack = mmap(NULL, f->stack_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_STACK, -1, 0);
+    if (f->stack == MAP_FAILED) { free(f); return NULL; }
+    getcontext(&f->uc);
+    f->uc.uc_stack.ss_sp = f->stack; f->uc.uc_stack.ss_size = f->stack_size; f->uc.uc_link = NULL;
+    makecontext(&f->uc, fiber_entry, 0);
+    return f;
+}
+void SwitchToFiber(LPVOID fiber) {
+    Fiber *from = t_fiber, *to = fiber;
+    if (from == to) return;
+    t_fiber = to;
+    swapcontext(&from->uc, &to->uc);
+}
+void DeleteFiber(LPVOID fiber) {
+    Fiber *f = fiber;
+    if (!f) return;
+    if (f == t_fiber) { fprintf(stderr, "plat: DeleteFiber of the running fiber\n"); ExitProcess(3); }
+    if (f->stack) munmap(f->stack, f->stack_size);
+    free(f);
+}
+LPVOID GetCurrentFiber(void) { return t_fiber; }
+void plat_symbolize(uintptr_t pc, char *out, size_t n) {          /* crash reports: "symbol+0xoff (file)" */
+    Dl_info di;
+    if (dladdr((void *)pc, &di) && di.dli_fname)
+        snprintf(out, n, "%s+0x%lx (%s)", di.dli_sname ? di.dli_sname : "?", di.dli_saddr ? (unsigned long)(pc - (uintptr_t)di.dli_saddr) : (unsigned long)(pc - (uintptr_t)di.dli_fbase), di.dli_fname);
+    else snprintf(out, n, "?");
+}
+int plat_current_fiber_stack(uintptr_t *lo, uintptr_t *hi) {      /* crash reports (hostrt.c) */
+    Fiber *f = t_fiber;
+    if (!f || f->is_thread || !f->stack) return 0;
+    *lo = (uintptr_t)f->stack; *hi = (uintptr_t)f->stack + f->stack_size;
+    return 1;
+}
+LPVOID GetFiberData(void) { return t_fiber ? t_fiber->param : NULL; }
+
+/* ================================================================ virtual memory
+ * Windows keeps a state for every page (free / reserved / committed, protection); VirtualQuery reports runs of pages
+ * with the same state. Here: an ordered list of segments for the memory that went through VirtualAlloc, and
+ * /proc/self/maps for everything else (stacks, malloc, the libraries), reported as committed. */
+typedef struct { uintptr_t lo, hi, alloc_base; DWORD state, prot, alloc_prot; } Seg;
+static Seg *g_seg;
+static int g_nseg, g_capseg;
+static pthread_mutex_t g_vm_lock = PTHREAD_MUTEX_INITIALIZER;
+#define PAGE 4096u
+static int prot_posix(DWORD p) {
+    switch (p & 0xff) {
+    case PAGE_NOACCESS: return PROT_NONE;
+    case PAGE_READONLY: return PROT_READ;
+    case PAGE_READWRITE: case PAGE_WRITECOPY: return PROT_READ | PROT_WRITE;
+    case PAGE_EXECUTE: return PROT_EXEC;
+    case PAGE_EXECUTE_READ: return PROT_READ | PROT_EXEC;
+    default: return PROT_READ | PROT_WRITE | PROT_EXEC;
+    }
+}
+static int seg_find(uintptr_t a) {                  /* index of the first segment with hi > a */
+    int lo = 0, hi = g_nseg;
+    while (lo < hi) { int m = (lo + hi) / 2; if (g_seg[m].hi <= a) lo = m + 1; else hi = m; }
+    return lo;
+}
+/* Sets [lo, hi) to one state; state MEM_FREE removes it. Splits the segments it cuts. */
+static void seg_set(uintptr_t lo, uintptr_t hi, uintptr_t base, DWORD state, DWORD prot, DWORD alloc_prot) {
+    Seg tmp[3]; int nt = 0;
+    int i = seg_find(lo), j = i;
+    while (j < g_nseg && g_seg[j].lo < hi) j++;
+    if (i < j && g_seg[i].lo < lo) { tmp[nt] = g_seg[i]; tmp[nt].hi = lo; nt++; }
+    if (state != MEM_FREE) { Seg s = {lo, hi, base, state, prot, alloc_prot}; tmp[nt++] = s; }
+    if (i < j && g_seg[j - 1].hi > hi) { tmp[nt] = g_seg[j - 1]; tmp[nt].lo = hi; nt++; }
+    int n = g_nseg - (j - i) + nt;
+    if (n > g_capseg) { g_capseg = n * 2 + 64; g_seg = realloc(g_seg, (size_t)g_capseg * sizeof *g_seg); }
+    memmove(g_seg + i + nt, g_seg + j, (size_t)(g_nseg - j) * sizeof *g_seg);
+    memcpy(g_seg + i, tmp, (size_t)nt * sizeof *tmp);
+    g_nseg = n;
+}
+/* Write watch (MEM_WRITE_WATCH, GetWriteWatch): userfaultfd write protection in asynchronous mode (Linux 6.7+), which the
+ * kernel resolves by itself on the first write to a page and records; PAGEMAP_SCAN lists the written pages of a range
+ * and protects them again in the same call. This is what Wine uses for the same function. Without it (older kernel,
+ * userfaultfd not allowed) the regions are not watched and GetWriteWatch fails, as for memory that is not watched. */
+static int g_uffd = -2, g_pagemap = -1;
+typedef struct { uintptr_t lo, hi; } WwRegion;
+static WwRegion g_ww[64];
+static int g_nww;
+static int ww_init(void) {
+    if (g_uffd != -2) return g_uffd >= 0;
+    g_uffd = -1;
+    if (getenv("SSBU_NO_WRITEWATCH")) return 0;
+    int fd = (int)syscall(SYS_userfaultfd, O_CLOEXEC | O_NONBLOCK | UFFD_USER_MODE_ONLY);
+    if (fd < 0) { fprintf(stderr, "plat: no userfaultfd (%s): write watch off\n", strerror(errno)); return 0; }
+    struct uffdio_api api = {.api = UFFD_API, .features = UFFD_FEATURE_WP_ASYNC | UFFD_FEATURE_WP_UNPOPULATED};
+    if (ioctl(fd, UFFDIO_API, &api)) { fprintf(stderr, "plat: userfaultfd without asynchronous write protection: write watch off\n"); close(fd); return 0; }
+    g_pagemap = open("/proc/self/pagemap", O_RDONLY | O_CLOEXEC);
+    if (g_pagemap < 0) { close(fd); return 0; }
+    g_uffd = fd;
+    return 1;
+}
+static void ww_protect(uintptr_t lo, size_t n) {
+    struct uffdio_writeprotect wp = {.range = {lo, n}, .mode = UFFDIO_WRITEPROTECT_MODE_WP};
+    ioctl(g_uffd, UFFDIO_WRITEPROTECT, &wp);
+}
+static void ww_add(uintptr_t lo, size_t n) {                /* g_vm_lock held */
+    if (g_nww == 64 || !ww_init()) return;
+    struct uffdio_register reg = {.range = {lo, n}, .mode = UFFDIO_REGISTER_MODE_WP};
+    if (ioctl(g_uffd, UFFDIO_REGISTER, &reg)) return;
+    ww_protect(lo, n);
+    g_ww[g_nww].lo = lo; g_ww[g_nww].hi = lo + n; g_nww++;
+}
+static int ww_find(uintptr_t a) { for (int i = 0; i < g_nww; i++) if (a >= g_ww[i].lo && a < g_ww[i].hi) return i; return -1; }
+static void ww_drop(uintptr_t lo) { int i = ww_find(lo); if (i >= 0) g_ww[i] = g_ww[--g_nww]; }      /* munmap unregisters by itself */
+UINT GetWriteWatch(DWORD flags, PVOID base, SIZE_T size, PVOID *addrs, ULONG_PTR *count, ULONG *gran) {
+    uintptr_t lo = (uintptr_t)base & ~(uintptr_t)(PAGE - 1), hi = ((uintptr_t)base + size + PAGE - 1) & ~(uintptr_t)(PAGE - 1);
+    pthread_mutex_lock(&g_vm_lock);
+    int i = ww_find(lo);
+    int ok = i >= 0 && hi <= g_ww[i].hi;
+    pthread_mutex_unlock(&g_vm_lock);
+    if (!ok || !size) { t_lasterr = ERROR_INVALID_PARAMETER; return 1; }
+    struct page_region v[256];
+    ULONG_PTR max = *count, got = 0;
+    if (gran) *gran = PAGE;
+    while (lo < hi && got < max) {
+        struct pm_scan_arg arg;
+        memset(&arg, 0, sizeof arg);
+        arg.size = sizeof arg; arg.start = lo; arg.end = hi;
+        arg.vec = (uintptr_t)v; arg.vec_len = 256; arg.max_pages = max - got;
+        arg.category_mask = PAGE_IS_WRITTEN; arg.return_mask = PAGE_IS_WRITTEN;
+        arg.flags = (flags & WRITE_WATCH_FLAG_RESET) ? PM_SCAN_WP_MATCHING | PM_SCAN_CHECK_WPASYNC : 0;
+        long nr = ioctl(g_pagemap, PAGEMAP_SCAN, &arg);
+        if (nr < 0) { t_lasterr = ERROR_INVALID_PARAMETER; return 1; }
+        for (long k = 0; k < nr; k++)
+            for (uintptr_t a = v[k].start; a < v[k].end && got < max; a += PAGE) addrs[got++] = (PVOID)a;
+        if (arg.walk_end <= lo) break;
+        lo = arg.walk_end;                                 /* where the kernel stopped (vector full or done) */
+    }
+    *count = got;
+    return 0;
+}
+UINT ResetWriteWatch(LPVOID base, SIZE_T size) {
+    uintptr_t lo = (uintptr_t)base & ~(uintptr_t)(PAGE - 1), hi = ((uintptr_t)base + size + PAGE - 1) & ~(uintptr_t)(PAGE - 1);
+    pthread_mutex_lock(&g_vm_lock);
+    int i = ww_find(lo);
+    pthread_mutex_unlock(&g_vm_lock);
+    if (i < 0) return 1;
+    ww_protect(lo, hi - lo);
+    return 0;
+}
+/* MEM_RESERVE maps the range PROT_NONE (address space only) and MEM_COMMIT is an mprotect; reservations start on 64 KB, the
+ * Windows allocation granularity. Decommit (VirtualFree MEM_DECOMMIT) drops the pages, so a new commit reads zeros as on Windows. */
+LPVOID VirtualAlloc(LPVOID addr, SIZE_T size, DWORD type, DWORD prot) {
+    if (!size) { t_lasterr = ERROR_INVALID_PARAMETER; return NULL; }
+    uintptr_t a = (uintptr_t)addr;
+    pthread_mutex_lock(&g_vm_lock);
+    if (type & MEM_RESERVE || !addr) {
+        uintptr_t lo = a & ~(uintptr_t)0xffff;          /* reservations start on 64 KB, as on Windows */
+        size_t n = (size + (a - lo) + PAGE - 1) & ~(size_t)(PAGE - 1);
+        int commit = (type & MEM_COMMIT) != 0;
+        int flags = MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE;
+        void *p;
+        if (addr) p = mmap((void *)lo, n, commit ? prot_posix(prot) : PROT_NONE, flags | MAP_FIXED_NOREPLACE, -1, 0);
+        else {
+            /* 64 KB alignment: over-allocate and trim */
+            p = mmap(NULL, n + 0x10000, commit ? prot_posix(prot) : PROT_NONE, flags, -1, 0);
+            if (p != MAP_FAILED) {
+                uintptr_t s = (uintptr_t)p, al = (s + 0xffff) & ~(uintptr_t)0xffff;
+                if (al > s) munmap(p, al - s);
+                if (s + n + 0x10000 > al + n) munmap((void *)(al + n), s + n + 0x10000 - (al + n));
+                p = (void *)al;
+            }
+        }
+        if (p == MAP_FAILED || (addr && (uintptr_t)p != lo)) {
+            if (p != MAP_FAILED) munmap(p, n);
+            pthread_mutex_unlock(&g_vm_lock);
+            t_lasterr = ERROR_INVALID_ADDRESS;
+            return NULL;
+        }
+        lo = (uintptr_t)p;
+        seg_set(lo, lo + n, lo, commit ? MEM_COMMIT : MEM_RESERVE, commit ? prot : 0, prot);
+        if (type & MEM_WRITE_WATCH) ww_add(lo, n);
+        pthread_mutex_unlock(&g_vm_lock);
+        return addr ? (void *)a : p;
+    }
+    /* commit inside a reservation */
+    uintptr_t lo = a & ~(uintptr_t)(PAGE - 1), hi = (a + size + PAGE - 1) & ~(uintptr_t)(PAGE - 1);
+    int i = seg_find(lo);
+    if (i >= g_nseg || g_seg[i].lo > lo) { pthread_mutex_unlock(&g_vm_lock); t_lasterr = ERROR_INVALID_ADDRESS; return NULL; }
+    uintptr_t base = g_seg[i].alloc_base; DWORD aprot = g_seg[i].alloc_prot;
+    for (uintptr_t p = lo; p < hi;) {                  /* the whole range must be reserved */
+        int k = seg_find(p);
+        if (k >= g_nseg || g_seg[k].lo > p) { pthread_mutex_unlock(&g_vm_lock); t_lasterr = ERROR_INVALID_ADDRESS; return NULL; }
+        p = g_seg[k].hi;
+    }
+    if (mprotect((void *)lo, hi - lo, prot_posix(prot))) { pthread_mutex_unlock(&g_vm_lock); fail_errno(); return NULL; }
+    seg_set(lo, hi, base, MEM_COMMIT, prot, aprot);
+    pthread_mutex_unlock(&g_vm_lock);
+    return addr;
+}
+BOOL VirtualFree(LPVOID addr, SIZE_T size, DWORD type) {
+    uintptr_t a = (uintptr_t)addr;
+    pthread_mutex_lock(&g_vm_lock);
+    int i = seg_find(a);
+    if (i >= g_nseg || g_seg[i].lo > a) { pthread_mutex_unlock(&g_vm_lock); t_lasterr = ERROR_INVALID_ADDRESS; return FALSE; }
+    if (type & MEM_RELEASE) {
+        uintptr_t base = g_seg[i].alloc_base, hi = base;
+        int k = seg_find(base);
+        while (k < g_nseg && g_seg[k].alloc_base == base) hi = g_seg[k++].hi;
+        munmap((void *)base, hi - base);
+        ww_drop(base);
+        seg_set(base, hi, 0, MEM_FREE, 0, 0);
+    } else {
+        uintptr_t lo = a & ~(uintptr_t)(PAGE - 1), hi = size ? (a + size + PAGE - 1) & ~(uintptr_t)(PAGE - 1) : lo;
+        if (!size) { uintptr_t base = g_seg[i].alloc_base; int k = seg_find(base); lo = base; while (k < g_nseg && g_seg[k].alloc_base == base) hi = g_seg[k++].hi; }
+        uintptr_t base = g_seg[i].alloc_base; DWORD aprot = g_seg[i].alloc_prot;
+        madvise((void *)lo, hi - lo, MADV_DONTNEED);     /* decommitted pages come back zero */
+        mprotect((void *)lo, hi - lo, PROT_NONE);
+        if (ww_find(lo) >= 0) ww_protect(lo, hi - lo);   /* emptied pages are watched again (not "written") */
+        seg_set(lo, hi, base, MEM_RESERVE, 0, aprot);
+    }
+    pthread_mutex_unlock(&g_vm_lock);
+    return TRUE;
+}
+BOOL VirtualProtect(LPVOID addr, SIZE_T size, DWORD prot, DWORD *old) {
+    uintptr_t lo = (uintptr_t)addr & ~(uintptr_t)(PAGE - 1), hi = ((uintptr_t)addr + size + PAGE - 1) & ~(uintptr_t)(PAGE - 1);
+    /* a page we did not map (code of the exe or of a .so): its real protection, from the kernel's list. Answering
+     * PAGE_READWRITE here made a caller that restores the old value (the hook table, after patching a function's
+     * entry) take the execute right away from a code page. */
+    MEMORY_BASIC_INFORMATION mi;
+    DWORD untracked_old = VirtualQuery((void *)lo, &mi, sizeof mi) && mi.State == MEM_COMMIT ? mi.Protect : PAGE_READWRITE;
+    pthread_mutex_lock(&g_vm_lock);
+    int i = seg_find(lo);
+    int tracked = i < g_nseg && g_seg[i].lo <= lo;
+    if (old) *old = tracked ? g_seg[i].prot : untracked_old;
+    if (mprotect((void *)lo, hi - lo, prot_posix(prot))) { pthread_mutex_unlock(&g_vm_lock); return fail_errno(); }
+    if (tracked) {                                   /* per segment: keeps each one's allocation base */
+        for (uintptr_t p = lo; p < hi;) {
+            int k = seg_find(p);
+            if (k >= g_nseg || g_seg[k].lo > p) break;
+            uintptr_t e = g_seg[k].hi < hi ? g_seg[k].hi : hi;
+            seg_set(p, e, g_seg[k].alloc_base, MEM_COMMIT, prot, g_seg[k].alloc_prot);
+            p = e;
+        }
+    }
+    pthread_mutex_unlock(&g_vm_lock);
+    return TRUE;
+}
+static DWORD prot_from_maps(const char *perm) {
+    int r = perm[0] == 'r', w = perm[1] == 'w', x = perm[2] == 'x';
+    if (x) return w ? PAGE_EXECUTE_READWRITE : r ? PAGE_EXECUTE_READ : PAGE_EXECUTE;
+    return w ? PAGE_READWRITE : r ? PAGE_READONLY : PAGE_NOACCESS;
+}
+/* Memory from VirtualAlloc answers with its allocation base, state and protection as on Windows; any other mapping (the exe,
+ * libraries, malloc, stacks) is one committed MEM_PRIVATE region with its real protection (Windows: MEM_IMAGE / MEM_MAPPED). */
+SIZE_T VirtualQuery(LPCVOID addr, MEMORY_BASIC_INFORMATION *mi, SIZE_T len) {
+    if (len < sizeof *mi) return 0;
+    uintptr_t a = (uintptr_t)addr & ~(uintptr_t)(PAGE - 1);
+    memset(mi, 0, sizeof *mi);
+    mi->BaseAddress = (void *)a;
+    pthread_mutex_lock(&g_vm_lock);
+    int i = seg_find(a);
+    if (i < g_nseg && g_seg[i].lo <= a) {
+        Seg s = g_seg[i];
+        uintptr_t hi = s.hi;
+        for (int k = i + 1; k < g_nseg && g_seg[k].lo == hi && g_seg[k].alloc_base == s.alloc_base && g_seg[k].state == s.state && g_seg[k].prot == s.prot; k++) hi = g_seg[k].hi;
+        pthread_mutex_unlock(&g_vm_lock);
+        mi->AllocationBase = (void *)s.alloc_base; mi->AllocationProtect = s.alloc_prot;
+        mi->RegionSize = hi - a; mi->State = s.state; mi->Protect = s.state == MEM_COMMIT ? s.prot : 0; mi->Type = MEM_PRIVATE;
+        return sizeof *mi;
+    }
+    uintptr_t next_tracked = i < g_nseg ? g_seg[i].lo : UINTPTR_MAX;
+    pthread_mutex_unlock(&g_vm_lock);
+    if (a >= 0x800000000000ULL) return 0;
+#ifdef PROCMAP_QUERY
+    /* Linux 6.11+: the mapping that holds a (or the next one) asked of the kernel directly. Reading and parsing the text
+     * below (1,400+ lines) was 4.7% of the game thread in a 2-fighter match (2026-10-15). -2 = not opened yet,
+     * -1 = the kernel does not have the query: the text is read as before. */
+    static int pmq_fd = -2;
+    int fd = __atomic_load_n(&pmq_fd, __ATOMIC_ACQUIRE);
+    if (fd == -2) {
+        int nfd = open("/proc/self/maps", O_RDONLY | O_CLOEXEC), want = -2;
+        if (!__atomic_compare_exchange_n(&pmq_fd, &want, nfd < 0 ? -1 : nfd, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE) && nfd >= 0) close(nfd);
+        fd = __atomic_load_n(&pmq_fd, __ATOMIC_ACQUIRE);
+    }
+    if (fd >= 0) {
+        struct procmap_query q;
+        memset(&q, 0, sizeof q);
+        q.size = sizeof q; q.query_addr = a; q.query_flags = PROCMAP_QUERY_COVERING_OR_NEXT_VMA;
+        if (ioctl(fd, PROCMAP_QUERY, &q) == 0) {
+            if (q.vma_start > a) {                         /* in a gap */
+                uintptr_t end = q.vma_start < next_tracked ? (uintptr_t)q.vma_start : next_tracked;
+                mi->AllocationBase = NULL; mi->State = MEM_FREE; mi->Protect = PAGE_NOACCESS; mi->RegionSize = end - a;
+            } else {
+                char perm[4] = { q.vma_flags & PROCMAP_QUERY_VMA_READABLE ? 'r' : '-', q.vma_flags & PROCMAP_QUERY_VMA_WRITABLE ? 'w' : '-',
+                                 q.vma_flags & PROCMAP_QUERY_VMA_EXECUTABLE ? 'x' : '-', 0 };
+                mi->AllocationBase = (void *)(uintptr_t)q.vma_start; mi->AllocationProtect = prot_from_maps(perm);
+                mi->State = MEM_COMMIT; mi->Protect = prot_from_maps(perm); mi->RegionSize = q.vma_end - a; mi->Type = MEM_PRIVATE;
+            }
+            return sizeof *mi;
+        }
+        if (errno == ENOENT) {                             /* no mapping at or above a */
+            mi->State = MEM_FREE; mi->Protect = PAGE_NOACCESS; mi->RegionSize = (next_tracked != UINTPTR_MAX ? next_tracked : 0x800000000000ULL) - a;
+            return sizeof *mi;
+        }
+        if (errno == ENOTTY || errno == EINVAL || errno == EOPNOTSUPP) __atomic_store_n(&pmq_fd, -1, __ATOMIC_RELEASE);
+    }
+#endif
+    FILE *f = fopen("/proc/self/maps", "r");
+    if (!f) return 0;
+    char line[512];
+    uintptr_t prev_end = 0x10000;
+    int found = 0;
+    while (fgets(line, sizeof line, f)) {
+        unsigned long lo, hi; char perm[8];
+        if (sscanf(line, "%lx-%lx %7s", &lo, &hi, perm) != 3) continue;
+        if (a < lo) {                                  /* in a gap */
+            uintptr_t end = lo < next_tracked ? lo : next_tracked;
+            mi->AllocationBase = NULL; mi->State = MEM_FREE; mi->Protect = PAGE_NOACCESS; mi->RegionSize = end - a;
+            found = 1; break;
+        }
+        if (a < hi) {
+            mi->AllocationBase = (void *)lo; mi->AllocationProtect = prot_from_maps(perm);
+            mi->State = MEM_COMMIT; mi->Protect = prot_from_maps(perm); mi->RegionSize = hi - a; mi->Type = MEM_PRIVATE;
+            found = 1; break;
+        }
+        prev_end = hi;
+    }
+    fclose(f);
+    (void)prev_end;
+    if (!found) { mi->State = MEM_FREE; mi->Protect = PAGE_NOACCESS; mi->RegionSize = (next_tracked != UINTPTR_MAX ? next_tracked : 0x800000000000ULL) - a; }
+    return sizeof *mi;
+}
+BOOL FlushInstructionCache(HANDLE p, LPCVOID base, SIZE_T size) { (void)p; (void)base; (void)size; return TRUE; }     /* x86-64 keeps code coherent */
+BOOL ReadProcessMemory(HANDLE p, LPCVOID src, LPVOID dst, SIZE_T n, SIZE_T *got) {
+    /* a read that does not fault: process_vm_readv on ourselves */
+    (void)p;
+    struct iovec l = {dst, n}, r = {(void *)src, n};
+    ssize_t k = process_vm_readv(getpid(), &l, 1, &r, 1, 0);      /* glibc's wrapper: through syscall() the int flags argument
+                                                                        went on the stack with its upper half unset (EINVAL at random) */
+    if (got) *got = k > 0 ? (SIZE_T)k : 0;
+    return k == (ssize_t)n;
+}
+void GetSystemInfo(SYSTEM_INFO *si) {
+    memset(si, 0, sizeof *si);
+    si->wProcessorArchitecture = 9;                  /* PROCESSOR_ARCHITECTURE_AMD64 */
+    si->dwPageSize = PAGE;
+    si->lpMinimumApplicationAddress = (void *)0x10000;
+    si->lpMaximumApplicationAddress = (void *)0x7ffffffeffffULL;
+    si->dwNumberOfProcessors = (DWORD)get_nprocs();
+    si->dwActiveProcessorMask = si->dwNumberOfProcessors >= 64 ? ~(DWORD_PTR)0 : (((DWORD_PTR)1 << si->dwNumberOfProcessors) - 1);
+    si->dwAllocationGranularity = 0x10000;
+}
+BOOL GlobalMemoryStatusEx(MEMORYSTATUSEX *m) {
+    struct sysinfo s;
+    if (sysinfo(&s)) return FALSE;
+    m->ullTotalPhys = (ULONGLONG)s.totalram * s.mem_unit;
+    m->ullAvailPhys = (ULONGLONG)(s.freeram + s.bufferram) * s.mem_unit;
+    m->ullTotalPageFile = m->ullTotalPhys + (ULONGLONG)s.totalswap * s.mem_unit;
+    m->ullAvailPageFile = m->ullAvailPhys + (ULONGLONG)s.freeswap * s.mem_unit;
+    m->ullTotalVirtual = m->ullAvailVirtual = 0x7ffffffeffffULL;
+    m->dwMemoryLoad = (DWORD)(m->ullTotalPhys ? 100 - m->ullAvailPhys * 100 / m->ullTotalPhys : 0);
+    return TRUE;
+}
+BOOL GetProcessMemoryInfo(HANDLE p, PROCESS_MEMORY_COUNTERS *pmc, DWORD cb) {
+    (void)p;
+    memset(pmc, 0, cb < sizeof *pmc ? cb : sizeof *pmc);
+    unsigned long long size = 0, res = 0;
+    FILE *f = fopen("/proc/self/statm", "r");
+    if (f) { if (fscanf(f, "%llu %llu", &size, &res) != 2) size = res = 0; fclose(f); }
+    struct rusage ru; getrusage(RUSAGE_SELF, &ru);
+    pmc->cb = cb;
+    pmc->WorkingSetSize = (SIZE_T)(res * PAGE);
+    pmc->PeakWorkingSetSize = (SIZE_T)ru.ru_maxrss * 1024;
+    pmc->PagefileUsage = pmc->PrivateUsage = (SIZE_T)(res * PAGE);
+    pmc->PeakPagefileUsage = pmc->PeakWorkingSetSize;
+    pmc->PageFaultCount = (DWORD)(ru.ru_minflt + ru.ru_majflt);
+    return TRUE;
+}
+HANDLE CreateFileMappingA(HANDLE f, SECURITY_ATTRIBUTES *sa, DWORD prot, DWORD hi, DWORD lo, LPCSTR name) {
+    (void)sa; (void)prot; (void)name;
+    if (!is_obj(f)) return NULL;
+    PlatObj *o = obj_new(PO_MAPPING);
+    o->fd = dup(((PlatObj *)f)->fd);
+    o->map_size = ((size_t)hi << 32) | lo;
+    if (!o->map_size) { struct stat st; fstat(o->fd, &st); o->map_size = (size_t)st.st_size; }
+    return o;
+}
+typedef struct { void *p; size_t n; } View;
+static View g_views[64];
+LPVOID MapViewOfFile(HANDLE m, DWORD access, DWORD hi, DWORD lo, SIZE_T n) {
+    PlatObj *o = m;
+    off_t off = (off_t)(((uint64_t)hi << 32) | lo);
+    if (!n) n = o->map_size - (size_t)off;
+    void *p = mmap(NULL, n, (access & FILE_MAP_WRITE) ? PROT_READ | PROT_WRITE : PROT_READ, MAP_SHARED, o->fd, off);
+    if (p == MAP_FAILED) { fail_errno(); return NULL; }
+    for (int i = 0; i < 64; i++) if (!g_views[i].p) { g_views[i].p = p; g_views[i].n = n; break; }
+    return p;
+}
+BOOL UnmapViewOfFile(LPCVOID p) {
+    for (int i = 0; i < 64; i++) if (g_views[i].p == p) { munmap(g_views[i].p, g_views[i].n); g_views[i].p = NULL; return TRUE; }
+    return FALSE;
+}
+
+/* ================================================================ C runtime */
+int __argc;
+char **__argv;
+__attribute__((constructor)) static void plat_args(int argc, char **argv) { __argc = argc; __argv = argv; }   /* glibc passes main's arguments to constructors */
+int _putenv(const char *s) {
+    const char *eq = strchr(s, '=');
+    if (!eq) return -1;
+    char name[256];
+    size_t n = (size_t)(eq - s) < sizeof name - 1 ? (size_t)(eq - s) : sizeof name - 1;
+    memcpy(name, s, n); name[n] = 0;
+    return eq[1] ? setenv(name, eq + 1, 1) : unsetenv(name);
+}
+char *_strlwr(char *s) { for (char *p = s; *p; p++) if (*p >= 'A' && *p <= 'Z') *p += 32; return s; }
+char *_strupr(char *s) { for (char *p = s; *p; p++) if (*p >= 'a' && *p <= 'z') *p -= 32; return s; }
+/* aligned blocks keep the raw pointer and size in front of the returned one */
+typedef struct { void *raw; size_t size; } AlHdr;
+void *_aligned_malloc(size_t size, size_t align) {
+    if (align < sizeof(void *)) align = sizeof(void *);
+    uint8_t *raw = malloc(size + align + sizeof(AlHdr));
+    if (!raw) return NULL;
+    uintptr_t p = ((uintptr_t)raw + sizeof(AlHdr) + align - 1) & ~(uintptr_t)(align - 1);
+    AlHdr *h = (AlHdr *)p - 1;
+    h->raw = raw; h->size = size;
+    return (void *)p;
+}
+void _aligned_free(void *p) { if (p) free(((AlHdr *)p - 1)->raw); }
+size_t _aligned_msize(void *p, size_t align, size_t off) { (void)align; (void)off; return ((AlHdr *)p - 1)->size; }
+void *_aligned_realloc(void *p, size_t size, size_t align) {
+    if (!p) return _aligned_malloc(size, align);
+    if (!size) { _aligned_free(p); return NULL; }
+    void *q = _aligned_malloc(size, align);
+    if (!q) return NULL;
+    size_t old = ((AlHdr *)p - 1)->size;
+    memcpy(q, p, old < size ? old : size);
+    _aligned_free(p);
+    return q;
+}
+/* Paths: '\\' becomes '/'. File names are case-sensitive here, unlike Windows (FindFirstFile patterns still match either case). */
+const char *plat_path(const char *in, char *out, size_t n) {
+    size_t i = 0;
+    for (; in[i] && i + 1 < n; i++) out[i] = in[i] == '\\' ? '/' : in[i];
+    out[i] = 0;
+    return out;
+}
+#define P(in, buf) plat_path((in), (buf), sizeof (buf))
+FILE *plat_fopen(const char *path, const char *mode) { char b[PATH_MAX]; return fopen(P(path, b), mode); }
+int plat_remove(const char *path) { char b[PATH_MAX]; return remove(P(path, b)); }
+int plat_rename(const char *a, const char *b) { char x[PATH_MAX], y[PATH_MAX]; return rename(P(a, x), P(b, y)); }
+char *_fullpath(char *out, const char *path, size_t n) {
+    char b[PATH_MAX], r[PATH_MAX];
+    P(path, b);
+    if (!realpath(b, r)) {                            /* the file need not exist: make it absolute without resolving */
+        if (b[0] == '/') snprintf(r, sizeof r, "%s", b);
+        else { char cwd[PATH_MAX]; if (!getcwd(cwd, sizeof cwd)) cwd[0] = 0; snprintf(r, sizeof r, "%s/%s", cwd, b); }
+    }
+    if (!out) return strdup(r);
+    snprintf(out, n, "%s", r);
+    return out;
+}
+int _mkdir(const char *path) { char b[PATH_MAX]; return mkdir(P(path, b), 0777); }
+
+/* ================================================================ files */
+HANDLE CreateFileA(LPCSTR path, DWORD access, DWORD share, SECURITY_ATTRIBUTES *sa, DWORD disp, DWORD flags, HANDLE tmpl) {
+    (void)share; (void)sa; (void)tmpl;               /* no share modes: another open of the file is never refused, as Windows may */
+    char b[PATH_MAX];
+    int of = (access & GENERIC_WRITE) ? ((access & GENERIC_READ) ? O_RDWR : O_WRONLY) : O_RDONLY;
+    switch (disp) {
+    case CREATE_NEW: of |= O_CREAT | O_EXCL; break;
+    case CREATE_ALWAYS: of |= O_CREAT | O_TRUNC; break;
+    case OPEN_ALWAYS: of |= O_CREAT; break;
+    case TRUNCATE_EXISTING: of |= O_TRUNC; break;
+    default: break;
+    }
+    int fd = open(P(path, b), of | O_CLOEXEC, 0666);
+    if (fd < 0 && errno == EISDIR && !(access & GENERIC_WRITE)) fd = open(b, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (fd < 0) { fail_errno(); return INVALID_HANDLE_VALUE; }
+    if (flags & FILE_FLAG_SEQUENTIAL_SCAN) posix_fadvise(fd, 0, 0, POSIX_FADV_SEQUENTIAL);
+    PlatObj *o = obj_new(PO_FILE);
+    o->fd = fd;
+    t_lasterr = 0;
+    return o;
+}
+int plat_handle_fd(HANDLE h) { if (is_tagged(h, FD_TAG)) return (int)((uintptr_t)h & 0xffffffff); return is_obj(h) ? ((PlatObj *)h)->fd : -1; }
+intptr_t _get_osfhandle(int fd) { return fd < 0 ? -1 : (intptr_t)(FD_TAG + (uint64_t)fd); }
+BOOL ReadFile(HANDLE h, LPVOID buf, DWORD n, DWORD *got, OVERLAPPED *ov) {
+    int fd = plat_handle_fd(h);
+    size_t done = 0;
+    while (done < n) {
+        ssize_t k = ov ? pread(fd, (char *)buf + done, n - done, (off_t)(((uint64_t)ov->OffsetHigh << 32 | ov->Offset) + done))
+                       : read(fd, (char *)buf + done, n - done);
+        if (k < 0) { if (errno == EINTR) continue; if (got) *got = (DWORD)done; return fail_errno(); }
+        if (!k) break;
+        done += (size_t)k;
+    }
+    if (got) *got = (DWORD)done;
+    return TRUE;
+}
+BOOL WriteFile(HANDLE h, LPCVOID buf, DWORD n, DWORD *put, OVERLAPPED *ov) {
+    int fd = plat_handle_fd(h);
+    size_t done = 0;
+    while (done < n) {
+        ssize_t k = ov ? pwrite(fd, (const char *)buf + done, n - done, (off_t)(((uint64_t)ov->OffsetHigh << 32 | ov->Offset) + done))
+                       : write(fd, (const char *)buf + done, n - done);
+        if (k < 0) { if (errno == EINTR) continue; if (put) *put = (DWORD)done; return fail_errno(); }
+        done += (size_t)k;
+    }
+    if (put) *put = (DWORD)done;
+    return TRUE;
+}
+BOOL SetFilePointerEx(HANDLE h, LARGE_INTEGER dist, LARGE_INTEGER *pos, DWORD how) {
+    off_t r = lseek(plat_handle_fd(h), (off_t)dist.QuadPart, how == FILE_BEGIN ? SEEK_SET : how == FILE_CURRENT ? SEEK_CUR : SEEK_END);
+    if (r < 0) return fail_errno();
+    if (pos) pos->QuadPart = r;
+    return TRUE;
+}
+DWORD SetFilePointer(HANDLE h, LONG lo, LONG *hi, DWORD how) {
+    LARGE_INTEGER d, p;
+    d.QuadPart = hi ? ((LONGLONG)*hi << 32) | (DWORD)lo : lo;
+    if (!SetFilePointerEx(h, d, &p, how)) return INVALID_FILE_SIZE;
+    if (hi) *hi = p.HighPart;
+    return p.LowPart;
+}
+BOOL GetFileSizeEx(HANDLE h, LARGE_INTEGER *size) { struct stat st; if (fstat(plat_handle_fd(h), &st)) return fail_errno(); size->QuadPart = st.st_size; return TRUE; }
+DWORD GetFileSize(HANDLE h, DWORD *hi) { LARGE_INTEGER s; if (!GetFileSizeEx(h, &s)) return INVALID_FILE_SIZE; if (hi) *hi = (DWORD)s.HighPart; return s.LowPart; }
+BOOL SetEndOfFile(HANDLE h) { int fd = plat_handle_fd(h); off_t p = lseek(fd, 0, SEEK_CUR); return p >= 0 && !ftruncate(fd, p) ? TRUE : fail_errno(); }
+BOOL FlushFileBuffers(HANDLE h) { return fsync(plat_handle_fd(h)) ? fail_errno() : TRUE; }
+static DWORD attrs_of(const struct stat *st, const char *name) {
+    DWORD a = S_ISDIR(st->st_mode) ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_ARCHIVE;
+    if (!(st->st_mode & S_IWUSR)) a |= FILE_ATTRIBUTE_READONLY;
+    if (name && name[0] == '.' && name[1] && strcmp(name, "..")) a |= FILE_ATTRIBUTE_HIDDEN;
+    return a;
+}
+DWORD GetFileAttributesA(LPCSTR path) { char b[PATH_MAX]; struct stat st; if (stat(P(path, b), &st)) { fail_errno(); return INVALID_FILE_ATTRIBUTES; } return attrs_of(&st, NULL); }
+static void st_times(const struct stat *st, FILETIME *c, FILETIME *a, FILETIME *w) {
+    ft_set(c, ts_to_ft(&st->st_ctim)); ft_set(a, ts_to_ft(&st->st_atim)); ft_set(w, ts_to_ft(&st->st_mtim));
+}
+BOOL GetFileAttributesExA(LPCSTR path, GET_FILEEX_INFO_LEVELS lvl, LPVOID out) {
+    (void)lvl;
+    char b[PATH_MAX]; struct stat st;
+    if (stat(P(path, b), &st)) return fail_errno();
+    WIN32_FILE_ATTRIBUTE_DATA *d = out;
+    d->dwFileAttributes = attrs_of(&st, NULL);
+    st_times(&st, &d->ftCreationTime, &d->ftLastAccessTime, &d->ftLastWriteTime);
+    d->nFileSizeHigh = (DWORD)((uint64_t)st.st_size >> 32); d->nFileSizeLow = (DWORD)st.st_size;
+    return TRUE;
+}
+BOOL SetFileAttributesA(LPCSTR path, DWORD attr) { (void)path; (void)attr; return TRUE; }      /* no attributes kept; a file's own mode never stops its deletion here (nnfs.c clears read-only for that) */
+BOOL CreateDirectoryA(LPCSTR path, SECURITY_ATTRIBUTES *sa) { (void)sa; char b[PATH_MAX]; return mkdir(P(path, b), 0777) ? fail_errno() : TRUE; }
+BOOL RemoveDirectoryA(LPCSTR path) { char b[PATH_MAX]; return rmdir(P(path, b)) ? fail_errno() : TRUE; }
+BOOL DeleteFileA(LPCSTR path) { char b[PATH_MAX]; return unlink(P(path, b)) ? fail_errno() : TRUE; }
+BOOL MoveFileExA(LPCSTR from, LPCSTR to, DWORD flags) {      /* rename() replaces the target in one step, as MOVEFILE_REPLACE_EXISTING does */
+    char a[PATH_MAX], b[PATH_MAX];
+    P(from, a); P(to, b);
+    if (!(flags & MOVEFILE_REPLACE_EXISTING) && !access(b, F_OK)) { t_lasterr = ERROR_ALREADY_EXISTS; return FALSE; }
+    if (rename(a, b)) return fail_errno();
+    if (flags & MOVEFILE_WRITE_THROUGH) {                /* the file and the folder entry on disk before returning */
+        int fd = open(b, O_RDONLY | O_CLOEXEC);
+        if (fd >= 0) { fsync(fd); close(fd); }
+        char dir[PATH_MAX]; snprintf(dir, sizeof dir, "%s", b);
+        char *sl = strrchr(dir, '/');
+        if (sl) { *sl = 0; fd = open(sl == dir ? "/" : dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC); }
+        else fd = open(".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        if (fd >= 0) { fsync(fd); close(fd); }
+    }
+    return TRUE;
+}
+BOOL CopyFileA(LPCSTR from, LPCSTR to, BOOL fail_if_exists) {
+    char a[PATH_MAX], b[PATH_MAX];
+    int in = open(P(from, a), O_RDONLY | O_CLOEXEC);
+    if (in < 0) return fail_errno();
+    int out = open(P(to, b), O_WRONLY | O_CREAT | O_CLOEXEC | (fail_if_exists ? O_EXCL : O_TRUNC), 0666);
+    if (out < 0) { close(in); return fail_errno(); }
+    char buf[1 << 16]; ssize_t k; BOOL ok = TRUE;
+    while ((k = read(in, buf, sizeof buf)) > 0) if (write(out, buf, (size_t)k) != k) { ok = fail_errno(); break; }
+    close(in); close(out);
+    return ok;
+}
+DWORD GetTempPathA(DWORD n, LPSTR out) { const char *t = getenv("TMPDIR"); int k = snprintf(out, n, "%s/", t && t[0] ? t : "/tmp"); return (DWORD)k; }
+BOOL GetDiskFreeSpaceExA(LPCSTR path, ULARGE_INTEGER *avail, ULARGE_INTEGER *total, ULARGE_INTEGER *free_) {
+    char b[PATH_MAX]; struct statvfs s;
+    if (statvfs(path ? P(path, b) : ".", &s)) return fail_errno();
+    if (avail) avail->QuadPart = (ULONGLONG)s.f_bavail * s.f_frsize;
+    if (total) total->QuadPart = (ULONGLONG)s.f_blocks * s.f_frsize;
+    if (free_) free_->QuadPart = (ULONGLONG)s.f_bfree * s.f_frsize;
+    return TRUE;
+}
+DWORD GetCurrentDirectoryA(DWORD n, LPSTR out) { char b[PATH_MAX]; if (!getcwd(b, sizeof b)) return 0; DWORD k = (DWORD)strlen(b); if (k + 1 > n) return k + 1; memcpy(out, b, k + 1); return k; }
+BOOL SetCurrentDirectoryA(LPCSTR path) { char b[PATH_MAX]; return chdir(P(path, b)) ? fail_errno() : TRUE; }
+DWORD GetFullPathNameA(LPCSTR path, DWORD n, LPSTR out, LPSTR *file) {
+    char r[PATH_MAX];
+    _fullpath(r, path, sizeof r);
+    DWORD k = (DWORD)strlen(r);
+    if (k + 1 > n) return k + 1;
+    memcpy(out, r, k + 1);
+    if (file) { char *s = strrchr(out, '/'); *file = s ? s + 1 : out; }
+    return k;
+}
+static BOOL find_next(PlatObj *o, WIN32_FIND_DATAA *fd) {
+    struct dirent *e;
+    while ((e = readdir(o->dir))) {
+        if (fnmatch(o->pattern, e->d_name, FNM_CASEFOLD)) continue;
+        char full[PATH_MAX]; struct stat st;
+        snprintf(full, sizeof full, "%s/%s", o->dir_path, e->d_name);
+        memset(fd, 0, sizeof *fd);
+        if (!stat(full, &st)) {
+            fd->dwFileAttributes = attrs_of(&st, e->d_name);
+            st_times(&st, &fd->ftCreationTime, &fd->ftLastAccessTime, &fd->ftLastWriteTime);
+            fd->nFileSizeHigh = (DWORD)((uint64_t)st.st_size >> 32); fd->nFileSizeLow = (DWORD)st.st_size;
+        } else fd->dwFileAttributes = FILE_ATTRIBUTE_NORMAL;
+        snprintf(fd->cFileName, sizeof fd->cFileName, "%s", e->d_name);
+        return TRUE;
+    }
+    t_lasterr = ERROR_NO_MORE_FILES;
+    return FALSE;
+}
+HANDLE FindFirstFileA(LPCSTR pattern, WIN32_FIND_DATAA *fd) {
+    char b[PATH_MAX];
+    P(pattern, b);
+    char *slash = strrchr(b, '/');
+    PlatObj *o = obj_new(PO_FIND);
+    if (slash) { *slash = 0; snprintf(o->dir_path, sizeof o->dir_path, "%s", b[0] ? b : "/"); snprintf(o->pattern, sizeof o->pattern, "%s", slash + 1); }
+    else { snprintf(o->dir_path, sizeof o->dir_path, "."); snprintf(o->pattern, sizeof o->pattern, "%s", b); }
+    if (!strcmp(o->pattern, "*.*")) snprintf(o->pattern, sizeof o->pattern, "*");
+    o->dir = opendir(o->dir_path);
+    if (!o->dir) { fail_errno(); if (t_lasterr == ERROR_FILE_NOT_FOUND) t_lasterr = ERROR_PATH_NOT_FOUND; obj_release(o); return INVALID_HANDLE_VALUE; }
+    if (!find_next(o, fd)) { obj_release(o); t_lasterr = ERROR_FILE_NOT_FOUND; return INVALID_HANDLE_VALUE; }
+    return o;
+}
+BOOL FindNextFileA(HANDLE h, WIN32_FIND_DATAA *fd) { return find_next(h, fd); }
+BOOL FindClose(HANDLE h) { if (!is_obj(h)) return FALSE; obj_release(h); return TRUE; }
+
+/* ================================================================ modules */
+/* bcrypt.dll: nnro.c asks it for SHA-256; this is the one Windows DLL with no Linux library behind it. */
+typedef struct { uint32_t h[8]; uint64_t n; uint8_t buf[64]; } Sha256;
+static const uint32_t K256[64] = {
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+    0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+    0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+    0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2};
+#define ROR(x, n) (((x) >> (n)) | ((x) << (32 - (n))))
+static void sha_block(Sha256 *s, const uint8_t *p) {
+    uint32_t w[64], a, b, c, d, e, f, g, h;
+    for (int i = 0; i < 16; i++) w[i] = (uint32_t)p[i * 4] << 24 | (uint32_t)p[i * 4 + 1] << 16 | (uint32_t)p[i * 4 + 2] << 8 | p[i * 4 + 3];
+    for (int i = 16; i < 64; i++) {
+        uint32_t s0 = ROR(w[i - 15], 7) ^ ROR(w[i - 15], 18) ^ (w[i - 15] >> 3), s1 = ROR(w[i - 2], 17) ^ ROR(w[i - 2], 19) ^ (w[i - 2] >> 10);
+        w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+    }
+    a = s->h[0]; b = s->h[1]; c = s->h[2]; d = s->h[3]; e = s->h[4]; f = s->h[5]; g = s->h[6]; h = s->h[7];
+    for (int i = 0; i < 64; i++) {
+        uint32_t t1 = h + (ROR(e, 6) ^ ROR(e, 11) ^ ROR(e, 25)) + ((e & f) ^ (~e & g)) + K256[i] + w[i];
+        uint32_t t2 = (ROR(a, 2) ^ ROR(a, 13) ^ ROR(a, 22)) + ((a & b) ^ (a & c) ^ (b & c));
+        h = g; g = f; f = e; e = d + t1; d = c; c = b; b = a; a = t1 + t2;
+    }
+    s->h[0] += a; s->h[1] += b; s->h[2] += c; s->h[3] += d; s->h[4] += e; s->h[5] += f; s->h[6] += g; s->h[7] += h;
+}
+static void sha256(const uint8_t *p, size_t n, uint8_t out[32]) {
+    Sha256 s = {{0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19}, 0, {0}};
+    size_t i = 0;
+    for (; i + 64 <= n; i += 64) sha_block(&s, p + i);
+    uint8_t t[128] = {0};
+    size_t r = n - i;
+    memcpy(t, p + i, r);
+    t[r] = 0x80;
+    size_t tl = r + 9 <= 64 ? 64 : 128;
+    uint64_t bits = (uint64_t)n * 8;
+    for (int k = 0; k < 8; k++) t[tl - 1 - k] = (uint8_t)(bits >> (k * 8));
+    sha_block(&s, t);
+    if (tl == 128) sha_block(&s, t + 64);
+    for (int k = 0; k < 8; k++) { out[k * 4] = (uint8_t)(s.h[k] >> 24); out[k * 4 + 1] = (uint8_t)(s.h[k] >> 16); out[k * 4 + 2] = (uint8_t)(s.h[k] >> 8); out[k * 4 + 3] = (uint8_t)s.h[k]; }
+}
+static LONG bc_open(void **alg, LPCWSTR id, LPCWSTR impl, ULONG flags) { (void)id; (void)impl; (void)flags; *alg = (void *)1; return 0; }
+static LONG bc_hash(void *alg, uint8_t *secret, ULONG ns, const uint8_t *in, ULONG n, uint8_t *out, ULONG nout) {
+    (void)alg; (void)secret; (void)ns;
+    if (nout < 32) return (LONG)0xC0000023;
+    sha256(in, n, out);
+    return 0;
+}
+static LONG bc_close(void *alg, ULONG flags) { (void)alg; (void)flags; return 0; }
+static char g_bcrypt_tag;
+#define BCRYPT_MODULE ((HMODULE)&g_bcrypt_tag)
+
+static const char *exe_dir(void) {
+    static char dir[PATH_MAX];
+    if (!dir[0]) { ssize_t k = readlink("/proc/self/exe", dir, sizeof dir - 1); if (k > 0) { dir[k] = 0; char *s = strrchr(dir, '/'); if (s) *s = 0; } else strcpy(dir, "."); }
+    return dir;
+}
+HMODULE LoadLibraryA(LPCSTR name) {
+    static const struct { const char *win, *linux_; } map[] = {
+        {"vulkan-1.dll", "libvulkan.so.1"}, {"libopus-0.dll", "libopus.so.0"}, {"opus.dll", "libopus.so.0"},
+        {"SDL3.dll", "libSDL3.so.0"}, {"opengl32.dll", "libGL.so.1"},
+    };
+    char b[PATH_MAX], c[PATH_MAX];
+    P(name, b);
+    const char *base = strrchr(b, '/') ? strrchr(b, '/') + 1 : b;
+    if (!strcasecmp(base, "bcrypt.dll")) return BCRYPT_MODULE;
+    for (size_t i = 0; i < sizeof map / sizeof *map; i++)
+        if (!strcasecmp(base, map[i].win)) { void *h = dlopen(map[i].linux_, RTLD_NOW | RTLD_LOCAL); if (!h) t_lasterr = ERROR_FILE_NOT_FOUND; return h; }
+    size_t n = strlen(b);
+    if (n > 4 && !strcasecmp(b + n - 4, ".dll")) strcpy(b + n - 4, ".so");     /* our own modules: x.dll -> x.so */
+    /* Windows looks next to the exe first; dlopen only does that for a path */
+    if (b[0] != '/') snprintf(c, sizeof c, "%s/%s", exe_dir(), b); else snprintf(c, sizeof c, "%s", b);
+    void *h = dlopen(c, RTLD_NOW | RTLD_LOCAL);
+    if (!h && b[0] != '/') h = dlopen(b, RTLD_NOW | RTLD_LOCAL);
+    if (!h) { t_lasterr = ERROR_FILE_NOT_FOUND; if (getenv("SSBU_PLAT_DLERROR")) fprintf(stderr, "plat: dlopen %s: %s\n", c, dlerror()); }
+    return h;
+}
+FARPROC GetProcAddress(HMODULE m, LPCSTR name) {
+    if (m == BCRYPT_MODULE) {
+        if (!strcmp(name, "BCryptOpenAlgorithmProvider")) return (FARPROC)bc_open;
+        if (!strcmp(name, "BCryptHash")) return (FARPROC)bc_hash;
+        if (!strcmp(name, "BCryptCloseAlgorithmProvider")) return (FARPROC)bc_close;
+        return NULL;
+    }
+    return dlsym(m ? m : RTLD_DEFAULT, name);
+}
+BOOL FreeLibrary(HMODULE m) { if (m == BCRYPT_MODULE) return TRUE; return dlclose(m) == 0; }
+HMODULE GetModuleHandleA(LPCSTR name) {
+    if (!name) return dlopen(NULL, RTLD_NOW);
+    char b[PATH_MAX];
+    P(name, b);
+    size_t n = strlen(b);
+    if (n > 4 && !strcasecmp(b + n - 4, ".dll")) strcpy(b + n - 4, ".so");
+    return dlopen(b, RTLD_NOW | RTLD_NOLOAD);
+}
+BOOL GetModuleHandleExA(DWORD flags, LPCSTR name, HMODULE *out) {
+    *out = NULL;
+    if (!(flags & GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS)) { *out = GetModuleHandleA(name); return *out != NULL; }
+    Dl_info di;
+    if (!dladdr((const void *)name, &di) || !di.dli_fname) return FALSE;
+    void *self = dlopen(NULL, RTLD_NOW);
+    Dl_info me;
+    if (dladdr((void *)&GetModuleHandleExA, &me) && me.dli_fbase == di.dli_fbase) { *out = self; return TRUE; }
+    *out = dlopen(di.dli_fname, RTLD_NOW | RTLD_NOLOAD);
+    return *out != NULL;
+}
+DWORD GetModuleFileNameA(HMODULE m, LPSTR out, DWORD n) {
+    char b[PATH_MAX] = "";
+    if (!m || m == dlopen(NULL, RTLD_NOW)) { ssize_t k = readlink("/proc/self/exe", b, sizeof b - 1); if (k < 0) k = 0; b[k] = 0; }
+    else { struct link_map *lm = NULL; if (!dlinfo(m, RTLD_DI_LINKMAP, &lm) && lm) snprintf(b, sizeof b, "%s", lm->l_name); }
+    for (char *p = b; *p; p++) if (*p == '/') *p = '\\';      /* Windows form: callers cut at the last '\\'; every file function here turns it back */
+    DWORD k = (DWORD)snprintf(out, n, "%s", b);
+    return k < n ? k : n;
+}
+uintptr_t plat_module_base(HMODULE m) {
+    Dl_info di;
+    if (!m || m == dlopen(NULL, RTLD_NOW)) { if (dladdr((void *)&plat_module_base, &di)) return (uintptr_t)di.dli_fbase; return 0; }
+    struct link_map *lm = NULL;
+    if (!dlinfo(m, RTLD_DI_LINKMAP, &lm) && lm) return (uintptr_t)lm->l_addr;
+    return 0;
+}
+
+/* ================================================================ text: UTF-8 <-> wchar_t (UTF-32 here)
+ * wchar_t is 32 bits on Linux (16 on Windows: UTF-16), so a character is always one wchar_t; the code page is always UTF-8. */
+int MultiByteToWideChar(UINT cp, DWORD flags, LPCSTR s, int n, LPWSTR w, int wn) {
+    (void)cp; (void)flags;
+    const uint8_t *p = (const uint8_t *)s, *e = n < 0 ? NULL : p + n;
+    int k = 0;
+    for (;;) {
+        if (e ? p >= e : 0) break;
+        uint32_t c = *p;
+        int len = c < 0x80 ? 1 : c < 0xe0 ? 2 : c < 0xf0 ? 3 : 4;
+        if (len > 1) { c &= 0x3f >> (len - 1); for (int i = 1; i < len && (!e || p + i < e); i++) c = c << 6 | (p[i] & 0x3f); }
+        p += len;
+        if (w && wn) { if (k >= wn) return 0; w[k] = (wchar_t)c; }
+        k++;
+        if (!e && c == 0) break;
+    }
+    return k;
+}
+int WideCharToMultiByte(UINT cp, DWORD flags, LPCWSTR w, int wn, LPSTR s, int n, LPCSTR def, LPBOOL used) {
+    (void)cp; (void)flags; (void)def;
+    if (used) *used = FALSE;
+    int k = 0;
+    for (int i = 0; wn < 0 || i < wn; i++) {
+        uint32_t c = (uint32_t)w[i];
+        uint8_t t[4]; int len;
+        if (c < 0x80) { t[0] = (uint8_t)c; len = 1; }
+        else if (c < 0x800) { t[0] = (uint8_t)(0xc0 | c >> 6); t[1] = (uint8_t)(0x80 | (c & 0x3f)); len = 2; }
+        else if (c < 0x10000) { t[0] = (uint8_t)(0xe0 | c >> 12); t[1] = (uint8_t)(0x80 | (c >> 6 & 0x3f)); t[2] = (uint8_t)(0x80 | (c & 0x3f)); len = 3; }
+        else { t[0] = (uint8_t)(0xf0 | c >> 18); t[1] = (uint8_t)(0x80 | (c >> 12 & 0x3f)); t[2] = (uint8_t)(0x80 | (c >> 6 & 0x3f)); t[3] = (uint8_t)(0x80 | (c & 0x3f)); len = 4; }
+        if (s && n) { if (k + len > n) return 0; memcpy(s + k, t, (size_t)len); }
+        k += len;
+        if (wn < 0 && c == 0) break;
+    }
+    return k;
+}
+
+/* ================================================================ keyboard, focus, message boxes (SDL) */
+static SDL_Scancode vk_scancode(int vk) {
+    if (vk >= 'A' && vk <= 'Z') return (SDL_Scancode)(SDL_SCANCODE_A + (vk - 'A'));
+    if (vk >= '1' && vk <= '9') return (SDL_Scancode)(SDL_SCANCODE_1 + (vk - '1'));
+    if (vk == '0') return SDL_SCANCODE_0;
+    if (vk >= VK_F1 && vk < VK_F1 + 12) return (SDL_Scancode)(SDL_SCANCODE_F1 + (vk - VK_F1));
+    if (vk >= VK_NUMPAD0 + 1 && vk <= VK_NUMPAD0 + 9) return (SDL_Scancode)(SDL_SCANCODE_KP_1 + (vk - VK_NUMPAD0 - 1));
+    switch (vk) {
+    case VK_NUMPAD0: return SDL_SCANCODE_KP_0;
+    case VK_BACK: return SDL_SCANCODE_BACKSPACE;
+    case VK_TAB: return SDL_SCANCODE_TAB;
+    case VK_RETURN: return SDL_SCANCODE_RETURN;
+    case VK_ESCAPE: return SDL_SCANCODE_ESCAPE;
+    case VK_SPACE: return SDL_SCANCODE_SPACE;
+    case VK_PRIOR: return SDL_SCANCODE_PAGEUP;
+    case VK_NEXT: return SDL_SCANCODE_PAGEDOWN;
+    case VK_END: return SDL_SCANCODE_END;
+    case VK_HOME: return SDL_SCANCODE_HOME;
+    case VK_LEFT: return SDL_SCANCODE_LEFT;
+    case VK_UP: return SDL_SCANCODE_UP;
+    case VK_RIGHT: return SDL_SCANCODE_RIGHT;
+    case VK_DOWN: return SDL_SCANCODE_DOWN;
+    case VK_INSERT: return SDL_SCANCODE_INSERT;
+    case VK_DELETE: return SDL_SCANCODE_DELETE;
+    case VK_LSHIFT: return SDL_SCANCODE_LSHIFT;
+    case VK_RSHIFT: return SDL_SCANCODE_RSHIFT;
+    case VK_LCONTROL: return SDL_SCANCODE_LCTRL;
+    case VK_RCONTROL: return SDL_SCANCODE_RCTRL;
+    case VK_OEM_PLUS: return SDL_SCANCODE_EQUALS;
+    case VK_OEM_MINUS: return SDL_SCANCODE_MINUS;
+    case 0xBA: return SDL_SCANCODE_SEMICOLON;
+    case 0xBC: return SDL_SCANCODE_COMMA;
+    case 0xBE: return SDL_SCANCODE_PERIOD;
+    case 0xBF: return SDL_SCANCODE_SLASH;
+    case 0xC0: return SDL_SCANCODE_GRAVE;
+    case 0xDB: return SDL_SCANCODE_LEFTBRACKET;
+    case 0xDC: return SDL_SCANCODE_BACKSLASH;
+    case 0xDD: return SDL_SCANCODE_RIGHTBRACKET;
+    case 0xDE: return SDL_SCANCODE_APOSTROPHE;
+    default: return SDL_SCANCODE_UNKNOWN;
+    }
+}
+SHORT GetAsyncKeyState(int vk) {
+    /* SDL's keyboard state is updated by the window thread's event loop (display.c) */
+    int n = 0;
+    const bool *ks = SDL_GetKeyboardState(&n);
+    if (!ks) return 0;
+    int down;
+    if (vk == VK_SHIFT) down = ks[SDL_SCANCODE_LSHIFT] || ks[SDL_SCANCODE_RSHIFT];
+    else if (vk == VK_CONTROL) down = ks[SDL_SCANCODE_LCTRL] || ks[SDL_SCANCODE_RCTRL];
+    else if (vk == VK_MENU) down = ks[SDL_SCANCODE_LALT] || ks[SDL_SCANCODE_RALT];
+    else { SDL_Scancode sc = vk_scancode(vk); down = sc != SDL_SCANCODE_UNKNOWN && (int)sc < n && ks[sc]; }
+    return down ? (SHORT)0x8000 : 0;
+}
+HWND plat_game_window;                               /* display.c: the SDL_Window */
+HWND GetForegroundWindow(void) { return plat_game_window && SDL_GetKeyboardFocus() == (SDL_Window *)plat_game_window ? plat_game_window : NULL; }
+int MessageBoxA(HWND w, LPCSTR text, LPCSTR title, UINT type) {
+    (void)w;
+    fprintf(stderr, "[%s] %s\n", title ? title : "", text ? text : "");
+    if ((type & 0xf) == MB_YESNO) {
+        const SDL_MessageBoxButtonData b[2] = {{SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, IDYES, "Yes"}, {SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT, IDNO, "No"}};
+        const SDL_MessageBoxData d = {SDL_MESSAGEBOX_WARNING, NULL, title, text, 2, b, NULL};
+        int id = IDNO;
+        if (!SDL_ShowMessageBox(&d, &id)) return IDNO;
+        return id;
+    }
+    SDL_ShowSimpleMessageBox((type & 0xf0) == MB_ICONERROR ? SDL_MESSAGEBOX_ERROR : (type & 0xf0) == MB_ICONWARNING ? SDL_MESSAGEBOX_WARNING : SDL_MESSAGEBOX_INFORMATION, title, text, NULL);
+    return IDOK;
+}
+int MessageBoxW(HWND w, LPCWSTR text, LPCWSTR title, UINT type) {
+    char t[2048], h[256];
+    WideCharToMultiByte(CP_UTF8, 0, text, -1, t, sizeof t, NULL, NULL);
+    WideCharToMultiByte(CP_UTF8, 0, title, -1, h, sizeof h, NULL, NULL);
+    return MessageBoxA(w, t, h, type);
+}
+
+/* ================================================================ odds and ends */
+DWORD GetCurrentProcessorNumber(void) { int c = sched_getcpu(); return c < 0 ? 0 : (DWORD)c; }
+BOOLEAN SystemFunction036(PVOID buf, ULONG n) {
+    for (ULONG done = 0; done < n;) { ssize_t k = getrandom((char *)buf + done, n - done, 0); if (k < 0) { if (errno == EINTR) continue; return FALSE; } done += (ULONG)k; }
+    return TRUE;
+}
+BOOL QueryThreadCycleTime(HANDLE h, ULONG64 *cycles) {
+    clockid_t id = CLOCK_THREAD_CPUTIME_ID;
+    if (is_obj(h) && ((PlatObj *)h)->kind == PO_THREAD && pthread_getcpuclockid(((PlatObj *)h)->th, &id)) return FALSE;
+    struct timespec ts;
+    if (clock_gettime(id, &ts)) return FALSE;
+    *cycles = (ULONG64)ts.tv_sec * 1000000000ULL + (ULONG64)ts.tv_nsec;
+    return TRUE;
+}
+HANDLE OpenProcess(DWORD access, BOOL inherit, DWORD pid) {
+    (void)access; (void)inherit;
+    if (kill((pid_t)pid, 0) && errno == ESRCH) { t_lasterr = ERROR_INVALID_PARAMETER; return NULL; }
+    return (HANDLE)(uintptr_t)(PID_TAG + pid);
+}
+BOOL GetExitCodeProcess(HANDLE p, DWORD *code) {
+    if (!is_tagged(p, PID_TAG)) return FALSE;
+    *code = kill((pid_t)((uintptr_t)p & 0xffffffff), 0) && errno == ESRCH ? 0 : STILL_ACTIVE;
+    return TRUE;
+}
+static const char *user_name(void) {
+    const char *u = getenv("USER");
+    if (!u || !u[0]) { struct passwd *pw = getpwuid(getuid()); u = pw ? pw->pw_name : ""; }
+    return u;
+}
+BOOL GetUserNameA(LPSTR out, DWORD *n) { const char *u = user_name(); DWORD k = (DWORD)strlen(u) + 1; if (k > *n) { *n = k; return FALSE; } memcpy(out, u, k); *n = k; return TRUE; }
+BOOL GetUserNameW(LPWSTR out, DWORD *n) { int k = MultiByteToWideChar(CP_UTF8, 0, user_name(), -1, out, (int)*n); if (!k) return FALSE; *n = (DWORD)k; return TRUE; }
+int GetUserDefaultGeoName(LPWSTR out, int n) {
+    const char *l = getenv("LC_ALL");
+    if (!l || !l[0]) l = getenv("LANG");
+    const char *us = l ? strchr(l, '_') : NULL;
+    char cc[3] = "US";
+    if (us && us[1] && us[2]) { cc[0] = us[1]; cc[1] = us[2]; }
+    return MultiByteToWideChar(CP_UTF8, 0, cc, -1, out, n);
+}
+static void find_w(const WIN32_FIND_DATAA *a, WIN32_FIND_DATAW *w) {
+    w->dwFileAttributes = a->dwFileAttributes;
+    w->ftCreationTime = a->ftCreationTime; w->ftLastAccessTime = a->ftLastAccessTime; w->ftLastWriteTime = a->ftLastWriteTime;
+    w->nFileSizeHigh = a->nFileSizeHigh; w->nFileSizeLow = a->nFileSizeLow;
+    MultiByteToWideChar(CP_UTF8, 0, a->cFileName, -1, w->cFileName, MAX_PATH);
+    w->cAlternateFileName[0] = 0;
+}
+HANDLE FindFirstFileW(LPCWSTR pattern, WIN32_FIND_DATAW *fd) {
+    char p[PATH_MAX * 2];
+    WIN32_FIND_DATAA a;
+    if (!WideCharToMultiByte(CP_UTF8, 0, pattern, -1, p, sizeof p, NULL, NULL)) return INVALID_HANDLE_VALUE;
+    HANDLE h = FindFirstFileA(p, &a);
+    if (h != INVALID_HANDLE_VALUE) find_w(&a, fd);
+    return h;
+}
+BOOL FindNextFileW(HANDLE h, WIN32_FIND_DATAW *fd) { WIN32_FIND_DATAA a; if (!FindNextFileA(h, &a)) return FALSE; find_w(&a, fd); return TRUE; }
+typedef struct { uintptr_t *pcs; int n, max; } Bt;
+static _Unwind_Reason_Code bt_step(struct _Unwind_Context *uc, void *arg) {
+    Bt *b = arg;
+    if (b->n >= b->max) return _URC_END_OF_STACK;
+    uintptr_t pc = (uintptr_t)_Unwind_GetIP(uc);
+    if (!pc) return _URC_END_OF_STACK;
+    b->pcs[b->n++] = pc;
+    return _URC_NO_REASON;
+}
+int plat_backtrace(uintptr_t *pcs, int max) { Bt b = {pcs, 0, max}; _Unwind_Backtrace(bt_step, &b); return b.n; }
+void *wglGetProcAddress(const char *name) { return (void *)SDL_GL_GetProcAddress(name); }
+
+/* ================================================================ the game window, locale */
+BOOL IsIconic(HWND h) { return h && (SDL_GetWindowFlags((SDL_Window *)h) & SDL_WINDOW_MINIMIZED) != 0; }
+BOOL IsWindowVisible(HWND h) { return h && !(SDL_GetWindowFlags((SDL_Window *)h) & SDL_WINDOW_HIDDEN); }
+BOOL IsWindow(HWND h) { return h && h == plat_game_window; }
+BOOL EnumWindows(WNDENUMPROC fn, LPARAM lp) { if (plat_game_window) fn(plat_game_window, lp); return TRUE; }
+/* Window changes asked from other threads are applied by the window's own thread (plat_window_service, display.c):
+ * SDL wants a window touched by the thread that made it. */
+static pthread_mutex_t g_win_lock = PTHREAD_MUTEX_INITIALIZER;
+static char g_win_title[256];
+static int g_win_title_new, g_win_show = -1;
+BOOL ShowWindow(HWND h, int cmd) {
+    if (!h) return FALSE;
+    pthread_mutex_lock(&g_win_lock); g_win_show = cmd; pthread_mutex_unlock(&g_win_lock);
+    return TRUE;
+}
+BOOL SetWindowTextA(HWND h, LPCSTR text) {
+    if (!h) return FALSE;
+    pthread_mutex_lock(&g_win_lock); snprintf(g_win_title, sizeof g_win_title, "%s", text); g_win_title_new = 1; pthread_mutex_unlock(&g_win_lock);
+    return TRUE;
+}
+void plat_window_service(void) {
+    SDL_Window *w = (SDL_Window *)plat_game_window;
+    char title[256] = ""; int set = 0, show;
+    if (!w) return;
+    pthread_mutex_lock(&g_win_lock);
+    if (g_win_title_new) { memcpy(title, g_win_title, sizeof title); g_win_title_new = 0; set = 1; }
+    show = g_win_show; g_win_show = -1;
+    pthread_mutex_unlock(&g_win_lock);
+    if (set) SDL_SetWindowTitle(w, title);
+    if (show == SW_HIDE) SDL_HideWindow(w);
+    else if (show == SW_MINIMIZE || show == SW_SHOWMINIMIZED || show == SW_SHOWMINNOACTIVE) SDL_MinimizeWindow(w);
+    else if (show >= 0) { SDL_ShowWindow(w); SDL_RestoreWindow(w); }
+}
+DWORD SetThreadExecutionState(DWORD flags) {
+    static DWORD prev = ES_CONTINUOUS;
+    DWORD was = prev;
+    if (flags & ES_DISPLAY_REQUIRED) SDL_DisableScreenSaver(); else SDL_EnableScreenSaver();
+    prev = flags;
+    return was;
+}
+static void locale_tag(char *out, size_t n) {           /* "en_US.UTF-8" -> "en-US" */
+    const char *v = NULL, *names[4] = {"LANGUAGE", "LC_ALL", "LC_MESSAGES", "LANG"};
+    for (int i = 0; i < 4 && !v; i++) { const char *e = getenv(names[i]); if (e && e[0] && strcmp(e, "C") && strcmp(e, "POSIX")) v = e; }
+    if (!v) v = "en_US";
+    size_t k = 0;
+    for (; v[k] && v[k] != '.' && v[k] != '@' && v[k] != ':' && k + 1 < n; k++) out[k] = v[k] == '_' ? '-' : v[k];
+    out[k] = 0;
+}
+BOOL GetUserPreferredUILanguages(DWORD flags, ULONG *count, LPWSTR list, ULONG *size) {
+    (void)flags;
+    char tag[64];
+    locale_tag(tag, sizeof tag);
+    int k = MultiByteToWideChar(CP_UTF8, 0, tag, -1, NULL, 0);
+    if (!list || *size < (ULONG)k + 1) { *size = (ULONG)k + 1; *count = 1; return list == NULL; }
+    MultiByteToWideChar(CP_UTF8, 0, tag, -1, list, (int)*size);
+    list[k] = 0;                                         /* the list ends with an empty string */
+    *count = 1; *size = (ULONG)k + 1;
+    return TRUE;
+}
+int GetUserDefaultLocaleName(LPWSTR out, int n) { char tag[64]; locale_tag(tag, sizeof tag); return MultiByteToWideChar(CP_UTF8, 0, tag, -1, out, n); }
+
+/* ================================================================ CryptoAPI subset (plat/wincrypt.h) on OpenSSL */
+#include "plat/wincrypt.h"
+#include <openssl/evp.h>
+BOOL CryptAcquireContextA(HCRYPTPROV *prov, LPCSTR container, LPCSTR provider, DWORD type, DWORD flags) { (void)container; (void)provider; (void)type; (void)flags; *prov = 1; return TRUE; }
+BOOL CryptReleaseContext(HCRYPTPROV prov, DWORD flags) { (void)prov; (void)flags; return TRUE; }
+BOOL CryptGenRandom(HCRYPTPROV prov, DWORD n, BYTE *buf) { (void)prov; return SystemFunction036(buf, n); }
+BOOL CryptCreateHash(HCRYPTPROV prov, ALG_ID alg, HCRYPTKEY key, DWORD flags, HCRYPTHASH *out) {
+    (void)prov; (void)key; (void)flags;
+    const EVP_MD *md = alg == CALG_MD5 ? EVP_md5() : alg == CALG_SHA1 ? EVP_sha1() : alg == CALG_SHA_256 ? EVP_sha256() : NULL;
+    if (!md) { t_lasterr = ERROR_INVALID_PARAMETER; return FALSE; }
+    EVP_MD_CTX *c = EVP_MD_CTX_new();
+    if (!c || !EVP_DigestInit_ex(c, md, NULL)) { EVP_MD_CTX_free(c); return FALSE; }
+    *out = (HCRYPTHASH)c;
+    return TRUE;
+}
+BOOL CryptHashData(HCRYPTHASH h, const BYTE *data, DWORD n, DWORD flags) { (void)flags; return EVP_DigestUpdate((EVP_MD_CTX *)h, data, n) == 1; }
+BOOL CryptGetHashParam(HCRYPTHASH h, DWORD param, BYTE *out, DWORD *n, DWORD flags) {
+    (void)flags;
+    EVP_MD_CTX *c = (EVP_MD_CTX *)h;
+    DWORD size = (DWORD)EVP_MD_CTX_get_size(c);
+    if (param == HP_HASHSIZE) { if (*n < 4) return FALSE; memcpy(out, &size, 4); *n = 4; return TRUE; }
+    if (param != HP_HASHVAL || *n < size) { *n = size; return FALSE; }
+    EVP_MD_CTX *copy = EVP_MD_CTX_new();               /* Windows lets the hash be read and then closed: finish a copy */
+    unsigned int len = 0;
+    BOOL ok = copy && EVP_MD_CTX_copy_ex(copy, c) && EVP_DigestFinal_ex(copy, out, &len);
+    EVP_MD_CTX_free(copy);
+    *n = len;
+    return ok;
+}
+BOOL CryptDestroyHash(HCRYPTHASH h) { EVP_MD_CTX_free((EVP_MD_CTX *)h); return TRUE; }
+
+static BOOL bad_ptr(const void *p, UINT_PTR n, int write) {
+    if (!p) return n != 0;
+    uintptr_t a = (uintptr_t)p, e = a + (n ? n : 1);
+    while (a < e) {
+        MEMORY_BASIC_INFORMATION mi;
+        if (!VirtualQuery((void *)a, &mi, sizeof mi) || mi.State != MEM_COMMIT || (mi.Protect & (PAGE_NOACCESS | PAGE_GUARD))) return TRUE;
+        if (write && !(mi.Protect & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE | PAGE_WRITECOPY))) return TRUE;
+        a = (uintptr_t)mi.BaseAddress + mi.RegionSize;
+    }
+    return FALSE;
+}
+BOOL IsBadReadPtr(const void *p, UINT_PTR n) { return bad_ptr(p, n, 0); }
+BOOL IsBadWritePtr(void *p, UINT_PTR n) { return bad_ptr(p, n, 1); }
+BOOL GetClientRect(HWND h, RECT *r) {
+    int w = 0, hh = 0;
+    r->left = r->top = 0;
+    if (h) SDL_GetWindowSizeInPixels((SDL_Window *)h, &w, &hh);
+    r->right = w; r->bottom = hh;
+    return h != NULL;
+}
+int GetWindowTextA(HWND h, LPSTR out, int n) {
+    if (n <= 0) return 0;
+    pthread_mutex_lock(&g_win_lock);
+    if (g_win_title[0] || !h) snprintf(out, (size_t)n, "%s", g_win_title);
+    else { const char *t = SDL_GetWindowTitle((SDL_Window *)h); snprintf(out, (size_t)n, "%s", t ? t : ""); }
+    pthread_mutex_unlock(&g_win_lock);
+    return (int)strlen(out);
+}
+
+/* ================================================================ waveOut on SDL3 audio (plat/mmsystem.h) */
+#include "plat/mmsystem.h"
+/* waveOut: buffers play in order; one is marked WHDR_DONE (and the event set) when SDL has pulled all of it, a little before
+ * it is heard; waveOutGetPosition subtracts what SDL still holds. */
+struct HWAVEOUT__ {
+    SDL_AudioStream *stream;
+    pthread_mutex_t lock;
+    WAVEHDR *head, *tail;                /* written, not yet fully pulled */
+    DWORD offset;                        /* bytes of head already pulled */
+    HANDLE event;
+    int block;                           /* bytes per frame */
+    uint64_t pulled;                     /* bytes handed to SDL since open / reset */
+};
+static void SDLCALL wave_pull(void *user, SDL_AudioStream *st, int additional, int total) {
+    (void)total;
+    HWAVEOUT w = user;
+    uint8_t buf[16384];
+    pthread_mutex_lock(&w->lock);
+    while (additional > 0) {
+        int n = 0;
+        while (n < (int)sizeof buf && n < additional && w->head) {
+            DWORD left = w->head->dwBufferLength - w->offset;
+            int k = (int)left;
+            if (k > (int)sizeof buf - n) k = (int)sizeof buf - n;
+            if (k > additional - n) k = additional - n;
+            memcpy(buf + n, w->head->lpData + w->offset, (size_t)k);
+            n += k; w->offset += (DWORD)k;
+            if (w->offset >= w->head->dwBufferLength) {
+                WAVEHDR *h = w->head;
+                w->head = h->lpNext; if (!w->head) w->tail = NULL;
+                w->offset = 0;
+                h->lpNext = NULL;
+                __atomic_store_n(&h->dwFlags, (h->dwFlags & ~(DWORD)WHDR_INQUEUE) | WHDR_DONE, __ATOMIC_RELEASE);
+                if (w->event) SetEvent(w->event);
+            }
+        }
+        if (!n) break;                                   /* nothing queued: SDL plays silence */
+        SDL_PutAudioStreamData(st, buf, n);
+        w->pulled += (uint64_t)n;
+        additional -= n;
+    }
+    pthread_mutex_unlock(&w->lock);
+}
+MMRESULT waveOutOpen(HWAVEOUT *out, UINT dev, const WAVEFORMATEX *f, DWORD_PTR cb, DWORD_PTR inst, DWORD flags) {
+    (void)dev; (void)inst;
+    *out = NULL;
+    if (!SDL_WasInit(SDL_INIT_AUDIO) && !SDL_InitSubSystem(SDL_INIT_AUDIO)) { fprintf(stderr, "plat: SDL audio cannot start: %s\n", SDL_GetError()); return MMSYSERR_NODRIVER; }
+    HWAVEOUT w = calloc(1, sizeof *w);
+    pthread_mutex_init(&w->lock, NULL);
+    w->event = (flags & CALLBACK_EVENT) ? (HANDLE)cb : NULL;
+    w->block = f->nBlockAlign;
+    SDL_AudioSpec spec = {f->wBitsPerSample == 8 ? SDL_AUDIO_U8 : SDL_AUDIO_S16LE, f->nChannels, (int)f->nSamplesPerSec};
+    w->stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, wave_pull, w);
+    if (!w->stream) { fprintf(stderr, "plat: no audio output: %s\n", SDL_GetError()); pthread_mutex_destroy(&w->lock); free(w); return MMSYSERR_NODRIVER; }
+    SDL_ResumeAudioStreamDevice(w->stream);              /* waveOut starts playing at once */
+    *out = w;
+    return MMSYSERR_NOERROR;
+}
+MMRESULT waveOutPrepareHeader(HWAVEOUT w, WAVEHDR *h, UINT size) { (void)w; (void)size; h->dwFlags |= WHDR_PREPARED; h->dwFlags &= ~(DWORD)WHDR_DONE; return MMSYSERR_NOERROR; }
+MMRESULT waveOutUnprepareHeader(HWAVEOUT w, WAVEHDR *h, UINT size) { (void)w; (void)size; if (h->dwFlags & WHDR_INQUEUE) return WAVERR_STILLPLAYING; h->dwFlags &= ~(DWORD)WHDR_PREPARED; return MMSYSERR_NOERROR; }
+MMRESULT waveOutWrite(HWAVEOUT w, WAVEHDR *h, UINT size) {
+    (void)size;
+    if (!w) return MMSYSERR_INVALHANDLE;
+    pthread_mutex_lock(&w->lock);
+    h->lpNext = NULL;
+    h->dwFlags = (h->dwFlags & ~(DWORD)WHDR_DONE) | WHDR_INQUEUE;
+    if (w->tail) w->tail->lpNext = h; else w->head = h;
+    w->tail = h;
+    pthread_mutex_unlock(&w->lock);
+    return MMSYSERR_NOERROR;
+}
+MMRESULT waveOutPause(HWAVEOUT w) { return w && SDL_PauseAudioStreamDevice(w->stream) ? MMSYSERR_NOERROR : MMSYSERR_ERROR; }
+MMRESULT waveOutRestart(HWAVEOUT w) { return w && SDL_ResumeAudioStreamDevice(w->stream) ? MMSYSERR_NOERROR : MMSYSERR_ERROR; }
+MMRESULT waveOutReset(HWAVEOUT w) {
+    if (!w) return MMSYSERR_INVALHANDLE;
+    SDL_LockAudioStream(w->stream);
+    pthread_mutex_lock(&w->lock);
+    for (WAVEHDR *h = w->head; h;) { WAVEHDR *n = h->lpNext; h->lpNext = NULL; h->dwFlags = (h->dwFlags & ~(DWORD)WHDR_INQUEUE) | WHDR_DONE; h = n; }
+    w->head = w->tail = NULL; w->offset = 0; w->pulled = 0;
+    SDL_ClearAudioStream(w->stream);
+    pthread_mutex_unlock(&w->lock);
+    SDL_UnlockAudioStream(w->stream);
+    if (w->event) SetEvent(w->event);
+    return MMSYSERR_NOERROR;
+}
+MMRESULT waveOutClose(HWAVEOUT w) {
+    if (!w) return MMSYSERR_INVALHANDLE;
+    waveOutReset(w);
+    SDL_DestroyAudioStream(w->stream);
+    pthread_mutex_destroy(&w->lock);
+    free(w);
+    return MMSYSERR_NOERROR;
+}
+MMRESULT waveOutGetPosition(HWAVEOUT w, MMTIME *t, UINT size) {
+    (void)size;
+    if (!w) return MMSYSERR_INVALHANDLE;
+    pthread_mutex_lock(&w->lock);
+    uint64_t pulled = w->pulled;
+    pthread_mutex_unlock(&w->lock);
+    int queued = SDL_GetAudioStreamQueued(w->stream);    /* pulled but not yet played */
+    uint64_t played = pulled > (uint64_t)(queued > 0 ? queued : 0) ? pulled - (uint64_t)queued : 0;
+    if (t->wType == TIME_BYTES) t->u.cb = (DWORD)played;
+    else { t->wType = TIME_SAMPLES; t->u.sample = (DWORD)(played / (uint64_t)(w->block ? w->block : 4)); }
+    return MMSYSERR_NOERROR;
+}
+MMRESULT waveOutSetVolume(HWAVEOUT w, DWORD vol) {
+    if (!w) return MMSYSERR_INVALHANDLE;
+    float l = (float)(vol & 0xffff) / 65535.0f, r = (float)(vol >> 16) / 65535.0f;
+    SDL_SetAudioStreamGain(w->stream, l > r ? l : r);
+    return MMSYSERR_NOERROR;
+}
+
+/* boot.c print_build_identity: the Windows build names the link time stamp of the exe and of each DLL beside it; an ELF
+ * file has none, so the Linux build names each of its own files (the exe's folder) with its modification time, size and
+ * GNU build id when the linker wrote one. File names only, as there. */
+typedef struct { const char *dir; size_t dl; } BuildIdArg;
+static int build_identity_one(struct dl_phdr_info *info, size_t size, void *p) {
+    (void)size;
+    const BuildIdArg *a = p;
+    const char *name = info->dlpi_name && info->dlpi_name[0] ? info->dlpi_name : NULL;
+    char self[PATH_MAX];
+    if (!name) { ssize_t k = readlink("/proc/self/exe", self, sizeof self - 1); if (k <= 0) return 0; self[k] = 0; name = self; }
+    if (strncmp(name, a->dir, a->dl)) return 0;          /* ours: the exe's folder */
+    struct stat st;
+    char when[32] = "?", id[48] = "";
+    if (!stat(name, &st)) { struct tm tm; gmtime_r(&st.st_mtime, &tm); strftime(when, sizeof when, "%Y-%m-%d %H:%M:%S UTC", &tm); }
+    for (int i = 0; i < info->dlpi_phnum && !id[0]; i++) {
+        if (info->dlpi_phdr[i].p_type != PT_NOTE) continue;
+        const uint8_t *n = (const uint8_t *)(info->dlpi_addr + info->dlpi_phdr[i].p_vaddr), *end = n + info->dlpi_phdr[i].p_memsz;
+        while (n + 12 <= end) {
+            uint32_t nsz = ((const uint32_t *)n)[0], dsz = ((const uint32_t *)n)[1], type = ((const uint32_t *)n)[2];
+            const uint8_t *desc = n + 12 + ((nsz + 3) & ~3u);
+            if (type == 3 && nsz == 4 && !memcmp(n + 12, "GNU", 4)) {
+                for (uint32_t k = 0; k < dsz && k < 20; k++) snprintf(id + 2 * k, sizeof id - 2 * k, "%02x", desc[k]);
+                break;
+            }
+            n = desc + ((dsz + 3) & ~3u);
+        }
+    }
+    printf("build: %-22s modified %s (%lld bytes%s%s)\n", name + a->dl, when, (long long)st.st_size, id[0] ? ", build id " : "", id);
+    return 0;
+}
+void plat_print_build_identity(const char *exe, size_t dir_len) {
+    char dir[PATH_MAX];
+    snprintf(dir, sizeof dir, "%.*s", (int)dir_len, exe);
+    for (char *q = dir; *q; q++) if (*q == '\\') *q = '/';
+    BuildIdArg a = {dir, strlen(dir)};
+    dl_iterate_phdr(build_identity_one, &a);
+}
+/* There are no 8.3 names: callers fall back to the long name. */
+DWORD GetShortPathNameW(LPCWSTR path, LPWSTR out, DWORD n) { (void)path; (void)out; (void)n; SetLastError(1 /* ERROR_INVALID_FUNCTION */); return 0; }

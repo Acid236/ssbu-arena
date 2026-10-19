@@ -284,7 +284,7 @@ static int so_addr_in(uint64_t p, struct sockaddr_in *out) {                    
     if (M8(p + 1) != 2) return 0;
     out->sin_family = AF_INET;
     out->sin_port = M16(p + 2);
-    out->sin_addr.S_un.S_addr = M32(p + 4);
+    out->sin_addr.s_addr = M32(p + 4);
     return 1;
 }
 static uint32_t so_addr_out(uint64_t p, uint32_t cap, const struct sockaddr_in *in) { /* returns the length the module reports */
@@ -340,10 +340,10 @@ static void so_bind(Ctx *c, int len_check) {              /* (fd, const sockaddr
     struct sockaddr_in a;
     int e = 0;
     if (!so_addr_in(A1, &a)) e = 97;
-    else if (a.sin_addr.S_un.S_addr != 0 && !so_is_loopback(a.sin_addr.S_un.S_addr)) e = 99;
+    else if (a.sin_addr.s_addr != 0 && !so_is_loopback(a.sin_addr.s_addr)) e = 99;
     else {
-        int any = a.sin_addr.S_un.S_addr == 0;
-        if (any) a.sin_addr.S_un.S_addr = htonl(INADDR_LOOPBACK);
+        int any = a.sin_addr.s_addr == 0;
+        if (any) a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
         if (bind(o->s, (struct sockaddr *)&a, sizeof a) != 0) e = so_wsa_errno(WSAGetLastError(), 0);
         else o->bound_any = any;
     }
@@ -360,7 +360,7 @@ static void socket_Connect(Ctx *c) {                      /* (fd, const sockaddr
     if (!o) { so_fail(c, 9); return; }
     struct sockaddr_in a;
     if (!so_addr_in(A1, &a)) e = 97;
-    else if (!so_is_loopback(a.sin_addr.S_un.S_addr)) e = 101;                        /* no network: nothing but loopback is reachable */
+    else if (!so_is_loopback(a.sin_addr.s_addr)) e = 101;                        /* no network: nothing but loopback is reachable */
     else if (connect(o->s, (struct sockaddr *)&a, sizeof a) != 0) {
         int w = WSAGetLastError();
         e = w == WSAEWOULDBLOCK ? 115 : w == WSAEISCONN ? 0 : so_wsa_errno(w, 0);     /* [suyu] ConnectImpl: "already connected" is success */
@@ -419,7 +419,7 @@ static void so_name(Ctx *c, int peer) {                   /* (fd, sockaddr *, so
     int alen = sizeof a;
     memset(&a, 0, sizeof a);
     int e = (peer ? getpeername(o->s, (struct sockaddr *)&a, &alen) : getsockname(o->s, (struct sockaddr *)&a, &alen)) != 0 ? so_wsa_errno(WSAGetLastError(), 0) : 0;
-    if (!e && !peer && o->bound_any) a.sin_addr.S_un.S_addr = 0;
+    if (!e && !peer && o->bound_any) a.sin_addr.s_addr = 0;
     if (e == 22 && !peer) { e = 0; a.sin_family = AF_INET; }                         /* Winsock refuses an unbound socket; BSD reports 0.0.0.0:0 */
     so_put(o);
     if (e) { so_fail(c, e); return; }
@@ -471,7 +471,7 @@ static void so_send(Ctx *c, uint64_t addr) {              /* (fd, buf, size, fla
     int temp = (gf & 0x80) && !(flags & SO_O_NONBLOCK), n = -1, e = 0;
     struct sockaddr_in a;
     if (addr && !so_addr_in(addr, &a)) e = 97;
-    else if (addr && !so_is_loopback(a.sin_addr.S_un.S_addr)) e = 101;                 /* no network */
+    else if (addr && !so_is_loopback(a.sin_addr.s_addr)) e = 101;                 /* no network */
     else {
         if (temp) so_nonblock(o, 1);
         if (addr) n = sendto(o->s, (const char *)(uintptr_t)buf, (int)(size > 0x7fffffff ? 0x7fffffff : size), so_host_flags(gf) & MSG_OOB, (struct sockaddr *)&a, sizeof a);
@@ -546,6 +546,22 @@ static void socket_Poll(Ctx *c) {                         /* (pollfd *, nfds, ti
     free(h); free(objs);
     if (e) so_fail(c, e); else RETI(ready);
 }
+#ifdef _WIN32
+#define HOST_SO(level, name) name                         /* Winsock uses the BSD option numbers the guest passes */
+#else
+/* Linux build: the guest's BSD SOL_SOCKET option numbers -> Linux's (TCP_NODELAY is 1 on both) */
+static int HOST_SO(int level, int name) {
+    if (level != 0xffff) return name;
+    switch (name) {
+    case 0x1: return SO_DEBUG;      case 0x2: return SO_ACCEPTCONN; case 0x4: return SO_REUSEADDR; case 0x8: return SO_KEEPALIVE;
+    case 0x10: return SO_DONTROUTE; case 0x20: return SO_BROADCAST; case 0x80: return SO_LINGER;   case 0x100: return SO_OOBINLINE;
+    case 0x200: return SO_REUSEPORT; case 0x1001: return SO_SNDBUF; case 0x1002: return SO_RCVBUF; case 0x1003: return SO_SNDLOWAT;
+    case 0x1004: return SO_RCVLOWAT; case 0x1005: return SO_SNDTIMEO; case 0x1006: return SO_RCVTIMEO; case 0x1007: return SO_ERROR;
+    case 0x1008: return SO_TYPE;
+    default: return -1;                                   /* unknown: the call fails with ENOPROTOOPT */
+    }
+}
+#endif
 static void socket_GetSockOpt(Ctx *c) {                   /* (fd, level, name, void *, socklen_t *) */
     uint64_t val = A3, lenp = A4;
     int level = (int)A1, name = (int)A2;
@@ -559,13 +575,17 @@ static void socket_GetSockOpt(Ctx *c) {                   /* (fd, level, name, v
         char tmp[64];
         int tl = sizeof tmp;
         if (name == 0x800 && level == 0xffff) { memset(tmp, 0, 4); tl = 4; }          /* SO_NOSIGPIPE: there are no signals */
-        else if (getsockopt(o->s, level == 0xffff ? SOL_SOCKET : IPPROTO_TCP, name, tmp, &tl) != 0) e = so_wsa_errno(WSAGetLastError(), 0);
+        else if (getsockopt(o->s, level == 0xffff ? SOL_SOCKET : IPPROTO_TCP, HOST_SO(level, name), tmp, &tl) != 0) e = so_wsa_errno(WSAGetLastError(), 0);
         if (!e) {
             uint8_t out[16] = {0};
             uint32_t ol = 4;
             if (level == 0xffff && name == 0x1007) { int v = so_wsa_errno(*(int *)tmp, 0); memcpy(out, &v, 4); }
             else if (level == 0xffff && name == 0x80) { LINGER *l = (LINGER *)tmp; int v[2] = {l->l_onoff, l->l_linger}; memcpy(out, v, 8); ol = 8; }
+#ifdef _WIN32
             else if (level == 0xffff && (name == 0x1005 || name == 0x1006)) { DWORD ms = *(DWORD *)tmp; int64_t tv[2] = {ms / 1000, (ms % 1000) * 1000}; memcpy(out, tv, 16); ol = 16; }
+#else
+            else if (level == 0xffff && (name == 0x1005 || name == 0x1006)) { struct timeval *t = (struct timeval *)tmp; int64_t tv[2] = {t->tv_sec, t->tv_usec}; memcpy(out, tv, 16); ol = 16; }
+#endif
             else { int v = tl >= 4 ? *(int *)tmp : (tl >= 1 ? tmp[0] != 0 : 0); memcpy(out, &v, 4); }
             if (ol > cap) ol = cap;
             memcpy((void *)(uintptr_t)val, out, ol);
@@ -589,11 +609,16 @@ static void socket_SetSockOpt(Ctx *c) {                   /* (fd, level, name, c
         else { LINGER l; l.l_onoff = (u_short)(M32(val) != 0); l.l_linger = (u_short)M32(val + 4); r = setsockopt(o->s, SOL_SOCKET, SO_LINGER, (char *)&l, sizeof l); }
     } else if (level == 0xffff && (name == 0x1005 || name == 0x1006)) {
         DWORD ms = len >= 16 ? (DWORD)(M64(val) * 1000 + M64(val + 8) / 1000) : len >= 4 ? M32(val) : 0;
+#ifdef _WIN32
         if (len < 4) e = 22; else r = setsockopt(o->s, SOL_SOCKET, name, (char *)&ms, sizeof ms);
+#else
+        struct timeval tv = {ms / 1000, (ms % 1000) * 1000};
+        if (len < 4) e = 22; else r = setsockopt(o->s, SOL_SOCKET, HOST_SO(level, name), &tv, sizeof tv);
+#endif
     } else if (level == 0xffff && name == 0x800) r = 0;   /* SO_NOSIGPIPE */
     else if (level == 0xffff || (level == 6 && name == 1)) {
         if (len < 4) e = 22;
-        else { int v = (int)M32(val); r = setsockopt(o->s, level == 0xffff ? SOL_SOCKET : IPPROTO_TCP, name, (char *)&v, sizeof v); }
+        else { int v = (int)M32(val); r = setsockopt(o->s, level == 0xffff ? SOL_SOCKET : IPPROTO_TCP, HOST_SO(level, name), (char *)&v, sizeof v); }
     }                                                     /* other levels: [suyu] SetSockOptImpl accepts and ignores */
     if (!e && r != 0) e = so_wsa_errno(WSAGetLastError(), 0);
     so_put(o);
@@ -695,7 +720,7 @@ static void socket_GetHostByNameWithOptions(Ctx *c) {     /* (const char *name, 
     strcpy(t_he.text, name);
     t_he.name = P(t_he.text); t_he.alias0 = 0; t_he.aliases = P(&t_he.alias0);
     t_he.type = 2; t_he.length = 4;
-    t_he.addr = a.S_un.S_addr; t_he.addrs[0] = P(&t_he.addr); t_he.addrs[1] = 0; t_he.list = P(t_he.addrs);
+    t_he.addr = a.s_addr; t_he.addrs[0] = P(&t_he.addr); t_he.addrs[1] = 0; t_he.list = P(t_he.addrs);
     t_so_herrno = 0; so_set_errno(c, 0);
     RET(P(&t_he));
 }

@@ -2,7 +2,11 @@
  * same pseudo-random state difftest.py gives to Unicorn and prints checksums. */
 #include <stdio.h>
 #include <stdlib.h>
+#ifdef _WIN32
 #include <windows.h>
+#else
+#include <sys/mman.h>
+#endif
 #include "runtime.h"
 
 #define REGION 0x7200000000ULL
@@ -60,7 +64,12 @@ int main(int argc, char **argv) {
         for (int k = 0; k < 8; k++) c = (c & 1) ? 0xedb88320u ^ (c >> 1) : c >> 1;
         crc_table[i] = c;
     }
+#ifdef _WIN32
     uint8_t *mem = VirtualAlloc((void *)REGION, REGION_SIZE, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+#else
+    uint8_t *mem = mmap((void *)REGION, REGION_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
+    if (mem == MAP_FAILED) mem = NULL;
+#endif
     if (mem != (uint8_t *)REGION) { fprintf(stderr, "cannot map test region\n"); return 1; }
     rng_seed(0xABCDEF);
     for (uint64_t i = 0; i < REGION_SIZE / 8; i++) { uint64_t v = rng_next(); memcpy(mem + i * 8, &v, 8); }

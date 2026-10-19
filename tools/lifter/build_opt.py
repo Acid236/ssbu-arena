@@ -29,6 +29,7 @@ import json
 import os
 import re
 import subprocess
+import signal
 import sys
 import threading
 import time
@@ -47,6 +48,8 @@ OPT = os.environ.get('RECOMP_OPT', '-O1')
 EXTRA = ['-ffp-contract=off'] + os.environ.get('RECOMP_CFLAGS', '').split()
 OPTNONE_LINES = int(os.environ.get('RECOMP_OPTNONE_LINES', '20000'))
 TIME_LIMIT = float(os.environ.get('RECOMP_TIME_LIMIT', '180'))
+# Linux build: address-space limit per compiler, bytes (0: none). Set by limit_memory() from the job count.
+MEM_LIMIT = 0
 DEF = re.compile(r'^(?:static )?void (\w+)\((Ctx \*c(?:, uint64_t rp)?)\) \{$')
 
 
@@ -85,14 +88,38 @@ def optnone_header(src, obj, limit):
     return path, len(big), sum(b[0] for b in big)
 
 
+def limit_memory(jobs):
+    """Linux build: each compiler may use (RAM - 4 GB) / jobs. With current clang a lifted file can pass 20 GB before its
+    time limit runs out (c_00a3.c: 12 GB after 30 s), which gets processes killed, not slowed down; over the limit, clang
+    fails and the file takes the next step of the fallback ladder, as on a timeout."""
+    global MEM_LIMIT
+    if os.environ.get('RECOMP_TARGET') != 'linux':
+        return
+    with open('/proc/meminfo') as f:
+        kb = next(int(l.split()[1]) for l in f if l.startswith('MemTotal:'))
+    MEM_LIMIT = max(4 << 30, ((kb << 10) - (4 << 30)) // max(1, jobs))
+
+
+def out_of_memory(code, out):
+    return MEM_LIMIT and code and ('out of memory' in out or 'bad_alloc' in out or 'Cannot allocate memory' in out or code < 0)
+
+
 def run_limited(cmd, limit):
     t = time.time()
-    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    if MEM_LIMIT:
+        cmd = ['prlimit', '--as=%d' % MEM_LIMIT, '--'] + cmd      # util-linux; inherited by clang's -cc1 child
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=(os.name != 'nt'))
     try:
         out, _ = p.communicate(timeout=limit)
-        return p.returncode, out.decode('latin-1')[-2000:], time.time() - t
+        out = out.decode('latin-1')[-2000:]
+        if out_of_memory(p.returncode, out):
+            return None, '', time.time() - t
+        return p.returncode, out, time.time() - t
     except subprocess.TimeoutExpired:
-        subprocess.run(['taskkill', '/PID', str(p.pid), '/T', '/F'], capture_output=True)      # this compiler and its -cc1 child only
+        if os.name == 'nt':
+            subprocess.run(['taskkill', '/PID', str(p.pid), '/T', '/F'], capture_output=True)      # this compiler and its -cc1 child only
+        else:
+            os.killpg(p.pid, signal.SIGKILL)                     # the clang wrapper's process group
         p.communicate()
         return None, '', time.time() - t
 
@@ -135,7 +162,7 @@ def compile_file(src, obj, base_flags, time_limit=None):
     total = 0.0
     objdir, name = os.path.dirname(obj), os.path.basename(obj)
     with open(src, 'rb') as f:
-        key = hashlib.sha1(f.read() + repr((OPT, EXTRA, base_flags, OPTNONE_LINES, time_limit)).encode()).hexdigest()
+        key = hashlib.sha1(f.read() + repr((OPT, EXTRA, base_flags, OPTNONE_LINES, time_limit) + ((MEM_LIMIT,) if MEM_LIMIT else ())).encode()).hexdigest()
     known = ladder(objdir).get(name)
     first = known[1] if known and known[0] == key else 0
     for step, limit in enumerate((OPTNONE_LINES, OPTNONE_LINES // 4, OPTNONE_LINES // 16)):
@@ -158,7 +185,8 @@ def compile_file(src, obj, base_flags, time_limit=None):
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode == 0:
         ladder_save(objdir, name, key, 3)
-    return r.returncode, (r.stdout + r.stderr)[-2000:], total, 'WHOLE FILE at -O0 (time limit %.0fs exceeded three times)' % time_limit
+    return r.returncode, (r.stdout + r.stderr)[-2000:], total, 'WHOLE FILE at -O0 (time limit %.0fs%s exceeded three times)' % (
+        time_limit, ' or memory limit %.1f GB' % (MEM_LIMIT / 2.0 ** 30) if MEM_LIMIT else '')
 
 
 _report = []
@@ -177,7 +205,7 @@ def report(objdir):
 def compile_one_main(name):
     src = os.path.join(build.GEN, name)
     obj = os.path.join(build.OBJ, name[:-2] + '.obj')
-    code, out, secs, note = compile_file(src, obj, ['-w', '-fno-strict-aliasing', '-I', HERE, '-I', build.GEN] + build.NOCRT_FLAGS)
+    code, out, secs, note = compile_file(src, obj, ['-w', '-fno-strict-aliasing', '-I', HERE, '-I', build.GEN] + build.NOCRT_FLAGS + build.PLAT_FLAGS)
     if note or secs > 60:
         line = '%-12s %6.0fs  %s' % (name, secs, note)
         _report.append(line)
@@ -187,6 +215,7 @@ def compile_one_main(name):
 
 def cmd_main(jobs):
     build.compile_one = compile_one_main
+    limit_memory(jobs)
     t0 = time.time()
     rc = build.cmd_compile(jobs, False)
     report(build.OBJ)
@@ -212,6 +241,7 @@ def run_clang_nro(job):
 
 def cmd_nro(jobs, names):
     build_nro.run_clang = run_clang_nro
+    limit_memory(jobs)
     if not names:
         names = [e['name'] for e in build_nro.load_map()]
     rc = build_nro.main(names + ['--jobs=%d' % jobs])

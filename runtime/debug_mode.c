@@ -137,6 +137,7 @@ static void parse_match(const char *s) {
 }
 static void match_player_hook(Ctx *c, void *user);
 static ImportFn g_orig_player_record;
+#ifdef _WIN32
 static LONG CALLBACK watch_veh(EXCEPTION_POINTERS *ep) {
     static volatile LONG shown;
     if (ep->ExceptionRecord->ExceptionCode != EXCEPTION_SINGLE_STEP) return EXCEPTION_CONTINUE_SEARCH;
@@ -199,6 +200,12 @@ static void watch_set(const uint64_t *addrs, int n) {
     CloseHandle(snap);
     printf("debug watch: %d watchpoints on %d threads\n", n, set); fflush(stdout);
 }
+#else
+static void watch_set(const uint64_t *addrs, int n) {      /* Linux build: no debug registers from user space without ptrace */
+    (void)addrs;
+    printf("debug watch: %d watchpoints requested: not available in the Linux build\n", n); fflush(stdout);
+}
+#endif
 
 int hook_install(uint64_t addr, void (*repl)(Ctx *, void *), void *user, ImportFn *orig);
 
