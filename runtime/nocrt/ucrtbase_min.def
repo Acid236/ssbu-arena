@@ -1,0 +1,34 @@
+; C-library functions the lifted code and the shims call, from ucrtbase.dll (the Universal CRT, part of Windows 10 and 11).
+; build.py turns this into an import library with lld-link for the RECOMP_NOCRT build (no MSVC, no Windows SDK).
+LIBRARY ucrtbase.dll
+EXPORTS
+    memcpy
+    memmove
+    memset
+    memcmp
+    strlen
+    strcmp
+    strncmp
+    fabs
+    sqrt
+    sqrtf
+    ceil
+    ceilf
+    floor
+    floorf
+    round
+    roundf
+    trunc
+    truncf
+    rint
+    rintf
+    nearbyint
+    nearbyintf
+    fma
+    fmaf
+    fmax
+    fmaxf
+    fmin
+    fminf
+    copysign
+    copysignf

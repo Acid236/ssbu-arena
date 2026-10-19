@@ -1,0 +1,281 @@
+#!/usr/bin/env python3
+"""Music and movies out of the box: the two pieces the game needs that are not part of this repository.
+
+    python scripts/fetch_media.py [--deps <folder>] [--force] [--check-codecs]
+
+* Music: the game's Opus streams are decoded by libopus, which runtime/nnaudio.c loads at run time (opus.dll or
+  libopus-0.dll, next to the exe or named by SSBU_OPUS_DLL). fetch_opus() downloads a pinned prebuilt x64 libopus
+  (MSYS2's ucrt64 package of Opus 1.6.1, BSD licence) from repo.msys2.org, checks the package's SHA-256, unpacks
+  libopus-0.dll, checks the DLL's SHA-256, checks that it imports only Windows system DLLs (the Universal CRT forwarders
+  and KERNEL32: no libgcc / libwinpthread to ship) and that it exports the three functions nnaudio.c needs, and puts it
+  in <deps>/opus/ (the folder scripts/setup.py already looks in). Download the .zst needs the `zstandard` module (pip
+  installs it for your user if missing; Windows' own tar.exe is the fallback).
+* Movies: the menus' and the game's movies are VP9 in WebM; Windows decodes them with two free Microsoft Store
+  extensions. check_codecs() reports whether they are installed. This program cannot install them: the Store asks you
+  to (the links are printed).
+
+Standard library only, except `zstandard` for the .zst (see above). The download idea (a pinned prebuilt audio library,
+verified before use) follows WindowSmash's tools/install_windowsmash.ps1 by SNO2207; this is a separate implementation.
+"""
+import argparse
+import hashlib
+import io
+import os
+import shutil
+import struct
+import subprocess
+import sys
+import tarfile
+import tempfile
+import urllib.request
+
+REPO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+OPUS_PKG = 'mingw-w64-ucrt-x86_64-opus-1.6.1-2-any.pkg.tar.zst'
+OPUS_URL = 'https://repo.msys2.org/mingw/ucrt64/' + OPUS_PKG
+OPUS_PKG_SHA256 = 'bb114bcf26225f50f874497ebfd6b8224fff2a20bda3f8ee45cd07ce5f02657b'
+OPUS_DLL_MEMBER = 'ucrt64/bin/libopus-0.dll'
+OPUS_DLL_SHA256 = 'e747edad6bf02cf5cdcce417b95be3b7ba108f93df1b024778be5d73fa6dae39'
+OPUS_LICENSE_MEMBER = 'ucrt64/share/licenses/opus/COPYING'
+OPUS_EXPORTS = ('opus_decoder_get_size', 'opus_decoder_init', 'opus_decode')     # what runtime/nnaudio.c resolves
+# DLLs every Windows 10/11 has: the only imports accepted (lower case; api-ms-win-crt-* are the Universal CRT forwarders)
+SYSTEM_DLLS = {'kernel32.dll', 'ntdll.dll', 'user32.dll', 'advapi32.dll', 'ucrtbase.dll', 'msvcrt.dll', 'bcrypt.dll'}
+
+CODECS = [
+    ('Microsoft.VP9VideoExtensions', 'VP9 Video Extensions', 'https://apps.microsoft.com/detail/9n4d0msmp0pt',
+     'ms-windows-store://pdp/?productid=9N4D0MSMP0PT'),
+    ('Microsoft.WebMediaExtensions', 'Web Media Extensions', 'https://apps.microsoft.com/detail/9n5tdp8vcmhs',
+     'ms-windows-store://pdp/?productid=9N5TDP8VCMHS'),
+]
+
+
+def say(msg=''):
+    print(msg.encode('ascii', 'replace').decode('ascii'), flush=True)
+
+
+def sha256_bytes(b):
+    return hashlib.sha256(b).hexdigest()
+
+
+def sha256_file(p):
+    h = hashlib.sha256()
+    with open(p, 'rb') as f:
+        for b in iter(lambda: f.read(1 << 20), b''):
+            h.update(b)
+    return h.hexdigest()
+
+
+# --------------------------------------------------------------------------------------------- PE inspection
+def pe_info(path):
+    """(machine, imported DLL names, exported names) read from the PE headers; no external tool needed."""
+    with open(path, 'rb') as f:
+        d = f.read()
+    if d[:2] != b'MZ':
+        raise ValueError('not a PE file')
+    pe = struct.unpack_from('<I', d, 0x3c)[0]
+    if d[pe:pe + 4] != b'PE\0\0':
+        raise ValueError('not a PE file')
+    machine, nsec, _, _, _, optsz, _ = struct.unpack_from('<HHIIIHH', d, pe + 4)
+    opt = pe + 24
+    magic = struct.unpack_from('<H', d, opt)[0]
+    dd = opt + (112 if magic == 0x20b else 96)
+    exp_rva, exp_size = struct.unpack_from('<II', d, dd)
+    imp_rva, _ = struct.unpack_from('<II', d, dd + 8)
+    secs = []
+    so = opt + optsz
+    for i in range(nsec):
+        vsz, va, rsz, raw = struct.unpack_from('<IIII', d, so + 40 * i + 8)
+        secs.append((va, max(vsz, rsz), raw))
+
+    def off(rva):
+        for va, sz, raw in secs:
+            if va <= rva < va + sz:
+                return rva - va + raw
+        raise ValueError('bad RVA')
+
+    def cstr(o):
+        e = d.index(b'\0', o)
+        return d[o:e].decode('ascii', 'replace')
+
+    imports, exports = [], []
+    if imp_rva:
+        o = off(imp_rva)
+        while True:
+            _, _, _, name, _ = struct.unpack_from('<IIIII', d, o)
+            if not name:
+                break
+            imports.append(cstr(off(name)))
+            o += 20
+    if exp_rva:
+        o = off(exp_rva)
+        nnames, _, names_rva = struct.unpack_from('<III', d, o + 24)
+        no = off(names_rva)
+        for i in range(nnames):
+            exports.append(cstr(off(struct.unpack_from('<I', d, no + 4 * i)[0])))
+    return machine, imports, exports
+
+
+def check_dll(path):
+    """Raise ValueError unless path is an x64 DLL that imports only system DLLs and exports what nnaudio.c needs."""
+    machine, imports, exports = pe_info(path)
+    if machine != 0x8664:
+        raise ValueError('not an x64 DLL')
+    bad = [n for n in imports if not (n.lower() in SYSTEM_DLLS or n.lower().startswith('api-ms-win-'))]
+    if bad:
+        raise ValueError('depends on non-system DLLs: ' + ', '.join(bad))
+    miss = [n for n in OPUS_EXPORTS if n not in exports]
+    if miss:
+        raise ValueError('does not export: ' + ', '.join(miss))
+    return imports
+
+
+# ------------------------------------------------------------------------------------------- unpack .pkg.tar.zst
+def _members_zstandard(blob, wanted):
+    try:
+        import zstandard
+    except ImportError:
+        say('  installing the Python module zstandard for your user ...')
+        r = subprocess.run([sys.executable, '-m', 'pip', 'install', '--user', '--quiet', 'zstandard'], capture_output=True)
+        if r.returncode:
+            return None
+        import importlib
+        importlib.invalidate_caches()
+        try:
+            import zstandard
+        except ImportError:
+            return None
+    out = {}
+    with zstandard.ZstdDecompressor().stream_reader(io.BytesIO(blob)) as rd, tarfile.open(fileobj=rd, mode='r|') as t:
+        for m in t:
+            if m.name in wanted and m.isfile():
+                out[m.name] = t.extractfile(m).read()
+    return out
+
+
+def _members_tar_exe(blob, wanted):
+    """Windows 10/11 ship bsdtar (tar.exe), which reads .zst."""
+    tar = os.path.join(os.environ.get('SystemRoot', r'C:\Windows'), 'System32', 'tar.exe')
+    if not os.path.isfile(tar):
+        return None
+    with tempfile.TemporaryDirectory(prefix='ssbu_zst_') as tmp:
+        pkg = os.path.join(tmp, 'p.tar.zst')
+        with open(pkg, 'wb') as f:
+            f.write(blob)
+        out_dir = os.path.join(tmp, 'o')
+        os.mkdir(out_dir)
+        # bsdtar exits 1 when one listed member is absent but still extracts the others: judge by the files, not by the code
+        subprocess.run([tar, '-xf', pkg, '-C', out_dir] + sorted(wanted), capture_output=True, cwd=tmp)
+        out = {}
+        for w in wanted:
+            p = os.path.join(out_dir, *w.split('/'))
+            if os.path.isfile(p):
+                with open(p, 'rb') as f:
+                    out[w] = f.read()
+        return out
+
+
+def unpack_members(blob, wanted):
+    for fn in (_members_zstandard, _members_tar_exe):
+        try:
+            got = fn(blob, set(wanted))
+        except Exception as e:                      # a broken module / archive: try the next way
+            say('  (%s failed: %s)' % (fn.__name__, e))
+            got = None
+        if got and OPUS_DLL_MEMBER in got:
+            return got
+    raise RuntimeError('cannot unpack the .zst package: install the Python module zstandard (pip install --user zstandard)')
+
+
+# ------------------------------------------------------------------------------------------------- fetch_opus
+def fetch_opus(deps_dir=None, force=False, url=OPUS_URL, pkg_sha256=OPUS_PKG_SHA256, dll_sha256=OPUS_DLL_SHA256):
+    """Put a verified libopus-0.dll in <deps_dir>/opus/ and return its path; None if it could not be done (a message says
+    why: the game then runs with silent music and nothing else is affected). An existing, valid copy is kept."""
+    deps_dir = deps_dir or os.path.join(REPO_DIR, 'deps')
+    dest_dir = os.path.join(deps_dir, 'opus')
+    dest = os.path.join(dest_dir, 'libopus-0.dll')
+    try:
+        if os.path.isfile(dest) and not force and sha256_file(dest) == dll_sha256:
+            check_dll(dest)
+            say('libopus: already in %s (checked)' % dest)
+            return dest
+        say('libopus: downloading %s' % url)
+        req = urllib.request.Request(url, headers={'User-Agent': 'ssbu-recomp-fetch-media'})
+        with urllib.request.urlopen(req, timeout=120) as r:
+            blob = r.read()
+        got = sha256_bytes(blob)
+        if got != pkg_sha256:
+            say('libopus: the downloaded package does not match its pinned SHA-256 (got %s); NOT used.' % got)
+            return None
+        files = unpack_members(blob, (OPUS_DLL_MEMBER, OPUS_LICENSE_MEMBER))
+        dll = files[OPUS_DLL_MEMBER]
+        if sha256_bytes(dll) != dll_sha256:
+            say('libopus: the DLL inside the package does not match its pinned SHA-256; NOT used.')
+            return None
+        os.makedirs(dest_dir, exist_ok=True)
+        tmp = dest + '.tmp'
+        with open(tmp, 'wb') as f:
+            f.write(dll)
+        try:
+            imports = check_dll(tmp)
+        except Exception as e:                  # a truncated / odd file: struct and index errors are not ValueError
+            os.remove(tmp)
+            say('libopus: rejected (%s).' % e)
+            return None
+        os.replace(tmp, dest)
+        if OPUS_LICENSE_MEMBER in files:
+            with open(os.path.join(dest_dir, 'LICENSE-opus.txt'), 'wb') as f:
+                f.write(files[OPUS_LICENSE_MEMBER])
+        with open(os.path.join(dest_dir, 'SOURCE.txt'), 'w') as f:
+            f.write('libopus-0.dll from %s\npackage sha256 %s\ndll sha256 %s\nOpus is BSD licensed (LICENSE-opus.txt).\n'
+                    % (url, pkg_sha256, dll_sha256))
+        say('libopus: ok, %s (imports only system DLLs: %d; exports %s)' % (dest, len(imports), ', '.join(OPUS_EXPORTS)))
+        return dest
+    except Exception as e:
+        say('libopus: could not be fetched (%s). The game runs without music; try again later, or give setup.py '
+            '--opus <opus.dll or its folder>.' % e)
+        return None
+
+
+# ----------------------------------------------------------------------------------------------- check_codecs
+def check_codecs(verbose=True):
+    """{package name: True/False/None} for the Store codec extensions (None: could not ask). Prints what to do if missing."""
+    res = {}
+    if os.name != 'nt':
+        return res
+    for pkg, title, web, store in CODECS:
+        try:
+            r = subprocess.run(['powershell', '-NoProfile', '-NonInteractive', '-Command',
+                                '(Get-AppxPackage -Name %s | Measure-Object).Count' % pkg],
+                               capture_output=True, text=True, timeout=60)
+            res[pkg] = int((r.stdout or '0').strip() or 0) > 0 if r.returncode == 0 else None
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            res[pkg] = None
+    if verbose:
+        for pkg, title, web, store in CODECS:
+            st = res.get(pkg)
+            say('codec  %-22s %s' % (title, {True: 'installed', False: 'MISSING', None: 'could not be checked'}[st]))
+            if st is not True:
+                say('        get it (free) from the Microsoft Store: %s   (or open %s)' % (web, store))
+        if not all(v is True for v in res.values()):
+            say('Without them the game\'s movies do not play. This program cannot install them: the Microsoft Store does it\n'
+                'only when you press Get / Install there (once per PC; no restart needed).')
+    return res
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('--deps', help='deps folder (default <repo>/deps); libopus goes to <deps>/opus/')
+    ap.add_argument('--force', action='store_true', help='download again even if a valid libopus-0.dll is there')
+    ap.add_argument('--check-codecs', action='store_true', help='only report the Store codecs, download nothing')
+    ap.add_argument('--no-codecs', action='store_true', help='do not check the Store codecs')
+    a = ap.parse_args()
+    ok = True
+    if not a.check_codecs:
+        ok = fetch_opus(a.deps, a.force) is not None
+    if not a.no_codecs:
+        check_codecs()
+    return 0 if ok else 1
+
+
+if __name__ == '__main__':
+    sys.exit(main())

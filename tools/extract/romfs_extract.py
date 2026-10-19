@@ -1,11 +1,11 @@
 """Extract the RomFS of a Switch title with an update applied.
 
-    python romfs_extract.py <base.nsp|base.xci> <update.nsp|update.xci> <output_dir> [--list]
+    python romfs_extract.py <base.nsp|.nsz|.xci|.nca> <update.nsp|.nsz|.xci|.nca> <output_dir> [--list]
 
 Reads the Program NCA of both packages straight from the NSP or XCI files, applies
 the update's relocation table (BKTR) over the base RomFS and writes the
-resulting files. Keys come from ~/.switch/prod.keys; title keys from the
-tickets inside the packages.
+resulting files. Keys come from ~/.switch/prod.keys (or SSBU_PROD_KEYS, or an emulator's key folder); title keys from the
+tickets inside the packages (a loose .nca: title.keys). .nsz is decompressed first (see decompress_nsz).
 """
 import bisect
 import os
@@ -15,11 +15,43 @@ import time
 
 from Crypto.Cipher import AES
 
-KEYS = {}
-for line in open(os.path.expanduser('~/.switch/prod.keys')):
-    if '=' in line:
-        k, v = line.split('=', 1)
-        KEYS[k.strip()] = bytes.fromhex(v.strip())
+def _key_files(name):
+    """Where a keys file may be, first match wins: SSBU_PROD_KEYS / SSBU_TITLE_KEYS (a file), ~/.switch, then the key folders of
+    the emulators (yuzu family, Ryujinx). scripts/find_inputs.py reports the same places."""
+    env = os.environ.get('SSBU_PROD_KEYS' if name == 'prod.keys' else 'SSBU_TITLE_KEYS')
+    if env:
+        yield env
+    yield os.path.join(os.path.expanduser('~'), '.switch', name)
+    ad = os.environ.get('APPDATA') or os.path.join(os.path.expanduser('~'), 'AppData', 'Roaming')
+    for emu in ('eden', 'Eden', 'yuzu', 'suyu', 'sudachi', 'citron', 'torzu', 'sumi', 'lime'):
+        yield os.path.join(ad, emu, 'keys', name)
+    yield os.path.join(ad, 'Ryujinx', 'system', name)
+
+
+def load_keys(name='prod.keys'):
+    """-> (dict key name -> bytes, path of the file used or None). Lines that are not NAME=HEX are ignored."""
+    for path in _key_files(name):
+        if os.path.isfile(path):
+            out = {}
+            for line in open(path, errors='replace'):
+                if '=' in line:
+                    k, v = line.split('=', 1)
+                    try:
+                        out[k.strip().lower()] = bytes.fromhex(v.strip())
+                    except ValueError:
+                        pass
+            return out, path
+    return {}, None
+
+
+KEYS, KEYS_PATH = load_keys('prod.keys')
+TITLE_KEYS, _ = load_keys('title.keys')           # rights id (32 hex) -> encrypted title key, as in a ticket
+
+
+def need_keys():
+    if 'header_key' not in KEYS:
+        raise SystemExit("prod.keys not found (looked in ~/.switch, the emulators' key folders, SSBU_PROD_KEYS): "
+                         'dump it from your own console, see BUILDING.md')
 
 
 def xts_decrypt(key, data, sector, sector_size=0x200):
@@ -93,8 +125,56 @@ class Xci(Nsp):
         return None
 
 
+class LooseNcaPackage(Nsp):
+    """A single .nca file (the Program NCA of a title) used as a package of one entry. No ticket inside: a Program NCA that
+    needs a title key takes it from title.keys."""
+
+    def __init__(self, path):
+        self.f = open(path, 'rb')
+        self.files = {os.path.basename(path): (0, os.path.getsize(path))}
+
+    def ticket(self):
+        return None
+
+
+def nsz_cache_dir():
+    d = os.environ.get('SSBU_TMP') or os.path.join(os.environ.get('TEMP') or os.path.expanduser('~'), 'ssbu_nsz_cache')
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def decompress_nsz(path):
+    """.nsz -> a plain .nsp in the cache folder (SSBU_TMP, default %TEMP%\ssbu_nsz_cache), reused when it is already there.
+    Needs: pip install zstandard pycryptodome. The .nsp is about as big as the original game file (the base is 13+ GB)."""
+    st = os.stat(path)
+    out = os.path.join(nsz_cache_dir(), '%s_%d_%d.nsp' % (os.path.splitext(os.path.basename(path))[0][:60].replace(' ', '_'),
+                                                         st.st_size, int(st.st_mtime)))
+    if os.path.isfile(out) and os.path.getsize(out) > 0:
+        return out
+    try:
+        import nsz_to_nsp
+    except ImportError as e:
+        raise SystemExit('%s is compressed (.nsz): decompressing it needs  pip install zstandard pycryptodome  (%s)' % (path, e))
+    print('decompressing %s -> %s (about the size of the original game file; SSBU_TMP changes the folder)' % (path, out))
+    tmp = out + '.part'
+    sys.argv, saved = ['nsz_to_nsp.py', path, tmp], sys.argv
+    try:
+        nsz_to_nsp.main()
+    finally:
+        sys.argv = saved
+    os.replace(tmp, out)
+    return out
+
+
 def open_package(path):
-    """A title package: .xci (cartridge image) or .nsp."""
+    """A title package: .xci (cartridge image), .nsp, .nsz (decompressed to a cache .nsp first), or a loose .nca."""
+    ext = os.path.splitext(path)[1].lower()
+    if ext == '.xcz':
+        raise SystemExit('%s: .xcz (compressed cartridge) is not supported; decompress it to .xci or use the .nsp/.nsz' % path)
+    if ext == '.nsz':
+        path = decompress_nsz(path)
+    elif ext == '.nca':
+        return LooseNcaPackage(path)
     with open(path, 'rb') as f:
         f.seek(0x100)
         is_xci = f.read(4) == b'HEAD'
@@ -103,6 +183,7 @@ def open_package(path):
 
 class Nca:
     def __init__(self, nsp):
+        need_keys()
         self.nsp, self.name = nsp, nsp.program_nca()
         h = xts_decrypt(KEYS['header_key'], nsp.read(self.name, 0, 0xC00), 0)
         assert h[0x200:0x204] == b'NCA3'
@@ -111,8 +192,12 @@ class Nca:
         rights = h[0x230:0x240]
         if any(rights):
             tik = nsp.ticket()
-            assert tik and tik[0x2A0:0x2B0] == rights, 'ticket for this NCA not found'
-            self.key = AES.new(KEYS['titlekek_%02x' % gen], AES.MODE_ECB).decrypt(tik[0x180:0x190])
+            if tik and tik[0x2A0:0x2B0] == rights:
+                tkey = tik[0x180:0x190]
+            else:                                         # no ticket in the package (a loose .nca): title.keys
+                tkey = TITLE_KEYS.get(rights.hex())
+            assert tkey, 'ticket / title key for this NCA (rights id %s) not found' % rights.hex()
+            self.key = AES.new(KEYS['titlekek_%02x' % gen], AES.MODE_ECB).decrypt(tkey)
         else:
             area = AES.new(KEYS['key_area_key_application_%02x' % gen], AES.MODE_ECB).decrypt(h[0x300:0x340])
             self.key = area[0x20:0x30]

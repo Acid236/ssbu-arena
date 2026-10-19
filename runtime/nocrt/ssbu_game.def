@@ -1,0 +1,8 @@
+; The exports of the game DLL (game_shim.c, game_shim_eh.c, game_data.c) the exe is linked against. build.py makes the
+; exe's import library from this file with lld-link (game_import_lib), so the exe is linked without the DLL and without
+; anything of the game. LIBRARY is replaced by the DLL name in use (RECOMP_DLL).
+LIBRARY ssbu_game_eh_o1.dll
+EXPORTS
+    game_bind
+    game_eh_bind
+    game_data_bind

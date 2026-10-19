@@ -33,6 +33,7 @@ def main():
     ap.add_argument('--log', help='write the game output to this file instead of the console')
     ap.add_argument('--env', action='append', default=[], help='NAME=VALUE, may be repeated')
     a = ap.parse_args()
+    a.build = os.path.abspath(a.build)          # the game runs in build\work: a relative --build would point elsewhere there
     state_file = os.path.join(a.build, 'state.json')
     with open(state_file) as f:
         state = json.load(f)

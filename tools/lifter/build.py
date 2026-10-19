@@ -2,6 +2,8 @@
 
     python build.py compile [jobs] [--force]    gen/*.c -> obj/*.obj (only what changed)
     python build.py link                        obj/*.obj + host sources -> ssbu_native.exe
+    python build.py host                        host sources -> the exe alone (needs no game DLL; scripts/make_release.py)
+    python build.py gamedll                     obj/*.obj + the game-data sources (game_data.h) -> the game DLL alone
     python build.py nro <module> [...]          lift + compile + link one DLL per run-time module (see build_nro.py)
 """
 import concurrent.futures
@@ -18,12 +20,24 @@ GEN = os.path.join(HERE, os.environ.get('RECOMP_GEN', 'gen_eh_o2'))      # side-
 OBJ = os.path.join(HERE, os.environ.get('RECOMP_OBJ', 'obj_eh_o1'))
 CLANG = os.environ.get('RECOMP_CLANG', r'C:\llvm-8.0.0\bin\clang.exe')      # scripts\setup.py sets RECOMP_CLANG (LLVM/clang 9.0.0)
 CFLAGS = ['-c', '-O1', '-w', '-fno-strict-aliasing', '-I', HERE, '-I', GEN]
-HOST_SOURCES = ['hostrt.c', 'boot.c', 'nnsdk.c', 'libcxx.c', 'os_threads.c', 'nvn_stub.c', 'nvn_gl.c', 'nvn_vk.c', 'mx_translate.c', 'tex_decode.c', 'nnfs.c', 'clib.c', 'nntime.c', 'nnhid.c', 'nnpad_sdl.c','sdkdata.c', 'display.c', 'nnpl.c', 'nnfontll.c', 'nnmovie.c', 'nnmisc.c', 'nnaudio.c', 'nnro.c', 'nro_registry.c', 'nnmovie_mf.c', 'nniostream.c', 'nncxxrt.c', 'nncxxlib.c', 'nnlibc2.c',
-                'sdklift_gen.c', 'sdklift_rt.c', 'nnsdk2.c', 'nnmii.c', 'nnapplet.c', 'nnalbum.c', 'nnnet.c', 'nnfsdir.c', 'nnunwind.c', 'nvn_sdk.c', 'nvn_c4.c', 'nvn_c5.c', 'hitch.c', 'gfx_options.c', 'debug_mode.c', 'r1_state.c',
+HOST_SOURCES = ['hostrt.c', 'boot.c', 'nnsdk.c', 'libcxx.c', 'os_threads.c', 'nvn_stub.c', 'nvn_gl.c', 'nvn_vk.c', 'mx_translate.c', 'tex_decode.c', 'nnfs.c', 'clib.c', 'nntime.c', 'nnhid.c', 'nnpad_sdl.c', 'display.c', 'nnpl.c', 'nnfontll.c', 'nnmovie.c', 'nnmisc.c', 'nnaudio.c', 'nnro.c', 'nnmovie_mf.c', 'nniostream.c', 'nncxxrt.c', 'nncxxlib.c', 'nnlibc2.c',
+                'sdklift_rt.c', 'nnsdk2.c', 'nnmii.c', 'nnapplet.c', 'nnalbum.c', 'nnnet.c', 'nnfsdir.c', 'nnunwind.c', 'nvn_sdk.c', 'nvn_c4.c', 'nvn_c5.c', 'hitch.c', 'gfx_options.c', 'debug_mode.c', 'r1_state.c',
                 'loose_host.c', 'osk.c', 'nnldn.c', 'net_relay.c']    # the new fighters' file layer (loose_files.c): off unless SSBU_CHARACTERS / SSBU_LOOSE_FILES is set
 # nnldn.c / net_relay.c: online play over the game's Local Wireless (plan/phases/N3_local_wireless_online.md), off unless SSBU_ONLINE
 # (taken only when present: a tree without the online files, e.g. a public one before they are published, still links)
 HOST_SOURCES[:] = [n for n in HOST_SOURCES if n not in ('nnldn.c', 'net_relay.c') or os.path.exists(os.path.join(HERE, n))]
+# Everything of the host that is derived from the dump is linked into the game DLL instead (game_data.h): the exe is made
+# of the runtime's own sources only and can be built without a dump (scripts/make_release.py).
+GAME_DATA_SOURCES = ['game_data.c', 'sdkdata.c', 'nro_registry.c', 'sdklift_gen.c']
+# RECOMP_NOCRT=1: the game DLL and the module DLLs are compiled and linked with LLVM alone, without the MSVC Build Tools or
+# the Windows SDK. The few C-library headers the lifted code includes come from nocrt\ (the same declarations as the
+# Universal CRT's), the few functions it calls from ucrtbase.dll and ntdll.dll, which every Windows 10 / 11 has (import
+# libraries made by lld-link from the .def files in nocrt\), and the DLLs have no C runtime and no entry point (nothing in
+# them needs one). The code is the same: objects compiled both ways are byte-identical but for the COFF time stamp.
+NOCRT = os.environ.get('RECOMP_NOCRT', '') not in ('', '0')
+NOCRT_DIR = os.path.join(HERE, 'nocrt')
+NOCRT_FLAGS = ['-nostdlibinc', '-isystem', NOCRT_DIR, '-DGAME_NOCRT'] if NOCRT else []
+LLD_LINK = os.path.join(os.path.dirname(CLANG), 'lld-link.exe')
 # A handful of files hold functions so large that clang -O1 needs more than an hour on them;
 # pass --opt=-O0 to compile whatever is still missing without optimization.
 OPT = next((a.split('=', 1)[1] for a in sys.argv if a.startswith('--opt=')), '-O1')
@@ -37,7 +51,7 @@ def compile_one(name):
     t = time.time()
     # the dozen largest files hold functions clang 8 cannot optimise in reasonable time: keep them at -O0
     opt = '-O0' if name in SLOW_FILES else OPT
-    flags = [opt if f == '-O1' else f for f in CFLAGS]
+    flags = [opt if f == '-O1' else f for f in CFLAGS] + NOCRT_FLAGS
     r = subprocess.run([CLANG] + flags + [src, '-o', obj], capture_output=True, text=True)
     return name, r.returncode, r.stderr[-2000:], time.time() - t
 
@@ -56,6 +70,8 @@ def cmd_compile(jobs, force):
     for n in os.listdir(OBJ):
         if n.endswith('.obj') and n not in wanted:
             os.remove(os.path.join(OBJ, n))
+    # longest first (source size: the compile time follows it): the biggest files no longer start last and hold up the end
+    todo.sort(key=lambda n: -os.path.getsize(os.path.join(GEN, n)))
     print('sources: %d   to compile: %d   jobs: %d' % (len(sources), len(todo), jobs), flush=True)
     t0 = time.time()
     failed, done, cpu = [], 0, 0.0
@@ -102,25 +118,101 @@ def debug_link_flags(out):
     return ['-Wl,/DEBUG', '-Wl,/PDB:' + base + '.pdb', '-Wl,/PDBALTPATH:%_PDB%', '-Wl,/MAP:' + base + '.map', '-Wl,/OPT:REF', '-Wl,/OPT:ICF', '-Wl,/INCREMENTAL:NO']
 
 
+def lld_def_lib(def_path, lib):
+    """An import library from a .def file, made by lld-link alone (no MSVC lib.exe, no Windows SDK)."""
+    if os.path.exists(lib) and os.path.getmtime(lib) >= os.path.getmtime(def_path):
+        return lib
+    r = subprocess.run([LLD_LINK, '/machine:x64', '/def:' + def_path, '/out:' + lib], capture_output=True, text=True, errors='replace')
+    if r.returncode:
+        raise SystemExit('lld-link could not make %s from %s:\n%s' % (lib, def_path, (r.stdout + r.stderr)[-2000:]))
+    return lib
+
+
+def nocrt_fltused(libdir):
+    """nocrt\\fltused.c -> an object defining _fltused, which clang references from every object that uses floating point
+    (the C runtime defines it; the module DLLs have no C runtime). The game DLL has it in game_data.c."""
+    src, obj = os.path.join(NOCRT_DIR, 'fltused.c'), os.path.join(libdir, 'fltused.obj')
+    if not os.path.exists(obj) or os.path.getmtime(obj) < os.path.getmtime(src):
+        r = subprocess.run([CLANG, '-c', '-O1'] + NOCRT_FLAGS + [src, '-o', obj], capture_output=True, text=True, errors='replace')
+        if r.returncode:
+            raise SystemExit('clang could not compile %s:\n%s' % (src, (r.stdout + r.stderr)[-2000:]))
+    return obj
+
+
+def link_dll(objs, dll, rsp, implib=True, fltused=False):
+    """Objects -> DLL: with clang's default linker (MSVC link.exe and the static C runtime) or, under RECOMP_NOCRT, with
+    lld-link alone against the import libraries of nocrt\\ (ucrtbase.dll, ntdll.dll). fltused: add the _fltused object
+    (DLLs whose objects do not define it). Returns the CompletedProcess."""
+    libdir = os.path.join(HERE, 'obj_nocrt')
+    if NOCRT and fltused:
+        os.makedirs(libdir, exist_ok=True)
+        objs = list(objs) + [nocrt_fltused(libdir)]
+    with open(rsp, 'w') as f:
+        f.write('\n'.join('"%s"' % o.replace('\\', '/') for o in objs))
+    if not NOCRT:
+        return subprocess.run([CLANG, '-shared', '@' + rsp, '-o', dll], capture_output=True, text=True, errors='replace')
+    os.makedirs(libdir, exist_ok=True)
+    libs = [lld_def_lib(os.path.join(NOCRT_DIR, n + '.def'), os.path.join(libdir, n + '.lib')) for n in ('ucrtbase_min', 'ntdll_min')]
+    argv = [LLD_LINK, '/dll', '/noentry', '/nodefaultlib', '/machine:x64', '/out:' + dll, '@' + rsp] + libs
+    return subprocess.run(argv + (['/implib:' + dll[:-4] + '.lib'] if implib else []), capture_output=True, text=True, errors='replace')
+
+
+def compile_game_data(objdir, shim):
+    """The DLL's shim and GAME_DATA_SOURCES (the dump-derived host tables and the lifted SDK code) -> objects."""
+    os.makedirs(objdir, exist_ok=True)
+    newest_h = max([os.path.getmtime(os.path.join(HERE, h)) for h in os.listdir(HERE) if h.endswith('.h')] + [os.path.getmtime(os.path.abspath(__file__))])
+    flags = ['-c', '-O1', '-w', '-fno-strict-aliasing', '-DSDKLIFT_GEN', '-I', HERE, '-I', GEN] + NOCRT_FLAGS + os.environ.get('RECOMP_DATA_CFLAGS', '').split()
+    jobs, objs = [], []
+    for src in [shim] + [os.path.join(HERE, n) for n in GAME_DATA_SOURCES]:
+        if not os.path.exists(src):
+            print('%s is missing: an earlier step of scripts/setup.py writes it (tables, sdk, modules)' % src)
+            return None
+        obj = os.path.join(objdir, ('_shim' if src == shim else os.path.basename(src)[:-2]) + '.obj')
+        objs.append(obj)
+        if not os.path.exists(obj) or os.path.getmtime(obj) < max(os.path.getmtime(src), newest_h):
+            jobs.append([CLANG] + flags + [src, '-o', obj])
+    failed = 0
+    with concurrent.futures.ThreadPoolExecutor(8) as pool:
+        for argv, r in zip(jobs, pool.map(lambda a: subprocess.run(a, capture_output=True, text=True, errors='replace'), jobs)):
+            if r.returncode:
+                failed += 1
+                print('FAILED %s\n%s' % (os.path.basename(argv[-3]), (r.stdout + r.stderr)[-3000:]))
+    return None if failed else objs
+
+
 def build_game_dll():
     dll = os.path.join(HERE, GAME_DLL)
     lib = dll[:-4] + '.lib'
     shim = os.path.join(HERE, os.environ.get('RECOMP_SHIM', 'game_shim_eh.c'))
-    objs = sorted(os.path.join(OBJ, n) for n in os.listdir(OBJ) if n.endswith('.obj'))
-    newest = max([os.path.getmtime(o) for o in objs] + [os.path.getmtime(shim)])
+    data_dir = OBJ + '_data'                 # beside OBJ, not in it (cmd_compile removes what it does not know there)
+    data_objs = compile_game_data(data_dir, shim)
+    if data_objs is None:
+        return 1
+    objs = sorted(os.path.join(OBJ, n) for n in os.listdir(OBJ) if n.endswith('.obj')) + data_objs
+    newest = max(os.path.getmtime(o) for o in objs)
     if os.path.exists(dll) and os.path.exists(lib) and os.path.getmtime(dll) >= newest:
         return 0
-    rsp = os.path.join(HERE, GAME_DLL + '.rsp')
-    with open(rsp, 'w') as f:
-        f.write('\n'.join('"%s"' % o.replace('\\', '/') for o in objs))
     t0 = time.time()
-    r = subprocess.run([CLANG, '-shared', '-O1', '-w', '-I', HERE, '-I', GEN, shim, '@' + rsp, '-o', dll], capture_output=True, text=True)
+    r = link_dll(objs, dll, os.path.join(data_dir, 'link.rsp'))
     print((r.stdout + r.stderr)[-4000:])
     if r.returncode == 0:
-        print('linked %s: %.0f MB in %.0fs' % (dll, os.path.getsize(dll) / 1048576.0, time.time() - t0))
+        print('linked %s: %.0f MB in %.0fs%s' % (dll, os.path.getsize(dll) / 1048576.0, time.time() - t0, ' (lld-link, no C runtime)' if NOCRT else ''))
     else:
         print('could not link %s (is a game exe still running and holding it open?)' % GAME_DLL)
     return r.returncode
+
+
+def game_import_lib(objdir):
+    """The exe's import library of the game DLL, made from nocrt\\ssbu_game.def (the DLL's exports), not by linking the
+    DLL: the exe links without the game DLL, on a PC without any dump (scripts/make_release.py)."""
+    import re
+    with open(os.path.join(NOCRT_DIR, 'ssbu_game.def')) as f:
+        text = re.sub(r'(?m)^LIBRARY\s+\S+', 'LIBRARY ' + GAME_DLL, f.read())
+    d = os.path.join(objdir, 'ssbu_game_import.def')
+    if not os.path.exists(d) or open(d).read() != text:
+        with open(d, 'w') as f:
+            f.write(text)
+    return lld_def_lib(d, os.path.join(objdir, 'ssbu_game_import.lib'))
 
 
 def compile_host(job):
@@ -130,8 +222,8 @@ def compile_host(job):
     return src, r.returncode, (r.stdout + r.stderr)[-3000:]
 
 
-def cmd_link():
-    if build_game_dll():
+def cmd_link(host_only=False):
+    if not host_only and build_game_dll():
         return 1
     exe = os.environ.get('RECOMP_EXE', 'ssbu_native.exe')      # parallel work: one exe name per worker
     out = os.path.join(HERE, exe)
@@ -163,7 +255,7 @@ def cmd_link():
                 print('FAILED %s\n%s' % (os.path.basename(src), err))
     if failed:
         return 1
-    r = subprocess.run([CLANG] + objs + [os.path.join(HERE, GAME_DLL[:-4] + '.lib'), os.path.join(SDL_DIR, 'SDL3.lib')] + LIBS + debug_link_flags(out) + ['-o', out], capture_output=True, text=True, errors='replace')
+    r = subprocess.run([CLANG] + objs + [game_import_lib(objdir), os.path.join(SDL_DIR, 'SDL3.lib')] + LIBS + debug_link_flags(out) + ['-o', out], capture_output=True, text=True, errors='replace')
     if r.returncode == 0:
         import shutil
         try:
@@ -196,4 +288,8 @@ if __name__ == '__main__':
             sys.exit(build_opt.cmd_nro(jobs, rest))
         import build_nro
         sys.exit(build_nro.main(rest))
+    if sys.argv[1] == 'host':                # the exe alone, nothing of the game in it or needed (scripts/make_release.py)
+        sys.exit(cmd_link(host_only=True))
+    if sys.argv[1] == 'gamedll':             # the game DLL alone, from the objects of compile (scripts/setup.py with a runtime package)
+        sys.exit(build_game_dll())
     sys.exit(cmd_link())

@@ -5,27 +5,39 @@
 
 #include <setjmp.h>
 #include "runtime.h"
-#include "hostrt.h"
+#ifndef SDKLIFT_GEN                       /* SDKLIFT_GEN: compiling sdklift_gen.c into the game DLL (game_data.c, build.py), */
+#include "hostrt.h"                       /* which sees only the declarations its generated code uses */
+#endif
 
 #define SDK_BASE 0x7500000000ULL          /* where the SDK image is mapped (text, rodata, data, bss) */
 #define SDK_IMAGE_SIZE 0xcfb000ULL
 
 typedef struct { uint64_t addr; void (*fn)(Ctx *); const char *name; } SdkFn;
+#ifdef SDKLIFT_GEN
 extern const SdkFn sdk_fns[];             /* sorted by address */
 extern const int sdk_fn_count;
 extern const char *const sdk_host_names[];
 extern const int sdk_host_name_count;
+#else                                     /* the exe reads them from the game DLL (game_data.h, gamedll.c) */
+#define sdk_fns ((const SdkFn *)game_data.sdk_fn_tab)
+#define sdk_fn_count (game_data.sdk_fn_n)
+#define sdk_host_names (game_data.sdk_host_name_tab)
+#define sdk_host_name_count (game_data.sdk_host_name_n)
+#endif
 
-int sdk_image_ready(void);                /* 1 once sdk.elf is mapped and relocated */
-ImportFn sdk_lifted(const char *name);    /* lifted function of that symbol, NULL if it was not lifted */
-uint64_t sdk_symbol(const char *name);    /* mapped address of an SDK symbol (function or data), 0 if unknown */
 void sdk_host_call(Ctx *c, int index);    /* lifted code -> host handler sdk_host_names[index] */
 void sdk_trap_call(Ctx *c, const char *name);
 void sdk_dispatch(Ctx *c, uint64_t addr); /* indirect call made by lifted SDK code */
+
+#ifndef SDKLIFT_GEN
+int sdk_image_ready(void);                /* 1 once sdk.elf is mapped and relocated */
+ImportFn sdk_lifted(const char *name);    /* lifted function of that symbol, NULL if it was not lifted */
+uint64_t sdk_symbol(const char *name);    /* mapped address of an SDK symbol (function or data), 0 if unknown */
 void sdk_host_override(const char *name, ImportFn fn);   /* host handler for a cut SDK-internal callee */
 int sdk_install(const char *name);        /* make the lifted code the handler of this import (replaces); 0 if not lifted */
 int sdk_missing_host_callees(FILE *out);  /* host callees of lifted code that have no handler (self-test) */
 void register_sdklift_imports(void);      /* maps the image; every lifted root that is a handler-less import gets its lifted code */
+#endif
 
 /* setjmp / longjmp inside lifted SDK code (libjpeg's error exit). The lifted function that contains the
  * `bl setjmp` is an ordinary host function that stays on the host stack until the guest function returns,
@@ -41,7 +53,12 @@ typedef struct {
 } SdkJmpRec;
 SdkJmpRec *sdk_jmp_record(Ctx *c);        /* x0 = guest jmp_buf */
 void sdk_jmp_restore(Ctx *c, SdkJmpRec *r);
-void sdk_longjmp(Ctx *c);                 /* x0 = guest jmp_buf, w1 = value; does not return */
+#ifdef SDKLIFT_GEN
+void sdk_longjmp(Ctx *c);                 /* x0 = guest jmp_buf, w1 = value; does not return (game_data.c: the longjmp is made
+                                           * in the DLL, by the same C library whose setjmp filled the buffer) */
+#else
+SdkJmpRec *sdk_longjmp_target(Ctx *c);    /* the record a guest longjmp (x0 = jmp_buf, w1 = value) goes to; traps if none */
+#endif
 #define SDK_SETJMP(c) do { SdkJmpRec *j_ = sdk_jmp_record(c); if (setjmp(j_->host)) sdk_jmp_restore((c), j_); else (c)->x[0] = 0; } while (0)
 
 #endif

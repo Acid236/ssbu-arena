@@ -15,6 +15,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -46,6 +47,21 @@ def write_registry(entries):
         print('wrote nro_registry.c (%d modules)' % len(entries))
 
 
+# Several modules are built at once (main: --modules-at-once, default RECOMP_NRO_AT_ONCE or jobs // 4, at most 6), largest
+# first; the compilers of all of them share `jobs` slots, the lifters (each a pool of its own) two. One module at a time
+# left most of the CPU idle while a module waited for its largest file or ran its lifter (2026-10-19: 98 modules,
+# 937 s at 12 jobs, of which 226 s lifting and the rest mostly the tail of each module).
+_cc_slots = None
+_lift_slots = threading.BoundedSemaphore(2)
+
+
+def _in_slot(job):
+    if _cc_slots is None:
+        return run_clang(job)
+    with _cc_slots:
+        return run_clang(job)
+
+
 def run_clang(job):
     args, label = job
     t = time.time()
@@ -70,7 +86,8 @@ def build_module(e, jobs, relift, opt):
     extra = os.path.join(RO, 'nro_entries.json')            # entry points found at run time (see recomp_nro.py)
     deps = [nro, LIFTER, os.path.join(RO, 'nro_eh.py')] + ([extra] if os.path.exists(extra) else [])
     if relift or not os.path.exists(stamp) or os.path.getmtime(stamp) < max(os.path.getmtime(p) for p in deps):
-        r = subprocess.run([sys.executable, LIFTER, 'full', nro, gen, str(min(jobs, 16)), e['base']], capture_output=True, text=True)
+        with _lift_slots:
+            r = subprocess.run([sys.executable, LIFTER, 'full', nro, gen, str(min(jobs, 16)), e['base']], capture_output=True, text=True)
         tail = [l for l in r.stdout.splitlines() if l.startswith('functions:')]
         if r.returncode or not tail:
             print('%s: LIFT FAILED\n%s\n%s' % (name, r.stdout[-3000:], r.stderr[-3000:]))
@@ -82,7 +99,8 @@ def build_module(e, jobs, relift, opt):
     t0 = time.time()
     newest_header = max(os.path.getmtime(os.path.join(HERE, h)) for h in GEN_HEADERS)
     sources = sorted(n for n in os.listdir(gen) if n.endswith('.c'))
-    flags = ['-c', opt, '-w', '-fno-strict-aliasing', '-I', HERE, '-I', gen]
+    import build                                            # NOCRT_FLAGS / link_dll: RECOMP_NOCRT (build.py)
+    flags = ['-c', opt, '-w', '-fno-strict-aliasing', '-I', HERE, '-I', gen] + build.NOCRT_FLAGS
     todo = []
     for n in sources:
         src, o = os.path.join(gen, n), os.path.join(obj, n[:-2] + '.obj')
@@ -97,7 +115,8 @@ def build_module(e, jobs, relift, opt):
             os.remove(os.path.join(obj, n))
     failed = 0
     with concurrent.futures.ThreadPoolExecutor(jobs) as pool:
-        for label, code, err, secs in pool.map(run_clang, todo):
+        todo.sort(key=lambda j: -os.path.getsize(j[0][-3]))       # longest first
+        for label, code, err, secs in pool.map(_in_slot, todo):
             if code:
                 failed += 1
                 print('FAILED %s %s\n%s' % (name, label, err), flush=True)
@@ -111,10 +130,7 @@ def build_module(e, jobs, relift, opt):
     objs = sorted(os.path.join(obj, n) for n in os.listdir(obj) if n.endswith('.obj'))
     linked = False
     if not os.path.exists(dll) or os.path.getmtime(dll) < max(os.path.getmtime(o) for o in objs):
-        rsp = os.path.join(obj, 'link.rsp')
-        with open(rsp, 'w') as f:
-            f.write('\n'.join('"%s"' % o.replace('\\', '/') for o in objs))
-        r = subprocess.run([CLANG, '-shared', '@' + rsp, '-o', dll], capture_output=True, text=True)
+        r = build.link_dll(objs, dll, os.path.join(obj, 'link.rsp'), implib=False, fltused=True)
         if r.returncode:
             print((r.stdout + r.stderr)[-4000:])
             print('could not link %s (is a game exe still running and holding it open?)' % dll)
@@ -142,13 +158,22 @@ def main(argv):
     by_name = {e['name']: e for e in entries}
     rc = 0
     t0 = time.time()
+    todo = []
     for n in names:
         e = by_name.get(n) or by_name.get('lua2cpp_' + n)
         if not e:
             print('unknown module %s (see ro_study/nro_map.json)' % n)
             rc = 1
             continue
-        rc |= build_module(e, jobs, '--relift' in argv, opt)
+        todo.append(e)
+    at_once = int(next((a.split('=', 1)[1] for a in argv if a.startswith('--modules-at-once=')), os.environ.get('RECOMP_NRO_AT_ONCE') or max(1, min(6, jobs // 4))))
+    global _cc_slots
+    _cc_slots = threading.BoundedSemaphore(jobs) if at_once > 1 else None
+    size = lambda e: os.path.getsize(os.path.join(RO, 'nro', e['file'])) if os.path.exists(os.path.join(RO, 'nro', e['file'])) else 0
+    todo.sort(key=lambda e: -size(e))
+    with concurrent.futures.ThreadPoolExecutor(at_once) as pool:
+        for code in pool.map(lambda e: build_module(e, jobs, '--relift' in argv, opt), todo):
+            rc |= code
     if names:
         print('nro build: %d module(s) in %.1fs' % (len(names), time.time() - t0))
     return rc

@@ -24,9 +24,10 @@ void runtime_init(const char *elf, const char *trace_path);
 void *import_data(const char *name);
 /* Make an imported data symbol resolve to host memory (call before runtime_init). */
 void import_set_address(const char *name, void *addr);
-typedef struct { const char *name; const unsigned char *bytes; unsigned size; } SdkData;
-extern const SdkData sdk_data[];
-extern const int sdk_data_count;
+#include "game_data.h"                  /* SdkData; the tables below live in the game DLL (gamedll.c binds them) */
+extern GameData game_data;
+#define sdk_data (game_data.sdk_data_tab)
+#define sdk_data_count (game_data.sdk_data_n)
 void register_imports(const ImportDef *defs, int count);
 ImportFn import_lookup(const char *name);    /* registered handler of an imported function, or NULL */
 void call_guest(Ctx *c, uint64_t addr);

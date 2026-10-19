@@ -434,7 +434,11 @@ static void st_game_stream(Ctx *c) {
 }
 
 /* ---- exception runtime (eh_runtime.h): personality, images, throw / catch / rethrow bookkeeping */
-#include "eh_tests.h"
+/* eh_tests.h (gen_eh_tests.py, decoded from main.elf) is compiled into the game DLL (game_data.c); the same two types here */
+typedef struct { uint64_t pc, pad; signed char kind_a, sel_a, kind_b, sel_b; } EhVec;   /* thrown A = std::out_of_range, B = std::ios_base::failure */
+typedef struct { uint64_t start, end, lsda; } EhFnVec;
+#define eh_vecs ((const EhVec *)game_data.eh_vec_tab)
+#define eh_fn_vecs ((const EhFnVec *)game_data.eh_fn_vec_tab)
 #include <setjmp.h>
 static jmp_buf st_raise_jmp;
 static int st_raise_reason, st_raise_calls;
@@ -449,7 +453,7 @@ static void st_eh_tables(void) {
     uint64_t a = cxxrt_allocate_exception(16), b = cxxrt_allocate_exception(32);
     cxxrt_exception_init(a, P64(g_ti_out_of_range), 0);
     cxxrt_exception_init(b, P64(g_ti_ios_failure), 0);
-    int bad = 0, n = (int)(sizeof eh_vecs / sizeof eh_vecs[0]);
+    int bad = 0, n = game_data.eh_vec_n;
     for (int i = 0; i < n; i++) {
         const EhVec *v = &eh_vecs[i];
         EhPad pa, pb;
@@ -463,7 +467,7 @@ static void st_eh_tables(void) {
     }
     CHECK(bad == 0, "%d of %d personality answers over main's call-site records differ from the tables decoded offline", bad, n);
     bad = 0;
-    for (int i = 0; i < (int)(sizeof eh_fn_vecs / sizeof eh_fn_vecs[0]); i++) {
+    for (int i = 0; i < game_data.eh_fn_vec_n; i++) {
         EhFunction f;
         const EhFnVec *v = &eh_fn_vecs[i];
         if (!eh_find_function(v->start, &f) || f.start != v->start || f.end != v->end || f.lsda != v->lsda) bad++;
@@ -571,6 +575,8 @@ static void st_eh_module(void) {
     long size = ftell(f);
     fseek(f, 0, SEEK_SET);
     uint8_t *mem = VirtualAlloc((void *)(uintptr_t)base, 0x900000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    if (!mem)                                  /* nnro.c ro_reserve_range already reserved the module range: commit inside it */
+        mem = VirtualAlloc((void *)(uintptr_t)base, 0x900000, MEM_COMMIT, PAGE_READWRITE);
     if (P64(mem) != base || fread(mem, 1, (size_t)size, f) != (size_t)size) { fclose(f); CHECK(0, "cannot map the module at its base"); return; }
     fclose(f);
     uint64_t mod0 = base + rd32(base + 4), rela = 0, relasz = 0, symtab = 0, relocs = 0;
