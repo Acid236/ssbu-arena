@@ -10,8 +10,8 @@ tables, the script-module libraries) is **generated on your PC from your own dum
    if they are missing).
 2. Download this repository (Code, Download ZIP) and unpack it, or `git clone` it.
 3. Double-click **`Install SSBU.bat`**. The installer window opens: choose your own files (the base game as `.nsp`,
-   `.xci` or `.nsz`, the 13.0.4 update as `.nsp` or `.nsz`, your `prod.keys`, optionally a firmware dump for the system
-   fonts) or a dump folder you already have, and press **Install**. It shows each step, a progress bar and the log. The installer makes the dump,
+   `.xci` or `.nsz`, the 13.0.4 or 13.0.5 update as `.nsp` or `.nsz`, your `prod.keys`, and your firmware dump for the system
+   fonts, which the game needs) or a dump folder you already have, and press **Install**. It shows each step, a progress bar and the log. The installer makes the dump,
    downloads the missing tools from their official pages (each archive is checked against the SHA-256 written in
    `scripts/install.py` before it is used), then builds. The first build takes 30 minutes to a few hours; if it stops,
    double-click it again and it goes on from there.
@@ -75,7 +75,8 @@ own), produce a folder:
 ```
 <dump>/exefs/      the whole ExeFS: main, sdk, rtld, subsdk0, main.npdm   (with the update applied)
 <dump>/romfs/      the RomFS with the update applied (it contains data.arc)
-<dump>/sysdata/fonts and <dump>/sysdata/zoneinfo      optional: the system shared fonts (.ttf) and the tz database files
+<dump>/sysdata/fonts      required: the system shared fonts (.ttf); the game stops at start (code 7) without them
+<dump>/sysdata/zoneinfo   optional: the tz database files
 ```
 
 If you only have packages (`.nsp`, or a cartridge image `.xci` of the base game) and your own keys, one command makes the

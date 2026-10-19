@@ -90,10 +90,12 @@ def step_dump(a):
         for sub in ('exefs', 'romfs'):
             if not os.path.isdir(os.path.join(a.dump, sub)):
                 sys.exit('the dump folder %s has no %s\\ inside' % (a.dump, sub))
+        need_fonts(a.dump)
         say('2. Game files: the dump folder %s' % a.dump)
         return a.dump
     dump = os.path.join(BUILD, 'dump')
     if os.path.isdir(os.path.join(dump, 'romfs')) and os.path.isdir(os.path.join(dump, 'exefs')):
+        need_fonts(dump)
         say('2. Game files: build\\dump is already there')
         return dump
     if not (a.base and a.update):
@@ -116,7 +118,15 @@ def step_dump(a):
     base, upd = plain(a.base, 'base'), plain(a.update, 'update')
     say('2. Game files: making build\\dump (about 17 GB, several minutes)')
     subprocess.run([sys.executable, os.path.join(ext, 'dump_folder.py'), base, upd, dump] + (['--firmware', a.firmware] if a.firmware else []), check=True)
+    need_fonts(dump)
     return dump
+
+
+def need_fonts(dump):
+    """The runtime stops (code 7) without the system fonts, as a console always has them."""
+    fonts = os.path.join(dump, 'sysdata', 'fonts')
+    if not (os.path.isdir(fonts) and any(n.lower().endswith('.ttf') for n in os.listdir(fonts))):
+        sys.exit('no system fonts in %s: the game needs them. Choose your firmware dump folder (Firmware) and start again, or put the fonts there with tools/extract/fw_fonts.py' % fonts)
 
 
 # the two files of a yuzu-family source tree that tools/lifter/gen_sdktest.py reads (default Miis for the self-test), from a
