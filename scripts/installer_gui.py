@@ -43,8 +43,8 @@ class App:
         for r, (label, var, kind, tip) in enumerate((
                 ('Base game', self.base, 'pkg', '.nsp, .xci or .nsz of the game itself (v0)'),
                 ('Update 13.0.4', self.update, 'pkg', '.nsp or .nsz of the update'),
-                ('prod.keys', self.keys, 'keys', 'your console\'s keys'),
-                ('Firmware (optional)', self.fw, 'dir', 'a firmware dump folder: the system fonts')), start=1):
+                ('prod.keys (packages only)', self.keys, 'keys', 'your console\'s keys, needed only to read package files'),
+                ('Firmware (optional)', self.fw, 'dir', 'only the system fonts; without it Windows fonts are used')), start=1):
             self.rows.append(self.field(src, r, label, var, kind, tip))
         ttk.Radiobutton(src, text='A dump folder I already made (exefs\\ and romfs\\ inside)', variable=self.mode, value='dump',
                         command=self.sync).grid(row=5, column=0, columnspan=3, sticky='w', **pad)
@@ -119,9 +119,13 @@ class App:
         else:
             if not (self.base.get() and self.update.get()):
                 return messagebox.showwarning('Installer', 'Choose the base game and the update.')
-            if not self.keys.get():
-                return messagebox.showwarning('Installer', 'Choose your prod.keys.')
-            args += ['--base', self.base.get(), '--update', self.update.get(), '--keys', self.keys.get()]
+            have = os.path.exists(os.path.join(os.path.expanduser('~'), '.switch', 'prod.keys'))
+            if not self.keys.get() and not have:
+                return messagebox.showwarning('Installer', 'Package files are encrypted: choose your prod.keys.\n'
+                                              '(A dump folder you made on the console needs no keys: use the second option.)')
+            args += ['--base', self.base.get(), '--update', self.update.get()]
+            if self.keys.get():
+                args += ['--keys', self.keys.get()]
             if self.fw.get():
                 args += ['--firmware', self.fw.get()]
         self.btn.config(state='disabled')
