@@ -527,7 +527,10 @@ static int code_read(const char *s, struct sockaddr_in *out) {
     return 1;
 }
 static char g_room_code[64];
+static char g_lan_code[16], g_upnp_text[192];           /* U1 (the Online page of the settings menu): HOST mode's code for the same network, the UPnP result */
 const char *net_room_code(void) { return g_room_code; }
+const char *net_lan_code(void) { return g_lan_code; }
+const char *net_upnp_result(void) { return g_upnp_text; }
 int net_mode(void) { configure(); return g_mode; }
 
 /* STUN (RFC 5389) Binding request from socket s: the public address the router gives that socket's port. 0 = no answer. */
@@ -585,14 +588,17 @@ static int start_host(void) {                   /* HOST mode: the lobby in this 
     int mapped = 0;
     if (g_upnp && lan) {
         mapped = upnp_map_udp(port, lan, "SSBU online room", ext, sizeof ext, why, sizeof why);
-        if (mapped) { g_upnp_mapped = port; atexit(upnp_cleanup); say("host: UPnP: the router forwards UDP port %u to this PC%s%s", port, ext[0] ? ", public address " : "", ext); }
-        else say("host: UPnP: %s", why);
+        if (mapped) { g_upnp_mapped = port; atexit(upnp_cleanup); say("host: UPnP: the router forwards UDP port %u to this PC%s%s", port, ext[0] ? ", public address " : "", ext);
+                      snprintf(g_upnp_text, sizeof g_upnp_text, "UPnP: the router forwards UDP port %u to this PC%s%s", port, ext[0] ? ", public address " : "", ext); }
+        else { say("host: UPnP: %s", why); snprintf(g_upnp_text, sizeof g_upnp_text, "UPnP: %s", why); }
         if (mapped && !pub && ext[0] && strcmp(ext, "0.0.0.0")) { struct in_addr x; if (inet_pton(AF_INET, ext, &x) == 1) { pub = ntohl(x.s_addr); pub_port = port; } }
     }
+    if (!(g_upnp && lan)) snprintf(g_upnp_text, sizeof g_upnp_text, "UPnP: %s", g_upnp ? "no local address" : "off (online_upnp = off)");
     if (stun_ok) say("host: STUN %s: public address %s:%u", g_stun, ip_text(pub, a), pub_port);
     else if (g_stun[0]) say("host: STUN %s: no answer", g_stun);
     char code[16], lan_code[16];
     code_of(lan ? lan : 0x7f000001u, port, lan_code);
+    snprintf(g_lan_code, sizeof g_lan_code, "%s", lan_code);
     if (pub) {
         code_of(pub, mapped ? port : pub_port, code);
         snprintf(g_room_code, sizeof g_room_code, "%s", code);
@@ -872,6 +878,14 @@ void net_start(void) {
     BOOL pending;
     InitOnceBeginInitialize(&once, 0, &pending, NULL);
     if (!pending) return;
+    {   /* U1: "Restart the game now" of the settings menu starts this copy while the old one is still closing: wait for it to
+         * end first (its UPnP mapping and its lobby place are removed by its exit handlers; at most 15 s) */
+        const char *w = getenv("SSBU_RESTART_WAIT_PID");
+        if (w && *w) {
+            HANDLE ph = OpenProcess(SYNCHRONIZE, FALSE, (DWORD)strtoul(w, NULL, 10));
+            if (ph) { printf("[online] waiting for the previous copy (process %s) to end\n", w); fflush(stdout); WaitForSingleObject(ph, 15000); CloseHandle(ph); }
+        }
+    }
     if (net_online()) {
         WSADATA wsa;
         WSAStartup(MAKEWORD(2, 2), &wsa);

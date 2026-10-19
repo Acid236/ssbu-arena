@@ -26,6 +26,7 @@
 #include <string.h>
 #include <math.h>
 #include <shellapi.h>
+#include <psapi.h>
 #include "imgui.h"
 #include "net_stats.h"
 extern "C" {
@@ -43,11 +44,14 @@ int nnaoc_owned(const int **list);                                   /* nnmisc.c
 long long nvn_front_presents(void); void nvn_front_osk_redraw(void); /* nvn_gl.c */
 const char *nvn_vk_device_name(void);                                /* nvn_vk_menu.c */
 int osk_active(void);                                                /* osk.c */
+int osk_run(const wchar_t *header, const wchar_t *guide, const wchar_t *initial, int max_len, int min_len, int password, wchar_t *out);      /* osk.c */
+int net_online(void); int net_mode(void); const char *net_room_code(void); const char *net_lan_code(void); const char *net_upnp_result(void);      /* net_relay.c */
 int r1_ra_phase(void);                                               /* r1_state.c (read only): 0 = run-ahead not running now */
 }
 
 enum { B_A = 0, B_B, B_X, B_Y, B_LS, B_RS, B_L, B_R, B_ZL, B_ZR, B_PLUS, B_MINUS, B_LEFT, B_UP, B_RIGHT, B_DOWN, B_HOME, B_CAPTURE };
 #define BIT(b) (1ull << (b))
+enum { NET_MODE_LOBBY, NET_MODE_LAN, NET_MODE_HOST, NET_MODE_JOIN };      /* net_relay.h */
 
 /* ------------------------------------------------------------------ state shared between threads */
 static volatile LONG g_open, g_guard, g_toggle_req;
@@ -103,7 +107,7 @@ extern "C" int menu_wndproc(void *hwnd, unsigned m, uintptr_t w, intptr_t l) {
     if (!menu_enabled()) return 0;
     if (m == WM_KEYDOWN && w == VK_F1) { if (!(l & (1 << 30))) menu_request_toggle(); return 1; }
     if (m == WM_KEYDOWN && w == VK_F2) { if (!(l & (1 << 30))) InterlockedIncrement(&g_stats_req); return 1; }      /* the stats overlay */
-    if (!g_open) return 0;
+    if (!g_open || osk_active()) return 0;
     switch (m) {
     case WM_MOUSEMOVE: q_push(EV_MOVE, (short)LOWORD(l), (short)HIWORD(l)); return 0;
     case WM_LBUTTONDOWN: case WM_LBUTTONUP: q_push(EV_BTN, 0, m == WM_LBUTTONDOWN); return 1;
@@ -253,8 +257,8 @@ static uint64_t g_pad_prev;
 static long long g_closed_at, g_frame;
 static char g_pads[1024];
 static ULONGLONG g_pads_at;
-enum { SEC_DISPLAY, SEC_GRAPHICS, SEC_AUDIO, SEC_INPUT, SEC_CONTROLS, SEC_DLC, SEC_LANG, SEC_LOG, SEC_ABOUT, SEC_N };
-static const char *const k_sections[SEC_N] = {"Display", "Graphics", "Audio", "Input", "Controls", "Add-on content", "Language", "Log", "About"};
+enum { SEC_DISPLAY, SEC_GRAPHICS, SEC_AUDIO, SEC_CONTROLS, SEC_EXPERIMENTAL, SEC_DLC, SEC_LANG, SEC_LOG, SEC_ABOUT, SEC_N };
+static const char *const k_sections[SEC_N] = {"Display", "Graphics", "Audio", "Controls", "Experimental", "Add-on content", "Language", "Log", "About"};
 
 static ImGuiKey vk_key(int vk) {
     if (vk >= 'A' && vk <= 'Z') return (ImGuiKey)(ImGuiKey_A + (vk - 'A'));
@@ -388,16 +392,6 @@ static void sec_audio(void) {
     ImGui::Separator();
     help("Music and sound effects apart: the game's own Options > Sound (it mixes them itself; the PC gets the finished mix, and this volume scales all of it).");
 }
-static void sec_input(void) {
-    if (combo("Run-ahead (one frame less delay)", &S.runahead, k_onoff, N(k_onoff))) ini("runahead", k_onoff[S.runahead]);
-    tag(1, S.runahead != S0.runahead);
-    help("Costs a second pass of each fight frame on the CPU; needs the build with dirty-page marks. Leave it off on a weak PC.");
-    ImGui::Separator();
-    help("Buttons, keys, sticks, which controller is which player: the Controls page. "
-         "Menu: F1, or the Home / Guide (or Capture / Share) button; + or Esc closes it. While the menu is open the game gets no input.");
-    if (ImGui::Button("Open the Controls page")) { g_section = SEC_CONTROLS; g_section_req = g_section; }
-}
-
 /* ------------------------------------------------------------------ the Controls page: remapping of the keyboard and of every
  * controller (nnpad_sdl.c writes controllers.ini; all of it is used at once). The game's own actions next to each control are
  * the game's DEFAULT controls (its Options > Controls can change them per player name). */
@@ -573,6 +567,218 @@ static void sec_controls(void) {
     ImGui::Separator();
     test_area(dv ? dv->player : nnhid_kb_player());
 }
+/* ------------------------------------------------------------------ the Online page (net_relay.c / nnldn.c, docs/ONLINE.md)
+ * The online code reads its graphics.ini keys once at the start (nnldn_register replaces the game's nn::ldn imports at boot
+ * only when online play is on), so every control here is [restart]; "Restart the game now" starts this exe again with the
+ * same command line and ends this copy (net_start of the new copy waits for the old one to be gone). */
+#define ONLINE_DEFAULT_LOBBY "opensmash-lobby.duckdns.org:39500"      /* the project's public lobby server (host:port); a domain name can replace it */
+static const char *const k_online_mode[] = {"off", "lan", "host", "join", "lobby"};
+static const char *const k_online_name[] = {"Off", "Same network (LAN)", "Host a room (room code)", "Join with a code", "Lobby server (recommended)"};
+static struct { int mode, last_mode; bool upnp, relay_only; char join[64], server[128]; } O, O0;
+static void sec_online(void);
+static int g_online_inited;
+static volatile LONG g_osk_busy;
+static char g_osk_text[64];
+static volatile LONG g_osk_done;
+static int ini_read(const char *key, char *out, int n) {       /* "key = value" of graphics.ini (the online code's own reading rule) */
+    FILE *f = fopen(gfx_options()->path, "r");
+    char ln[512];
+    int found = 0;
+    out[0] = 0;
+    while (f && !found && fgets(ln, sizeof ln, f)) {
+        char *s = ln;
+        while (*s == ' ' || *s == '\t') s++;
+        size_t kl = strlen(key);
+        if (_strnicmp(s, key, kl) || (s[kl] != ' ' && s[kl] != '\t' && s[kl] != '=')) continue;
+        s += kl;
+        while (*s == ' ' || *s == '\t') s++;
+        if (*s++ != '=') continue;
+        while (*s == ' ' || *s == '\t') s++;
+        char *e = s + strcspn(s, ";#\r\n");
+        while (e > s && (e[-1] == ' ' || e[-1] == '\t')) e--;
+        *e = 0;
+        snprintf(out, (size_t)n, "%s", s);
+        found = 1;
+    }
+    if (f) fclose(f);
+    return found;
+}
+static int off_word(const char *v) { return !*v || !strcmp(v, "0") || !_stricmp(v, "off") || !_stricmp(v, "no") || !_stricmp(v, "false"); }
+static void online_init(void) {
+    char v[128];
+    memset(&O, 0, sizeof O);
+    O.upnp = 1;
+    if (ini_read("online_mode", v, sizeof v)) {
+        if (off_word(v)) O.mode = 0;
+        else if (!_stricmp(v, "lan")) O.mode = 1;
+        else if (!_strnicmp(v, "host", 4)) O.mode = 2;
+        else if (!_strnicmp(v, "join", 4)) { O.mode = 3; if (v[4] == ':') snprintf(O.join, sizeof O.join, "%s", v + 5); }
+        else if (!_stricmp(v, "1") || !_stricmp(v, "on") || !_stricmp(v, "auto")) O.mode = ini_read("online_server", v, sizeof v) && !off_word(v) ? 4 : 1;
+        else O.mode = 4;
+    } else if (ini_read("online_server", v, sizeof v) && !off_word(v)) O.mode = 4;
+    if (!O.join[0]) ini_read("online_join", O.join, sizeof O.join);
+    if (!ini_read("online_server", O.server, sizeof O.server) || off_word(O.server)) snprintf(O.server, sizeof O.server, "%s", ONLINE_DEFAULT_LOBBY);
+    if (ini_read("online_upnp", v, sizeof v)) O.upnp = !off_word(v);
+    if (ini_read("online_direct", v, sizeof v)) O.relay_only = off_word(v);
+    /* what this run started with: the online code's own answer (SSBU_ONLINE wins over the file) */
+    O.last_mode = O.mode;
+    O0 = O;
+    O0.mode = !net_online() ? 0 : net_mode() == NET_MODE_LAN ? 1 : net_mode() == NET_MODE_HOST ? 2 : net_mode() == NET_MODE_JOIN ? 3 : 4;
+    g_online_inited = 1;
+}
+static void online_save(void) {
+    ini("online_mode", k_online_mode[O.mode]);
+    if (O.mode == 3) ini("online_join", O.join[0] ? O.join : "");
+    if (O.mode == 4) ini("online_server", O.server[0] ? O.server : "off");
+    ini("online_upnp", O.upnp ? "on" : "off");
+    ini("online_direct", O.relay_only ? "off" : "on");
+    printf("menu: online settings written: online_mode = %s%s%s (used at the next start)\n", k_online_mode[O.mode], O.mode == 3 ? ", online_join = " : O.mode == 4 ? ", online_server = " : "",
+           O.mode == 3 ? O.join : O.mode == 4 ? O.server : "");
+    fflush(stdout);
+}
+static DWORD WINAPI osk_code_thread(LPVOID) {             /* the on-screen keyboard for the room code (it blocks: not on the render thread) */
+    wchar_t init[64], out[64] = L"";
+    MultiByteToWideChar(CP_UTF8, 0, O.join, -1, init, 64);
+    int r = osk_run(L"Room code", L"The code the host's game shows (like 1A2B3-C4D5E)", init, 32, 0, 0, out);
+    if (r == 1) WideCharToMultiByte(CP_UTF8, 0, out, -1, g_osk_text, sizeof g_osk_text, NULL, NULL);
+    InterlockedExchange(&g_osk_done, r == 1 ? 1 : 2);
+    InterlockedExchange(&g_osk_busy, 0);
+    return 0;
+}
+static DWORD WINAPI restart_thread(LPVOID) { Sleep(100); exit(0); return 0; }      /* the exit handlers (UPnP, lobby) run */
+static void restart_game(void) {
+    wchar_t dir[MAX_PATH], pid[16];
+    GetCurrentDirectoryW(MAX_PATH, dir);
+    swprintf(pid, 16, L"%lu", GetCurrentProcessId());
+    SetEnvironmentVariableW(L"SSBU_RESTART_WAIT_PID", pid);
+    STARTUPINFOW si;
+    PROCESS_INFORMATION pi;
+    memset(&si, 0, sizeof si); si.cb = sizeof si;
+    HANDLE h[3] = {GetStdHandle(STD_INPUT_HANDLE), GetStdHandle(STD_OUTPUT_HANDLE), GetStdHandle(STD_ERROR_HANDLE)};
+    for (int i = 0; i < 3; i++) if (h[i] && h[i] != INVALID_HANDLE_VALUE) SetHandleInformation(h[i], HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
+    si.dwFlags = STARTF_USESTDHANDLES; si.hStdInput = h[0]; si.hStdOutput = h[1]; si.hStdError = h[2];
+    wchar_t *cmd = _wcsdup(GetCommandLineW());
+    printf("menu: restarting the game: %ls\n", cmd);
+    fflush(stdout);
+    if (CreateProcessW(NULL, cmd, NULL, NULL, TRUE, 0, NULL, dir, &si, &pi)) {
+        CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+        CreateThread(NULL, 0, restart_thread, NULL, 0, NULL);
+        CreateThread(NULL, 0, [](LPVOID) -> DWORD { Sleep(5000); ExitProcess(0); return 0; }, NULL, 0, NULL);      /* if an exit handler hangs */
+    } else { printf("menu: the restart FAILED (error %lu): start the game again by hand\n", GetLastError()); fflush(stdout); }
+    free(cmd);
+}
+static int g_ra_build = -1;               /* the run-ahead pieces are there: a loaded game DLL with the r1_m1 marks (r1_state.c mark_bind) */
+static int ra_build(void) {
+    if (g_ra_build < 0) {
+        HMODULE mods[512];
+        DWORD need = 0;
+        g_ra_build = 0;
+        if (K32EnumProcessModules(GetCurrentProcess(), mods, sizeof mods, &need))
+            for (DWORD i = 0; i < need / sizeof(HMODULE) && i < 512; i++) if (mods[i] != GetModuleHandleA(NULL) && GetProcAddress(mods[i], "r1_m1")) g_ra_build = 1;      /* (the exe has its own r1_m1: not a sign) */
+    }
+    return g_ra_build;
+}
+static bool onoff(const char *id, bool on, bool enabled) {     /* a big ON / OFF switch; true when clicked */
+    char l[64];
+    snprintf(l, sizeof l, "%s##%s", on ? "ON" : "OFF", id);
+    if (!enabled) ImGui::BeginDisabled();
+    ImGui::PushStyleColor(ImGuiCol_Button, on ? ImVec4(0.20f, 0.60f, 0.25f, 1) : ImVec4(0.35f, 0.35f, 0.38f, 1));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, on ? ImVec4(0.25f, 0.70f, 0.30f, 1) : ImVec4(0.45f, 0.45f, 0.48f, 1));
+    bool c = ImGui::Button(l, ImVec2(ImGui::GetFontSize() * 4.0f, 0));
+    ImGui::PopStyleColor(2);
+    if (!enabled) ImGui::EndDisabled();
+    return c && enabled;
+}
+static int online_differs(void);
+static void sec_experimental(void) {
+    if (!g_online_inited) online_init();
+    help("Features still being tested. Each is saved to config\\graphics.ini and used from the next start.");
+    ImGui::Separator();
+    /* (1) run-ahead (r1_state.c: graphics.ini runahead = on | off; SSBU_RUNAHEAD wins) */
+    if (onoff("ra", S.runahead != 0, ra_build() || S.runahead)) { S.runahead = !S.runahead; ini("runahead", k_onoff[S.runahead]); }
+    ImGui::SameLine(); ImGui::Text("Run-ahead");
+    tag(1, S.runahead != S0.runahead);
+    ImGui::SameLine();
+    if (ra_build()) ImGui::TextDisabled("one frame less input delay in fights; costs a second pass of each frame on the CPU");
+    else ImGui::TextDisabled("needs the run-ahead build (the game DLL with write marks); this build cannot run it");
+    ImGui::Separator();
+    /* (2) online play (net_relay.c / nnldn.c) */
+    bool on = O.mode != 0;
+    if (onoff("net", on, true)) { O.mode = on ? 0 : (O.last_mode ? O.last_mode : 4); online_save(); }
+    ImGui::SameLine(); ImGui::Text("Online play");
+    tag(1, (O.mode != 0) != (O0.mode != 0));
+    ImGui::SameLine(); ImGui::TextDisabled("play with others through the game's Local Wireless menu");
+    if (O.mode) sec_online();
+    if (online_differs() || S.runahead != S0.runahead) {
+        ImGui::Separator();
+        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1.0f), "Saved. These changes are used when the game starts again.");
+        if (ImGui::Button("Restart the game now")) restart_game();
+        ImGui::SameLine(); ImGui::TextDisabled("(progress not saved by the game is lost)");
+    }
+}
+static void sec_online(void) {
+    if (InterlockedExchange(&g_osk_done, 0) == 1) { snprintf(O.join, sizeof O.join, "%s", g_osk_text); online_save(); }
+    NetStats ns;
+    net_stats_get(&ns);
+    static const char *const st[] = {"Offline", "Connecting...", "Connected", "Disconnected"};
+    ImVec4 col = ns.state == NET_CONNECTED ? ImVec4(0.45f, 0.9f, 0.45f, 1) : ns.state == NET_CONNECTING ? ImVec4(1, 0.8f, 0.2f, 1) : ns.state == NET_DISCONNECTED ? ImVec4(1, 0.4f, 0.4f, 1) : ImVec4(0.7f, 0.7f, 0.7f, 1);
+    ImGui::Text("Now:"); ImGui::SameLine();
+    if (ns.state == NET_CONNECTED) ImGui::TextColored(col, "%s - %s, %d player%s%s", st[2], k_online_name[O0.mode], ns.players, ns.players == 1 ? "" : "s", "");
+    else ImGui::TextColored(col, "%s%s%s", ns.state >= 0 && ns.state <= 3 ? st[ns.state] : "?", O0.mode ? " - " : "", O0.mode ? k_online_name[O0.mode] : "");
+    if (ns.state == NET_CONNECTED && ns.ping_ms >= 0) { ImGui::SameLine(); ImGui::Text("  ping %d ms", ns.ping_ms); }
+    ImGui::Indent();
+    ImGui::SetWindowFontScale(1.2f);
+    int changed = 0;
+    static const int order[4] = {4, 1, 2, 3};      /* the lobby first: it needs nothing from the router */
+    for (int k = 0; k < 4; k++) { int i = order[k]; if (ImGui::RadioButton(k_online_name[i], O.mode == i)) { O.mode = O.last_mode = i; changed = 1; } }
+    ImGui::SetWindowFontScale(1.0f);
+    tag(1, O.mode != O0.mode);
+    if (O.mode == 1) help("Every player on the same home network chooses Same network. One game hosts the room list by itself; nothing to type.");
+    if (O.mode == 2) {
+        const char *code = O0.mode == 2 ? net_room_code() : "";
+        if (code && code[0]) {
+            ImGui::Text("ROOM CODE (give it to the other player):");
+            ImGui::SetWindowFontScale(2.6f);
+            ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.25f, 1), "%s", code);
+            ImGui::SetWindowFontScale(1.0f);
+            ImGui::SameLine();
+            if (ImGui::Button("Copy")) { ImGui::SetClipboardText(code); printf("menu: room code copied\n"); fflush(stdout); }
+            if (net_lan_code()[0] && strcmp(net_lan_code(), code)) ImGui::TextDisabled("On the same network: %s", net_lan_code());
+            if (net_upnp_result()[0]) ImGui::TextDisabled("%s", net_upnp_result());
+        } else help(O0.mode == 2 ? "The room code appears here in a few seconds (it needs the public address: STUN / UPnP)."
+                                 : "The room code appears here after the restart.");
+        if (ImGui::Checkbox("Open the router's port by itself (UPnP)", &O.upnp)) changed = 1;
+        tag(1, O.upnp != O0.upnp);
+    }
+    if (O.mode == 3) {
+        ImGui::InputTextWithHint("Room code", "1A2B3-C4D5E", O.join, sizeof O.join, ImGuiInputTextFlags_CharsUppercase);
+        if (ImGui::IsItemDeactivatedAfterEdit()) changed = 1;
+        tag(1, strcmp(O.join, O0.join) != 0);
+        ImGui::SameLine();
+        if (g_osk_busy) ImGui::BeginDisabled();
+        if (ImGui::Button("Type with the controller")) { InterlockedExchange(&g_osk_busy, 1); CreateThread(NULL, 0, osk_code_thread, NULL, 0, NULL); }
+        if (g_osk_busy) ImGui::EndDisabled();
+        if (O0.mode == 3 && net_room_code()[0]) ImGui::TextDisabled("Your own code (only if the host's router blocks you; the host sets it as online_peer): %s", net_room_code());
+    }
+    if (O.mode == 4) {
+        ImGui::InputTextWithHint("Lobby server", "host:port", O.server, sizeof O.server);
+        if (ImGui::IsItemDeactivatedAfterEdit()) changed = 1;
+        tag(1, strcmp(O.server, O0.server) != 0);
+        if (strcmp(O.server, ONLINE_DEFAULT_LOBBY) && ImGui::SmallButton("Use the public lobby")) { snprintf(O.server, sizeof O.server, "%s", ONLINE_DEFAULT_LOBBY); changed = 1; }
+        help("Everyone using the same lobby sees each other's rooms. Your own lobby: tools/net/ssbu_lobby.py.");
+        if (ImGui::Checkbox("Relay only (everything through the lobby, no direct connection)", &O.relay_only)) changed = 1;
+        tag(1, O.relay_only != O0.relay_only);
+    }
+    if (changed) online_save();
+    help("Then, in the game: Smash > Local Wireless (the game's own menu): one player Create Room, the others Rooms List.");
+    if (getenv("SSBU_ONLINE")) ImGui::TextColored(ImVec4(1, 0.6f, 0.3f, 1), "SSBU_ONLINE=%s is set for this run: it wins over these settings.", getenv("SSBU_ONLINE"));
+    ImGui::Unindent();
+}
+static int online_differs(void) {
+    return O.mode != O0.mode || (O.mode == 3 && strcmp(O.join, O0.join)) || (O.mode == 4 && (strcmp(O.server, O0.server) || O.relay_only != O0.relay_only)) || (O.mode == 2 && O.upnp != O0.upnp);
+}
+
+
 static void sec_dlc(void) {
     const int *own = NULL;
     int n = nnaoc_owned(&own);
@@ -775,8 +981,8 @@ static void draw_menu(int cw, int ch) {
     case SEC_DISPLAY: sec_display(cw, ch); break;
     case SEC_GRAPHICS: sec_graphics(); break;
     case SEC_AUDIO: sec_audio(); break;
-    case SEC_INPUT: sec_input(); break;
     case SEC_CONTROLS: sec_controls(); break;
+    case SEC_EXPERIMENTAL: sec_experimental(); break;
     case SEC_DLC: sec_dlc(); break;
     case SEC_LANG: sec_lang(); break;
     case SEC_LOG: sec_log(); break;
@@ -886,8 +1092,13 @@ static void test_tick(void) {
             uint64_t seen; long polls = nnhid_test_result(&seen); nnhid_test_key(0);
             printf("menu: test: controls: AFTER: %ld polls of player %d with key P held: the game read buttons 0x%llx (A %s)\n", polls, nnhid_kb_player() + 1, (unsigned long long)seen, seen & 1 ? "PRESSED" : "not pressed");
             nnpad_kb_bind(0, g_test_kb_old);
-            printf("menu: test: controls: A bound back to its old key 0x%02x; test over\n", g_test_kb_old);
-            g_test_step = 20; } break;
+            printf("menu: test: controls: A bound back to its old key 0x%02x\n", g_test_kb_old);
+            set_open(1); g_section = SEC_EXPERIMENTAL; g_section_req = g_section; g_test_step = 20; step_at = t; } break;
+    case 20: if (t - step_at >= 10) {
+            NetStats ns; net_stats_get(&ns);
+            printf("menu: test: online page: saved mode %s, this run %s, state %d\n", k_online_mode[O.mode], k_online_mode[O0.mode], ns.state);
+            test_shot("online"); g_test_step = 21; } break;
+    case 22: set_open(0); printf("menu: test: over\n"); g_test_step = 23; break;
     }
     fflush(stdout);
 }
@@ -900,7 +1111,7 @@ extern "C" int menu_shot_wanted(char *path, int n) {
 extern "C" void menu_shot_done(const char *path, int w, int h, int ok) {
     printf("menu: test: picture %s %dx%d %s; draw data of that frame: %d vertices, %d indices, %d commands\n", path, w, h, ok ? "written" : "NOT written", g_vtx.Size, g_idx.Size, g_cmd.Size);
     fflush(stdout);
-    if (g_test_step == 3 || g_test_step == 6 || g_test_step == 9 || g_test_step == 15) g_test_step++;
+    if (g_test_step == 3 || g_test_step == 6 || g_test_step == 9 || g_test_step == 15 || g_test_step == 21) g_test_step++;
 }
 
 /* ------------------------------------------------------------------ once per presented frame (render thread) */
@@ -958,14 +1169,14 @@ extern "C" int menu_frame(int width, int height, MenuDraw *out) {
             break;
         }
     }
-    pad_feed(io, g_open && !capturing() ? b : 0);
+    pad_feed(io, g_open && !capturing() && !osk_active() ? b : 0);
     if (g_open && !capturing() && (down & BIT(B_L))) { g_section = (g_section + SEC_N - 1) % SEC_N; g_section_req = g_section; }
     if (g_open && !capturing() && (down & BIT(B_R))) { g_section = (g_section + 1) % SEC_N; g_section_req = g_section; }
     io.MouseDrawCursor = false;
     ImGui::NewFrame();
     if (S.overlay) draw_overlay();
     if (S.stats) draw_stats();
-    if (g_open) draw_menu(width, height);
+    if (g_open && !osk_active()) draw_menu(width, height);
     ImGui::Render();
     ImDrawData *dd = ImGui::GetDrawData();
     g_vtx.resize(0); g_idx.resize(0); g_cmd.resize(0);

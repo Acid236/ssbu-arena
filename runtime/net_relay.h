@@ -35,6 +35,8 @@ void net_list_rooms(uint32_t seq);      /* asks the lobby for the rooms; answers
 /* One datagram from this player's game (dst may be VNET_BROADCAST). */
 void net_send(uint32_t src, uint16_t sport, uint32_t dst, uint16_t dport, const void *data, uint32_t len);
 void net_status(char *out, size_t n);   /* one line for logs */
+const char *net_lan_code(void);         /* HOST mode: the code for players on the same network ("" until known) */
+const char *net_upnp_result(void);      /* HOST mode: what UPnP did, one line ("" until tried) */
 
 /* nnldn.c, called by the client thread */
 void nnldn_deliver(uint32_t src, uint16_t sport, uint32_t dst, uint16_t dport, const void *data, uint32_t len);

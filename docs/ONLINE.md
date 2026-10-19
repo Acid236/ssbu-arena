@@ -11,6 +11,15 @@ This is the game's own Local Wireless mode, played over a network. You only open
 
 Online play is experimental and OFF by default.
 
+## The easy way: the F1 menu
+
+Press **F1** (or the controller's Home button) -> **Experimental** -> **Online play: ON**, then pick a mode:
+**Lobby server** (recommended: the project's public lobby, `opensmash-lobby.duckdns.org:39500`, already filled in),
+**Same network (LAN)**, **Host a room** (shows a ROOM CODE with a Copy button) or **Join with a code**.
+Press **Restart the game now**, then use the game's own Local Wireless: Create Room / Rooms List.
+
+The rest of this page is the same by hand (environment variables or graphics.ini keys).
+
 ## Turn it on
 
 There are four ways to connect. Pick one and set it in one of two places:

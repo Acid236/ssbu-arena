@@ -236,8 +236,13 @@ A settings menu drawn over the game's picture (Dear ImGui, Vulkan renderer only)
 - **F1**, or a controller's Home/Guide or Capture/Share button, opens and closes it; **+** or **Esc** also close it. Those
   controller buttons never reach the game.
 - While it is open the game keeps running but gets no input from the pads and the keyboard.
-- Pages: Display, Graphics, Audio, Input, Add-on content, Language, Log (with **Export log**), About. Every control is marked
-  **[live]** (acts at once) or **[restart]** (saved now, used at the next start).
+- Pages: Display, Graphics, Audio, Controls, Experimental, Add-on content, Language, Log (with **Export log**), About. Every
+  control is marked **[live]** (acts at once) or **[restart]** (saved now, used at the next start).
+- **Experimental** page: ON / OFF switches for **Online play** (then choose: Lobby server - recommended, the public lobby
+  is filled in -, Same network (LAN), Host a room (shows a ROOM CODE with a Copy button) or Join with a code, typed or
+  entered with the on-screen keyboard) and **Run-ahead** (greyed out when the build lacks the run-ahead pieces). They are
+  saved to `config\graphics.ini` and used at the next start; **Restart the game now** starts it again. Then use the game's
+  own Local Wireless menu: one player Create Room, the others Rooms List.
 - **Controls** page: remap the keyboard and every controller. For each Switch control (A B X Y L R ZL ZR + - stick
   clicks, d-pad, both sticks' four directions; the game's default action is shown beside it) press **Change** and then the
   key, button, trigger or stick direction you want (6 s; Esc, Home or B for a key cancels), **Clear** or **Default**.
