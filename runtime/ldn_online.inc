@@ -72,8 +72,11 @@ static int g_ldn_ping_overlay = 1;
  * * 1.1 * 0.06, at most 25. With 0 ms it is 4: 5 frames from press to reaction where the game offline needs 1.
  * online.ini input_delay = auto (the game's value) | 0..25 (frames ahead, for every computation of the match); env
  * SSBU_LDN_DELAY wins. Every player's input carries its own frame number, so two players with different values stay
- * in step; a value below the trip the datagrams need makes the games wait for each other (stutter) instead. */
-static int g_ldn_delay = -1;                               /* -1 auto */
+ * in step; a value below the trip the datagrams need makes the games wait for each other (stutter) instead: 0 through
+ * a room server 60 ms away made the match run in slow motion.
+ * input_delay = min (2026-10-19, the launcher's default): the least that keeps the games from waiting, from the same
+ * ping: half the round trip in frames, rounded up, plus 1 frame for jitter (0 ms: 1, 30 ms: 2, 60 ms: 3; the game: 4). */
+static int g_ldn_delay = -1;                               /* -1 auto, -2 min */
 int hook_install(uint64_t addr, void (*repl)(Ctx *, void *), void *user, ImportFn *orig);      /* fighter_sdk\hook_host.c */
 static ImportFn g_ldn_delay_orig;
 static void ldn_delay_hook(Ctx *c, void *u) {
@@ -83,6 +86,11 @@ static void ldn_delay_hook(Ctx *c, void *u) {
     uint8_t *p = (uint8_t *)(uintptr_t)(obj + 0x41);
     int game = *p;
     if (g_ldn_delay >= 0 && g_ldn_delay <= 25) *p = (uint8_t)g_ldn_delay;
+    else if (g_ldn_delay == -2) {
+        float rtt = *(float *)(uintptr_t)(obj + 0x14);
+        int d = (int)(rtt > 0 ? rtt * 0.03f + 0.4f : 0.4f) + 1;      /* ceil(rtt * 0.03 + 0.4) for these values */
+        *p = (uint8_t)(d < 1 ? 1 : d > 25 ? 25 : d);
+    }
     static int last = -2;
     if (game != last) { last = game; printf("nn::ldn: input delay: the game asks for %d frame(s) ahead (largest ping %.0f ms), used %d\n", game, (double)*(float *)(uintptr_t)(obj + 0x14), *p); }
 }
@@ -91,7 +99,7 @@ static void ldn_delay_install(void) {
     if (done) return;
     done = 1;
     int id = hook_install(0x71016ccae0ull, ldn_delay_hook, NULL, &g_ldn_delay_orig);
-    printf("nn::ldn: input delay %s%s\n", g_ldn_delay < 0 ? "auto (the game's own)" : "fixed by online.ini input_delay", id ? "" : " (hook FAILED: the game's own)");
+    printf("nn::ldn: input delay %s%s\n", g_ldn_delay == -2 ? "min (from the ping: half the round trip + 1 frame)" : g_ldn_delay < 0 ? "auto (the game's own)" : "fixed by online.ini input_delay", id ? "" : " (hook FAILED: the game's own)");
 }
 static void ldn_peer_ping(uint32_t vip, int ms) {          /* g_ldn.cs held */
     int free_i = -1;
@@ -190,7 +198,7 @@ static void ldn_load_config(void) {
         else if (!_stricmp(k, "room")) snprintf(g_ldn.room, sizeof g_ldn.room, "%s", v);
         else if (!_stricmp(k, "nickname")) snprintf(nick, sizeof nick, "%s", v);
         else if (!_stricmp(k, "ping_overlay")) g_ldn_ping_overlay = _stricmp(v, "off") && strcmp(v, "0");
-        else if (!_stricmp(k, "input_delay")) g_ldn_delay = _stricmp(v, "auto") ? atoi(v) : -1;
+        else if (!_stricmp(k, "input_delay")) g_ldn_delay = !_stricmp(v, "auto") ? -1 : !_stricmp(v, "min") ? -2 : atoi(v);
     }
     if (f) fclose(f);
     const char *e;
@@ -198,7 +206,7 @@ static void ldn_load_config(void) {
     if ((e = getenv("SSBU_LDN_ROOM")) && *e) snprintf(g_ldn.room, sizeof g_ldn.room, "%s", e);
     if ((e = getenv("SSBU_LDN_NICKNAME")) && *e) snprintf(nick, sizeof nick, "%s", e);
     if ((e = getenv("SSBU_LDN_PING")) && *e) g_ldn_ping_overlay = atoi(e) != 0;
-    if ((e = getenv("SSBU_LDN_DELAY")) && *e) g_ldn_delay = _stricmp(e, "auto") ? atoi(e) : -1;
+    if ((e = getenv("SSBU_LDN_DELAY")) && *e) g_ldn_delay = !_stricmp(e, "auto") ? -1 : !_stricmp(e, "min") ? -2 : atoi(e);
     if (g_ldn_delay > 25) g_ldn_delay = 25;
     char *colon = strrchr(server, ':');
     g_ldn.port = 39010;

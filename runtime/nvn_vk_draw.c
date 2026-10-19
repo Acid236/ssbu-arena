@@ -3271,7 +3271,7 @@ static void ovl_make(void) {                       /* the 8x8 two-layer image th
         VkImageCreateInfo ci = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
         VkMemoryRequirements rq;
         VkClearColorValue c0 = {{0.92f, 0.92f, 0.92f, 1.0f}}, c1 = {{0.06f, 0.06f, 0.06f, 1.0f}};
-        ci.imageType = VK_IMAGE_TYPE_2D; ci.format = VK_FORMAT_B8G8R8A8_UNORM; ci.extent.width = 8; ci.extent.height = 8; ci.extent.depth = 1; ci.mipLevels = 1; ci.arrayLayers = 2;
+        ci.imageType = VK_IMAGE_TYPE_2D; ci.format = VK_FORMAT_B8G8R8A8_UNORM; ci.extent.width = 8; ci.extent.height = 8; ci.extent.depth = 1; ci.mipLevels = 1; ci.arrayLayers = 6;
         ci.samples = VK_SAMPLE_COUNT_1_BIT; ci.tiling = VK_IMAGE_TILING_OPTIMAL; ci.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
         ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE; ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         VKC(vkCreateImage(V.device, &ci, NULL, &g_ovl.img));
@@ -3282,6 +3282,14 @@ static void ovl_make(void) {                       /* the 8x8 two-layer image th
         vkCmdClearColorImage(R.cmd, g_ovl.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &c0, 1, &sr2);
         sr2.baseArrayLayer = 1;
         vkCmdClearColorImage(R.cmd, g_ovl.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &c1, 1, &sr2);
+        {   /* the ping's colours (ldn_ping_draw): 2 green, 3 yellow, 4 red, 5 the unlit bars */
+            static const float k_col[4][4] = {{0.30f, 0.86f, 0.35f, 1.0f}, {0.98f, 0.80f, 0.18f, 1.0f}, {0.95f, 0.26f, 0.22f, 1.0f}, {0.42f, 0.42f, 0.45f, 1.0f}};
+            for (int k = 0; k < 4; k++) {
+                VkClearColorValue ck; memcpy(ck.float32, k_col[k], sizeof ck.float32);
+                sr2.baseArrayLayer = (uint32_t)(2 + k);
+                vkCmdClearColorImage(R.cmd, g_ovl.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &ck, 1, &sr2);
+            }
+        }
         image_barrier(g_ovl.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
         g_ovl.made = 1;
     }
@@ -3322,29 +3330,67 @@ static int g_pic[4];          /* where vk_present2 put the game picture in the s
  * as fractions of the picture); otherwise (room, character select, 3-4 players) a short list at the top left.
  * Dark copy one dot down-right under the light text, so it reads on any background. */
 int ldn_ping_overlay(int *ms, int max);                 /* ldn_online.inc (nnnet.c) */
-static void ldn_ping_text(uint32_t index, int x, int y, int dot, const char *t) {
-    g_ovl_text_layer = 1; ovl_text(index, x + dot, y + dot, dot, t);
-    g_ovl_text_layer = 0; ovl_text(index, x, y, dot, t);
+/* 2026-10-19: drawn the way fighting games show it next to the player (the owner's picture): a signal icon of four
+ * bars and the number, both in the colour of the quality (green up to 60 ms, yellow up to 120, red above, or no answer),
+ * with a dark outline; bars lit: 4 up to 40 ms, 3 up to 80, 2 up to 130, else 1. */
+static void ovl_rect(uint32_t index, int x0, int y0, int x1, int y1, int layer) {
+    int W = (int)V.extent.width, H = (int)V.extent.height;
+    if (x0 < 0) x0 = 0; if (y0 < 0) y0 = 0; if (x1 > W) x1 = W; if (y1 > H) y1 = H;
+    if (x1 <= x0 || y1 <= y0) return;
+    VkImageBlit b;
+    memset(&b, 0, sizeof b);
+    b.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT; b.srcSubresource.layerCount = 1; b.dstSubresource = b.srcSubresource;
+    b.srcSubresource.baseArrayLayer = (uint32_t)layer;
+    b.srcOffsets[1].x = 8; b.srcOffsets[1].y = 8; b.srcOffsets[1].z = 1;
+    b.dstOffsets[0].x = x0; b.dstOffsets[0].y = y0; b.dstOffsets[1].x = x1; b.dstOffsets[1].y = y1; b.dstOffsets[1].z = 1;
+    vkCmdBlitImage(R.cmd, g_ovl.img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, V.images[index], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &b, VK_FILTER_NEAREST);
+}
+static void ldn_ping_text(uint32_t index, int x, int y, int dot, const char *t, int layer) {      /* bold: two passes half a dot apart, dark outline around */
+    int o = dot / 2 > 1 ? dot / 2 : 1;
+    g_ovl_text_layer = 1;
+    for (int dy = -o; dy <= o; dy += o) for (int dx = -o; dx <= 2 * o; dx += o) if (dx || dy) ovl_text(index, x + dx, y + dy, dot, t);
+    g_ovl_text_layer = layer; ovl_text(index, x, y, dot, t); ovl_text(index, x + o, y, dot, t);
+    g_ovl_text_layer = 0;
+}
+static int ldn_ping_width(int dot, const char *t) { return 4 * dot + 3 * (dot * 3 / 2) + dot * 2 + (int)strlen(t) * 6 * dot; }      /* icon + gap + text */
+static void ldn_ping_item(uint32_t index, int x, int y, int dot, int ms) {    /* (x, y): top left; the icon is 7 dots high, as the text */
+    int layer = ms < 0 ? 4 : ms <= 60 ? 2 : ms <= 120 ? 3 : 4, lit = ms < 0 ? 0 : ms <= 40 ? 4 : ms <= 80 ? 3 : ms <= 130 ? 2 : 1;
+    int bw = dot, gap = dot / 2 > 1 ? dot / 2 : 1, o = dot / 2 > 1 ? dot / 2 : 1, H7 = 7 * dot;
+    for (int i = 0; i < 4; i++) {
+        int bx = x + i * (bw + gap), bh = H7 * (i + 1) / 4;
+        ovl_rect(index, bx - o, y + H7 - bh - o, bx + bw + o, y + H7 + o, 1);
+    }
+    for (int i = 0; i < 4; i++) {
+        int bx = x + i * (bw + gap), bh = H7 * (i + 1) / 4;
+        ovl_rect(index, bx, y + H7 - bh, bx + bw, y + H7, i < lit ? layer : 5);
+    }
+    char t[16];
+    if (ms < 0) snprintf(t, sizeof t, "--"); else snprintf(t, sizeof t, "%d", ms > 999 ? 999 : ms);
+    ldn_ping_text(index, x + 4 * bw + 3 * gap + dot * 2, y, dot, t, layer);
 }
 static void ldn_ping_draw(uint32_t index) {
     int ms[8], n = ldn_ping_overlay(ms, 8);
     if (n <= 0) return;
     ovl_make();
-    int X0 = g_pic[0], Y0 = g_pic[1], W = g_pic[2] > 0 ? g_pic[2] : (int)V.extent.width, H = g_pic[3] > 0 ? g_pic[3] : (int)V.extent.height, dot = H / 360 > 1 ? H / 360 : 1;
-    char t[24];
-    if (g_in_fight && n == 2) {                        /* measured at 1280x720: stock icons P1 x 318-350, P2 x 812-860, row y 692-704 */
-        static const float fx[2] = {0.297f, 0.678f};
+    int X0 = g_pic[0], Y0 = g_pic[1], W = g_pic[2] > 0 ? g_pic[2] : (int)V.extent.width, H = g_pic[3] > 0 ? g_pic[3] : (int)V.extent.height;
+    int dot = H / 540 > 1 ? H / 540 : 1;              /* 2 px at 1080 (the owner: half the first size) */
+    if (g_in_fight && n == 2) {                        /* measured at 1280x720: stock icons P1 x 318-350, P2 x 812-860, row y 692-704: left of them, as under the portrait */
+        static const float fx[2] = {0.243f, 0.628f};
         for (int i = 0; i < 2; i++) {
             if (ms[i] == -2) continue;
-            if (ms[i] < 0) snprintf(t, sizeof t, "-- MS"); else snprintf(t, sizeof t, "%d MS", ms[i]);
-            ldn_ping_text(index, X0 + (int)(fx[i] * W), Y0 + (int)(0.960f * H), dot, t);
+            char t[16]; snprintf(t, sizeof t, "%d", ms[i] < 0 ? 0 : ms[i] > 999 ? 999 : ms[i]);
+            if (ms[i] < 0) snprintf(t, sizeof t, "--");
+            ldn_ping_item(index, X0 + (int)(fx[i] * W) - ldn_ping_width(dot, t), Y0 + (int)(0.9625f * H) - 7 * dot / 2, dot, ms[i]);
         }
         return;
     }
     for (int i = 0, row = 0; i < n; i++) {             /* top right: the room / character select keep their buttons top left */
         if (ms[i] == -2) continue;
-        if (ms[i] < 0) snprintf(t, sizeof t, "P%d --", i + 1); else snprintf(t, sizeof t, "P%d %d MS", i + 1, ms[i]);
-        ldn_ping_text(index, X0 + W - (int)strlen(t) * 6 * dot - W / 90, Y0 + H / 60 + row++ * 10 * dot, dot, t);
+        char p[8], t[16]; snprintf(p, sizeof p, "P%d", i + 1);
+        if (ms[i] < 0) snprintf(t, sizeof t, "--"); else snprintf(t, sizeof t, "%d", ms[i] > 999 ? 999 : ms[i]);
+        int w = 3 * 6 * dot + ldn_ping_width(dot, t), x = X0 + W - w - W / 90, y = Y0 + H / 60 + row++ * 11 * dot;
+        ldn_ping_text(index, x, y, dot, p, 0);
+        ldn_ping_item(index, x + 3 * 6 * dot, y, dot, ms[i]);
     }
 }
 #endif
