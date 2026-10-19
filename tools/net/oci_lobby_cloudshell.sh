@@ -63,7 +63,7 @@ if [ "$(cat /tmp/ssbu_ingress.json)" != "null" ]; then
 else say "   already open"; fi
 
 say "3. SSH key (stays in this Cloud Shell)"
-[ -f ~/.ssh/ssbu_lobby ] || ssh-keygen -q -t ed25519 -N "" -f ~/.ssh/ssbu_lobby
+[ -f ~/.ssh/ssbu_lobby ] || ssh-keygen -q -t rsa -b 4096 -N "" -f ~/.ssh/ssbu_lobby      # RSA: Cloud Shell runs in FIPS mode (no ED25519)
 
 say "4. the VM $NAME ($SHAPE)"
 ID=$(oci compute instance list -c "$C" --display-name "$NAME" --lifecycle-state RUNNING --query 'data[0].id' --raw-output 2>/dev/null || true)
