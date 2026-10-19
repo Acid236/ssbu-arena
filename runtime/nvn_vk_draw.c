@@ -3380,7 +3380,7 @@ static void ldn_ping_draw(uint32_t index) {
             if (ms[i] == -2) continue;
             char t[16]; snprintf(t, sizeof t, "%d", ms[i] < 0 ? 0 : ms[i] > 999 ? 999 : ms[i]);
             if (ms[i] < 0) snprintf(t, sizeof t, "--");
-            ldn_ping_item(index, X0 + (int)(fx[i] * W) - ldn_ping_width(dot, t), Y0 + (int)(0.9625f * H) - 7 * dot / 2, dot, ms[i]);
+            ldn_ping_item(index, X0 + (int)(fx[i] * W) - ldn_ping_width(dot, t), Y0 + (int)(0.978f * H) - 7 * dot, dot, ms[i]);      /* the bottom on the stock icons' bottom (y 704 of 720) */
         }
         return;
     }
