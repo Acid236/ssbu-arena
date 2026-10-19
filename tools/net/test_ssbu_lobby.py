@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 """Self-test of ssbu_lobby.py without the game: two fake players on 127.0.0.1 (host creates a room, the other lists it,
-joins it, both exchange a game datagram through the lobby, both receive PEERS for direct paths).
+joins it, both exchange a game datagram through the lobby, both receive PEERS for direct paths), and the HTTP status
+endpoint (--status-port: counts only, CORS header, no addresses or names).
     python test_ssbu_lobby.py        (starts the lobby itself on a free port; standard library only)"""
+import json
 import os
 import socket
 import struct
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -20,6 +24,19 @@ def free_port():
     p = s.getsockname()[1]
     s.close()
     return p
+
+
+def free_tcp_port():
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("127.0.0.1", 0))
+    p = s.getsockname()[1]
+    s.close()
+    return p
+
+
+def get_status(port):
+    with urllib.request.urlopen("http://127.0.0.1:%d/status" % port, timeout=3) as r:
+        return r.status, r.headers, r.read().decode()
 
 
 class Fake:
@@ -77,12 +94,16 @@ def network_info(host_ip, session, station_ip=None):
 
 
 def main():
-    port = free_port()
-    proc = subprocess.Popen([sys.executable, "-I", os.path.join(HERE, "ssbu_lobby.py"), "--bind", "127.0.0.1", "--port", str(port), "--stats", "0"],
+    port, sport = free_port(), free_tcp_port()
+    proc = subprocess.Popen([sys.executable, "-I", os.path.join(HERE, "ssbu_lobby.py"), "--bind", "127.0.0.1", "--port", str(port), "--stats", "0",
+                             "--status-port", str(sport)],
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     try:
         time.sleep(0.5)
         lob = ("127.0.0.1", port)
+        code, _, body = get_status(sport)
+        st = json.loads(body)
+        assert code == 200 and st["up"] is True and st["players"] == 0 and st["rooms"] == 0, body
         a, b = Fake(lob, "Alice"), Fake(lob, "Bob")
         ia, ib = a.join(), b.join()
         assert ia != ib and ia >> 16 == 0x0A0D, (hex(ia), hex(ib))
@@ -117,9 +138,25 @@ def main():
         except AssertionError as e:
             if "outsider" in str(e):
                 raise
+        code, headers, body = get_status(sport)
+        st = json.loads(body)
+        assert code == 200 and headers.get("Access-Control-Allow-Origin") == "*", (code, dict(headers))
+        assert headers.get("Content-Type", "").startswith("application/json")
+        assert st["players"] == 3 and st["rooms"] == 1 and st["up"] is True, body
+        assert isinstance(st["uptime_s"], int) and st["uptime_s"] >= 0 and st["version"], body
+        assert set(st) == {"up", "players", "rooms", "version", "uptime_s"}, body
+        for leak in ("127.0.0.1", "10.13.", "Alice", "Bob", "Carol", "Host", "test", "build-x"):
+            assert leak not in body, ("status leaks", leak, body)
+        try:
+            urllib.request.urlopen("http://127.0.0.1:%d/other" % sport, timeout=3)
+            raise AssertionError("an unknown path answered 200")
+        except urllib.error.HTTPError as e:
+            assert e.code == 404
         a.ldn(L.BROADCASTS[0], L.M_GONE, session)
         assert b.rx(L.DATA)[13] == L.M_GONE
-        print("lobby self-test: ok (join, list, room join, PEERS, broadcast + unicast relay, outsider refused, room closed)")
+        time.sleep(0.2)
+        assert json.loads(get_status(sport)[2])["rooms"] == 0
+        print("lobby self-test: ok (join, list, room join, PEERS, broadcast + unicast relay, outsider refused, room closed, status endpoint)")
         return 0
     finally:
         proc.terminate()

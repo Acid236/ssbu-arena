@@ -10,19 +10,28 @@ can send to each other directly (UDP hole punching); the relay is the fallback.
 Design adapted from SNO2207/WindowSmash (tools/ssbu_relay.py), used with the author's permission. Our own code and our
 own wire protocol ("SU" version 1, described at the top of recomp-study/net_relay.c); not compatible with theirs.
 
-    python ssbu_lobby.py [--bind 127.0.0.1] [--port 39500] [--verbose]
+    python ssbu_lobby.py [--bind 127.0.0.1] [--port 39500] [--verbose] [--status-port 8080 [--status-bind 127.0.0.1]]
+
+--status-port starts a small HTTP endpoint, GET /status, that answers with counts only (players, rooms, version,
+uptime_s, up) and Access-Control-Allow-Origin: * so a web page (the project site) can show the lobby's state. It never
+returns addresses, names or codes. It listens on 127.0.0.1 by default, to sit behind a TLS reverse proxy (Caddy, see
+deploy_lobby.sh); --status-bind 0.0.0.0 serves it directly over plain HTTP.
 
 Python 3.8+, standard library only. No authentication or encryption yet: run it for people you know."""
 import argparse
+import json
 import os
 import secrets
 import select
 import socket
 import struct
 import sys
+import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PROTO = 1
+LOBBY_VERSION = "1.1"
 (JOIN, WELCOME, REJECT, PING, PONG, DATA, LEAVE, LIST, LISTING, LIST_END,
  PEERS, PUNCH, DIRECT, BCAST) = range(1, 15)
 NAME_LEN, BUILD_LEN = 32, 40
@@ -353,13 +362,63 @@ class Lobby:
                 self.close_room(r, "no advertisement for %d s" % ROOM_TIMEOUT)
 
 
+def status_json(lobby, started, now):
+    """The /status document: counts only. Never addresses, names, lobby codes or builds."""
+    return json.dumps({"up": True, "players": len(lobby.by_at), "rooms": len(lobby.rooms),
+                       "version": "%s (protocol SU %d)" % (LOBBY_VERSION, PROTO), "uptime_s": int(now - started)})
+
+
+def start_status_server(lobby, bind, port, started):
+    """Serve GET /status on a daemon thread. Returns the server (its .server_address has the real port)."""
+    class Handler(BaseHTTPRequestHandler):
+        server_version = "ssbu-lobby-status"
+        sys_version = ""
+
+        def head(self, code, body, ctype):
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+
+        def do_GET(self):
+            if self.path.split("?", 1)[0].rstrip("/") == "/status":
+                body = status_json(lobby, started, time.monotonic()).encode()
+                self.head(200, body, "application/json")
+            else:
+                body = b'{"error":"not found"}'
+                self.head(404, body, "application/json")
+            self.wfile.write(body)
+
+        def do_HEAD(self):
+            ok = self.path.split("?", 1)[0].rstrip("/") == "/status"
+            self.head(200 if ok else 404, b"", "application/json")
+
+        def do_OPTIONS(self):
+            self.head(204, b"", "text/plain")
+
+        def log_message(self, *args):   # no request log: it would hold the callers' addresses
+            pass
+
+    srv = ThreadingHTTPServer((bind, port), Handler)
+    srv.daemon_threads = True
+    threading.Thread(target=srv.serve_forever, name="status-http", daemon=True).start()
+    return srv
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--bind", default="0.0.0.0")
     ap.add_argument("--port", type=int, default=39500)
     ap.add_argument("--verbose", action="store_true")
     ap.add_argument("--stats", type=float, default=10.0, help="seconds between statistics lines (0: none)")
+    ap.add_argument("--status-port", type=int, default=0, help="TCP port of the HTTP status endpoint GET /status (0: off)")
+    ap.add_argument("--status-bind", default="127.0.0.1", help="address of the status endpoint (default 127.0.0.1, behind a proxy)")
     o = ap.parse_args()
+    started = time.monotonic()
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     if os.name == "nt":   # (no ICMP "port unreachable" errors on receive)
         try:
@@ -369,6 +428,9 @@ def main():
     sock.bind((o.bind, o.port))
     lobby = Lobby(sock, o.verbose)
     lobby.say("lobby on UDP %s:%d (protocol SU %d)" % (o.bind, o.port, PROTO))
+    if o.status_port:
+        srv = start_status_server(lobby, o.status_bind, o.status_port, started)
+        lobby.say("status endpoint on http://%s:%d/status" % srv.server_address[:2])
     last_sweep = last_stats = time.monotonic()
     while True:
         r, _, _ = select.select([sock], [], [], 0.5)
