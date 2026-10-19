@@ -18,7 +18,7 @@ static int g_gfx_latency = L1_LATENCY_DEFAULT;      /* track L1: latency = norma
 int gfx_latency(void) { gfx_options(); return g_gfx_latency; }
 static int g_gfx_runahead;                           /* track R1 round 5: runahead = off 0 | on 1 (r1_state.c); read with gfx_runahead() */
 int gfx_runahead(void) { gfx_options(); return g_gfx_runahead; }
-static int g_gfx_menu, g_gfx_volume = -1;          /* U1: menu = off (default) | on; volume = auto | 0..100 */
+static int g_gfx_menu = 1, g_gfx_volume = -1;      /* U1: menu = on (default) | off; volume = auto | 0..100 */
 static char g_gfx_language[16];                      /* U1: language = auto ("") | a code */
 int gfx_menu(void) { gfx_options(); return g_gfx_menu; }
 static int g_gfx_stats;                              /* U1: stats_overlay = off | on */
@@ -129,11 +129,11 @@ static const char *const k_default_ini =
 ";   'frame-time:' line in the log. (Bars drawn into the picture are not implemented yet.)\r\n"
 "frame_time_overlay = off\r\n"
 "\r\n"
-"; menu = off | on\r\n"
+"; menu = on | off (default on)\r\n"
 ";   on: the settings menu over the game, opened with F1 or the Home / Guide (or Capture / Share) button of\r\n"
 ";   a controller; closed, it does nothing. It changes the keys of this file (and the controls in controllers.ini) and\r\n"
 ";   writes them here; the menu marks which ones need a restart. SSBU_MENU=1 / 0 wins over this key.\r\n"
-"menu = off\r\n"
+"menu = on\r\n"
 "\r\n"
 "; stats_overlay = off | on      (with menu = on)\r\n"
 ";   on: a small box in the top right corner over the game: frames per second, frame time, online state, ping, input\r\n"
