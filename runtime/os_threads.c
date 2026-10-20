@@ -954,12 +954,14 @@ static void pt_setname(Ctx *c) {
     if (!A0 || !name) { RET(P_EINVAL); return; }
     Obj *o = obj(A0);
     o->name = (uint64_t)(uintptr_t)_strdup(name);
+#ifdef _WIN32                                       /* (the debugger name is a Windows thing; POSIX builds keep only the name above) */
     typedef HRESULT (WINAPI *SetDesc)(HANDLE, PCWSTR);
     static SetDesc set_desc;
     static int looked;
     if (!looked) { set_desc = (SetDesc)(void *)GetProcAddress(GetModuleHandleA("kernel32.dll"), "SetThreadDescription"); looked = 1; }
     HANDLE h = o->thread ? o->thread : A0 == pt_self_id() ? GetCurrentThread() : NULL;
     if (set_desc && h) { wchar_t w[64]; MultiByteToWideChar(CP_UTF8, 0, name, -1, w, 64); w[63] = 0; set_desc(h, w); }
+#endif
     RET(0);
 }
 static void pt_sched_yield(Ctx *c) { SwitchToThread(); RET(0); }

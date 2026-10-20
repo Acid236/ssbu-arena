@@ -904,9 +904,17 @@ static void fs_SetFileSize(Ctx *c) {
     }
     if ((int64_t)A1 < 0) { RET(RESULT_OUT_OF_RANGE); return; }
     if (!(open_mode((HANDLE)A0, 0) & 2)) { RET(RESULT_WRITE_NOT_PERMITTED); return; }
+#ifdef _WIN32
     FILE_END_OF_FILE_INFO eof;
     eof.EndOfFile.QuadPart = (LONGLONG)A1;
     RET(SetFileInformationByHandle((HANDLE)A0, FileEndOfFileInfo, &eof, sizeof eof) ? 0 : RESULT_GENERIC_FAILURE);
+#else   /* POSIX builds (plat/windows.h): move to the size, set the end there, put the file position back */
+    LARGE_INTEGER zero = {0}, at = {0}, size;
+    size.QuadPart = (LONGLONG)A1;
+    BOOL ok = SetFilePointerEx((HANDLE)A0, zero, &at, FILE_CURRENT) && SetFilePointerEx((HANDLE)A0, size, NULL, FILE_BEGIN) && SetEndOfFile((HANDLE)A0);
+    SetFilePointerEx((HANDLE)A0, at, NULL, FILE_BEGIN);
+    RET(ok ? 0 : RESULT_GENERIC_FAILURE);
+#endif
 }
 /* (handle): [sdk 0x1f3150] FileAccessor::Flush does nothing for a file opened without the write mode */
 static void fs_FlushFile(Ctx *c) {

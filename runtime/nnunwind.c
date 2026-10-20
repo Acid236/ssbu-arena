@@ -36,6 +36,9 @@ ecomp_nro.py) gives
 #include "runtime.h"
 #include "hostrt.h"
 #include "eh_runtime.h"
+#ifndef _WIN32
+#define _AddressOfReturnAddress() __builtin_frame_address(0)     /* POSIX builds: a position in the current frame (only compared with stack positions) */
+#endif
 
 typedef struct { uint64_t lp; void (*fn)(Ctx *, uint64_t); } NroResume;
 int nro_unwind_module(uint64_t pc, uint64_t *base, uint64_t *size, const NroResume **tab, int *count, const char **name);   /* nnro.c */
@@ -412,8 +415,13 @@ static int interp_on_stack_scan(Ctx *c) {                /* the old way: when th
 static int interp_on_stack(Ctx *c) {
     DWORD fls = irec_slot();
     if (fls == FLS_OUT_OF_INDEXES) { InterlockedIncrement64(&g_iact_scan); return interp_on_stack_scan(c); }
+#ifdef _WIN32
     NT_TIB *tib = (NT_TIB *)NtCurrentTeb();
     uint64_t now = (uint64_t)(uintptr_t)_AddressOfReturnAddress(), base = (uint64_t)(uintptr_t)tib->StackBase, sp = c->x[31];
+#else                                                 /* POSIX builds: the running fiber's stack, else the thread's (plat_posix.c) */
+    uintptr_t slo = 0, shi = UINTPTR_MAX; plat_current_stack(&slo, &shi);
+    uint64_t now = (uint64_t)(uintptr_t)_AddressOfReturnAddress(), base = shi, sp = c->x[31];
+#endif
     IRec *r = (IRec *)FlsGetValue(fls);
     if (!r) {
         LONG64 k = InterlockedIncrement64(&g_iact_none);
