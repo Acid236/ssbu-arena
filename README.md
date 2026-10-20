@@ -210,6 +210,8 @@ empty `build\saves\save` and copy your `save_data` folder into it (you should ha
 `build\saves\save\save_data\system_data.bin`), then start the game. Folders named `save.work.<number>` are temporary
 session files: leave them or delete them while the game is closed.
 
+**"ssbu_game_eh_o1.dll is missing" when I start the game?** The game DLL (about 500 MB, built on your PC and not signed) was removed after the installation, usually by an antivirus, or the installation stopped before the end. Open Windows Security > Virus & threat protection > Protection history and restore/allow the file if it is there (adding your install folder to the exclusions stops it happening again), then double-click `Install SSBU.bat` and press **Resume**: it links the missing files again in a few minutes, without compiling everything again.
+
 **Mods and new fighters?** Mods through the function hook table and C++ fighter source work today; new fighters are in
 progress ([docs/NEW_FIGHTER.md](docs/NEW_FIGHTER.md)).
 
