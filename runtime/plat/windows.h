@@ -23,6 +23,10 @@
 
 #include "plat_pre.h"
 
+#ifdef __cplusplus                                       /* menu.cpp (the settings menu) is C++: these are the C functions of plat_posix.c */
+extern "C" {
+#endif
+
 #define WINAPI
 #define CALLBACK
 #define APIENTRY
@@ -496,6 +500,7 @@ int WideCharToMultiByte(UINT cp, DWORD flags, LPCWSTR w, int wn, LPSTR s, int n,
 /* ---- input (SDL keyboard state; plat_posix.c) ---- */
 #define WM_KEYDOWN 0x0100                  /* window messages: named by shared code, never sent (the window is SDL's) */
 #define WM_CHAR 0x0102
+#define WHEEL_DELTA 120                    /* one notch of a mouse wheel (menu.cpp gets SDL's wheel in these units) */
 #define VK_BACK 0x08
 #define VK_TAB 0x09
 #define VK_RETURN 0x0D
@@ -517,6 +522,7 @@ int WideCharToMultiByte(UINT cp, DWORD flags, LPCWSTR w, int wn, LPSTR s, int n,
 #define VK_NUMPAD0 0x60
 #define VK_NUMPAD9 0x69
 #define VK_F1 0x70
+#define VK_F2 0x71
 #define VK_F12 0x7B
 #define VK_LSHIFT 0xA0
 #define VK_RSHIFT 0xA1
@@ -626,4 +632,7 @@ typedef struct { DWORD biSize; LONG biWidth, biHeight; WORD biPlanes, biBitCount
 BOOL GetClientRect(HWND h, RECT *r);                     /* the window's size in pixels */
 int GetWindowTextA(HWND h, LPSTR out, int n);
 
+#ifdef __cplusplus
+}
+#endif
 #endif

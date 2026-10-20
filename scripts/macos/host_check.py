@@ -26,6 +26,7 @@ def main():
     ap.add_argument('--vulkan-headers', required=True)
     ap.add_argument('--suyu', required=True)
     ap.add_argument('--clang', default='clang')
+    ap.add_argument('--imgui', default=None, help='Dear ImGui v1.91.9b folder: the settings menu (F1) is built too (U2)')
     a = ap.parse_args()
 
     mac = a.target == 'macos'
@@ -37,7 +38,7 @@ def main():
     env = {k: v for k, v in os.environ.items() if not k.startswith(('RECOMP_', 'SSBU_'))}
     env.update(PYTHONIOENCODING='utf-8', RECOMP_TARGET=a.target, RECOMP_CLANG=a.clang, RECOMP_EXE='ssbu_native',
                VULKAN_HEADERS=os.path.abspath(a.vulkan_headers), SUYU_ROOT=os.path.abspath(a.suyu),
-               IMGUI_ROOT=os.path.join(cx.work, 'no-imgui'))
+               IMGUI_ROOT=os.path.abspath(a.imgui) if a.imgui else os.path.join(cx.work, 'no-imgui'))
 
     def run(argv):
         r = subprocess.run(argv, cwd=cx.work, env=env, capture_output=True, text=True, errors='replace')
@@ -66,6 +67,12 @@ def main():
     else:
         verdict = 'the host runtime compiles and links for %s' % ('macOS' if mac else 'Linux')
     print('\nRESULT: ' + verdict)
+    if a.imgui and not code:
+        menu_ok, menu_out = menu_symbols(cx.work, mac)
+        print(menu_out)
+        verdict += '; ' + menu_out.splitlines()[-1]
+        if not menu_ok:
+            code = 1
     mod_ok, mod_out = module_check(cx.work, run, a.clang, mac)
     print(mod_out)
     mod_verdict = ('a module library built as build_nro.py builds one (%s) loads' % ('.dylib' if mac else '.so') + ' through LoadLibraryA("<name>.dll") and runs'
@@ -76,6 +83,48 @@ def main():
         with open(summary, 'a', encoding='utf-8') as f:
             f.write('## ' + a.target + ' host runtime\n\n%s\n\n%s\n\n```\n%s\n```\n\n```\n%s\n```\n' % (verdict, mod_verdict, mod_out[-8000:], out[-60000:]))
     return 1 if code or not mod_ok else 0
+
+
+def menu_symbols(work, mac):
+    """U2: the host link of this check leaves undefined names to load time (no game library here), so a name the settings menu
+    needs and nothing defines would only show when the game starts. Every undefined name of the menu's objects must be defined
+    by another host object or by the system's C / C++ / SDL3 libraries (Linux: their dynamic symbols; macOS: listed only)."""
+    objdir = os.path.join(work, 'obj_host', 'ssbu_native')
+    menu = [os.path.join(objdir, n) for n in os.listdir(objdir) if n.endswith('_cxx.obj')]
+    if not menu:
+        return False, 'settings menu: no menu object was built (Dear ImGui not found?)'
+
+    def syms(argv, kinds=None):
+        r = subprocess.run(argv, capture_output=True, text=True, errors='replace')
+        return {ln.split()[-1] for ln in r.stdout.splitlines() if ln.strip() and not ln.endswith(':') and (not kinds or (len(ln.split()) >= 2 and ln.split()[-2] in kinds))}
+    undef = set()
+    for o in menu:
+        undef |= syms(['nm', '-u', o], None if mac else ('U',))      # (Linux: weak undefined names may stay undefined; macOS nm -u prints names only)
+    defined = set()
+    for n in os.listdir(objdir):
+        if n.endswith('.obj'):
+            defined |= syms(['nm', '-gU', os.path.join(objdir, n)] if mac else ['nm', '-g', '--defined-only', os.path.join(objdir, n)])
+    left = sorted(undef - defined)
+    if mac:
+        return True, 'settings menu: names left to the system libraries (macOS, not checked): %s\nsettings menu: built' % ' '.join(left)
+    libs = []
+    for name in ('libc.so.6', 'libm.so.6', 'libstdc++.so.6', 'libgcc_s.so.1'):
+        r = subprocess.run(['gcc', '-print-file-name=' + name], capture_output=True, text=True)
+        if r.stdout.strip() and os.path.isabs(r.stdout.strip()):
+            libs.append(r.stdout.strip())
+    sdl = subprocess.run(['pkg-config', '--variable=libdir', 'sdl3'], capture_output=True, text=True).stdout.strip()
+    if sdl:
+        libs.append(os.path.join(sdl, 'libSDL3.so'))
+    sys_defined = set()
+    for lib in libs:
+        sys_defined |= {n.split('@')[0] for n in syms(['nm', '-D', '--defined-only', os.path.realpath(lib)])}
+    linker = {'__dso_handle', '_GLOBAL_OFFSET_TABLE_'}      # made by the link itself (crtbegin.o, the linker)
+    missing = [n for n in left if n not in sys_defined and n not in linker]
+    text = 'settings menu: %d undefined names: %d from other host objects, %d from %s' % (
+        len(undef), len(undef) - len(left), len(left) - len(missing), ' '.join(os.path.basename(x) for x in libs))
+    if missing:
+        return False, text + '\nsettings menu: NOT DEFINED anywhere: ' + ' '.join(missing)
+    return True, text + '\nsettings menu: every name it needs is defined'
 
 
 MODULE_C = r'''/* a stand-in for a lifted module (no game code): an exported entry, its own data, a call back into the host */

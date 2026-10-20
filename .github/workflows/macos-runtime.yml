@@ -86,6 +86,7 @@ jobs:
           brew install --quiet pkgconf sdl3 freetype openssl@3 ffmpeg
           python -m pip install --quiet Pillow capstone unicorn
           git -c advice.detachedHead=false clone --quiet --depth 1 --branch v1.4.351 https://github.com/KhronosGroup/Vulkan-Headers.git deps/Vulkan-Headers
+          git -c advice.detachedHead=false clone --quiet --depth 1 --branch v1.91.9b https://github.com/ocornut/imgui.git deps/imgui     # U2: the settings menu (F1)
           git clone --quiet --depth 1 --filter=blob:none --sparse https://git.eden-emu.dev/eden-emu/eden.git deps/suyu
           git -C deps/suyu sparse-checkout set src/core/hle/service/mii
           clang --version
@@ -93,7 +94,7 @@ jobs:
       - name: Compile the host runtime
         run: |
           export PKG_CONFIG_PATH="$(brew --prefix openssl@3)/lib/pkgconfig:${PKG_CONFIG_PATH}"
-          python scripts/macos/host_check.py --vulkan-headers deps/Vulkan-Headers --suyu deps/suyu
+          python scripts/macos/host_check.py --vulkan-headers deps/Vulkan-Headers --suyu deps/suyu --imgui deps/imgui
 
       - name: Differential test of the lifted code on this host (no game data; -O0 and -O1)
         run: |

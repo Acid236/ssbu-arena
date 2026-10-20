@@ -669,8 +669,22 @@ def deps_linux(cx):
             raise Fail('%s not found (--%s <folder containing %s>)%s' % (sub, {'vulkan': 'vulkan-headers', 'suyu': 'suyu'}[key], probe_rel, LINUX_HINT))
         cx.tools[key] = found
         say('  %-13s %s' % (sub, found))
+    find_imgui(cx, deps)
     if not cx.a.tools_only:
         check_dump(cx)
+
+
+def find_imgui(cx, deps):
+    """Linux / macOS (U2): Dear ImGui for the in-game settings menu (F1), as on Windows. Optional: without it the runtime builds
+    with menu_stub.c and F1 only logs why. install_deps.sh / install_mac.sh put it in deps/imgui."""
+    found = find_first([cx.a.imgui, os.environ.get('IMGUI_ROOT'), os.path.join(deps, 'imgui')],
+                       lambda d: os.path.exists(os.path.join(d, 'imgui.h')) and os.path.exists(os.path.join(d, 'imgui.cpp')))
+    if found:
+        cx.tools['imgui'] = found
+        say('  %-13s %s' % ('imgui', found))
+    else:
+        say('  WARNING: Dear ImGui not found: the settings menu (F1) will be left out of the build (--imgui <folder with imgui.h>, '
+            'IMGUI_ROOT or deps/imgui; the install script fetches it)')
 
 
 MAC_MIN = '-mmacosx-version-min=14.4'          # os_sync_wait_on_address (runtime/plat_posix.c): macOS 14.4 and newer
@@ -809,6 +823,7 @@ def deps_mac(cx):
             raise Fail('%s not found (--%s <folder containing %s>)%s' % (sub, {'vulkan': 'vulkan-headers', 'suyu': 'suyu'}[key], probe_rel, MAC_HINT))
         cx.tools[key] = found
         say('  %-13s %s' % (sub, found))
+    find_imgui(cx, deps)
     if not cx.a.tools_only:
         check_dump(cx)
 

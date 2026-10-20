@@ -155,7 +155,11 @@ if TARGET_POSIX:
     LIBS = pkg('--libs') + ['-lGL', '-lm', '-ldl', '-lpthread']      # libGL: the OpenGL front end is linked (not used)
     if TARGET_MACOS:                                     # OpenGL is a system framework; dl / pthread are in libSystem
         LIBS = pkg('--libs') + ['-framework', 'OpenGL', '-lm']
-    HAVE_IMGUI, CXX_SOURCES = False, []                  # the settings menu (menu.cpp) is Win32 + D3D: menu_stub.c on Linux for now
+    # U2 (plan/phases/U2_menu_linux.md): the settings menu on Linux / macOS too: menu.cpp's own SDL branch, plat/windows.h
+    # (C++-safe), the same Vulkan pass; the C++ library for ImGui's static locals
+    CXX_FLAGS = CXX_FLAGS + PLAT_FLAGS + ['-I', os.path.join(HERE, 'plat')] + pkg('--cflags')
+    if HAVE_IMGUI:
+        LIBS += ['-lc++'] if TARGET_MACOS else ['-lstdc++']
 
 
 def debug_link_flags(out):
