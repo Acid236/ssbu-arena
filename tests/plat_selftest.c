@@ -84,8 +84,7 @@ int main(void) {
     CHECK(WaitForSingleObject(tm, 1000) == WAIT_OBJECT_0, "waitable timer fires");
     QueryPerformanceCounter(&q1);
     double ms = (double)(q1.QuadPart - q0.QuadPart) * 1000.0 / (double)f.QuadPart;
-    printf("     waitable timer: %.1f ms
-", ms);
+    printf("     waitable timer: %.1f ms\n", ms);
     CHECK(ms >= 19 && ms < 60, "waitable timer ~20 ms");
     /* init once */
     static INIT_ONCE once = INIT_ONCE_STATIC_INIT; int n = 0;
