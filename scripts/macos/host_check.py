@@ -63,11 +63,69 @@ def main():
     else:
         verdict = 'the host runtime compiles and links for macOS'
     print('\nRESULT: ' + verdict)
+    mod_ok, mod_out = module_check(cx.work, run, a.clang)
+    print(mod_out)
+    mod_verdict = ('a module library built as build_nro.py builds one (.dylib) loads through LoadLibraryA("<name>.dll") and runs'
+                   if mod_ok else 'the module library check FAILED')
+    print('RESULT: ' + mod_verdict)
     summary = os.environ.get('GITHUB_STEP_SUMMARY')
     if summary:
         with open(summary, 'a', encoding='utf-8') as f:
-            f.write('## macOS host runtime\n\n%s\n\n```\n%s\n```\n' % (verdict, out[-60000:]))
-    return 1 if code else 0
+            f.write('## macOS host runtime\n\n%s\n\n%s\n\n```\n%s\n```\n\n```\n%s\n```\n' % (verdict, mod_verdict, mod_out[-8000:], out[-60000:]))
+    return 1 if code or not mod_ok else 0
+
+
+MODULE_C = r'''/* a stand-in for a lifted module (no game code): an exported entry, its own data, a call back into the host */
+#include <stdint.h>
+static int64_t table[4] = {1, 2, 3, 4};
+__declspec(dllexport) int64_t nro_test_bind(int64_t (*host)(int64_t), int64_t x) { return host(x) + table[3]; }
+'''
+LOADER_C = r'''/* loads module_check/test_mod as nnro.c loads a module: LoadLibraryA("<path>.dll"), GetProcAddress */
+#include <windows.h>
+#include <stdio.h>
+static int64_t host_twice(int64_t v) { return v * 2; }
+int main(void) {
+    HMODULE m = LoadLibraryA("module_check\\test_mod.dll");
+    if (!m) { printf("LoadLibraryA failed (%lu)\n", (unsigned long)GetLastError()); return 1; }
+    int64_t (*bind)(int64_t (*)(int64_t), int64_t) = (int64_t (*)(int64_t (*)(int64_t), int64_t))(void *)GetProcAddress(m, "nro_test_bind");
+    char path[MAX_PATH] = "";
+    GetModuleFileNameA(m, path, MAX_PATH);
+    if (!bind) { printf("GetProcAddress(nro_test_bind) failed\n"); return 1; }
+    int64_t r = bind(host_twice, 19);
+    printf("module %s: nro_test_bind(host_twice, 19) = %lld (want 42)\n", path, (long long)r);
+    return r == 42 ? 0 : 1;
+}
+'''
+MODULE_BUILD = '''import os, subprocess, sys, build, build_nro
+d = "module_check"; obj = os.path.join(d, "mod.obj"); lib = os.path.join(d, "test_mod" + build_nro.LIB_EXT)
+r = subprocess.run([build.CLANG, "-c", "-O1", "-w"] + build_nro.PLAT_FLAGS + [os.path.join(d, "mod.c"), "-o", obj], capture_output=True, text=True)
+print("compile", r.returncode, r.stdout + r.stderr)
+r = build.link_dll([obj], lib, os.path.join(d, "link.rsp"), implib=False)
+print("link", lib, r.returncode, r.stdout + r.stderr)
+sys.exit(1 if r.returncode or not os.path.exists(lib) else 0)
+'''
+
+
+def module_check(work, run, clang):
+    """The module path of the macOS build without any game code: a small C file compiled with build_nro.py's flags and
+    linked by build.py's link_dll (-dynamiclib, @rpath install name, undefined names left to load time) into
+    module_check/test_mod<LIB_EXT>, then loaded by a program on plat_posix.c the way nnro.c loads a module."""
+    d = os.path.join(work, 'module_check')
+    os.makedirs(d, exist_ok=True)
+    for name, text in (('mod.c', MODULE_C), ('loader.c', LOADER_C)):
+        with open(os.path.join(d, name), 'w', newline='\n') as f:
+            f.write(text)
+    code, out = run([sys.executable, '-c', MODULE_BUILD])
+    if code:
+        return False, 'module build:\n' + out
+    pkg = subprocess.run(['pkg-config', '--cflags', '--libs', 'sdl3', 'openssl'], capture_output=True, text=True).stdout.split()
+    exe = os.path.join(d, 'loader')
+    c2, o2 = run([clang, '-O1', '-w', '-mmacosx-version-min=14.4', '-include', 'plat/plat_pre.h', '-I', 'plat', os.path.join(d, 'loader.c'), 'plat_posix.c', '-o', exe] + pkg)
+    if c2:
+        return False, out + '\nloader build:\n' + o2
+    c3, o3 = run([exe])
+    c4, o4 = run(['otool', '-L', os.path.join(d, 'test_mod.dylib')])
+    return c3 == 0, out + o3 + o4
 
 
 if __name__ == '__main__':

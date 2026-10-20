@@ -93,7 +93,7 @@ def limit_memory(jobs):
     time limit runs out (c_00a3.c: 12 GB after 30 s), which gets processes killed, not slowed down; over the limit, clang
     fails and the file takes the next step of the fallback ladder, as on a timeout."""
     global MEM_LIMIT
-    if os.environ.get('RECOMP_TARGET') != 'linux':
+    if os.environ.get('RECOMP_TARGET') != 'linux':        # macOS: no limit (no prlimit; RLIMIT_AS is not enforced there)
         return
     with open('/proc/meminfo') as f:
         kb = next(int(l.split()[1]) for l in f if l.startswith('MemTotal:'))

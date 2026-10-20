@@ -22,7 +22,8 @@ CLANG = os.environ.get('RECOMP_CLANG', r'C:\llvm-8.0.0\bin\clang.exe')      # sc
 # RECOMP_TARGET=linux: a native Linux build (ELF objects, the game and the modules as .so files, the exe linked with the
 # system's SDL3 / FreeType / OpenSSL). The Win32 calls of the host sources come from plat/windows.h + plat_posix.c.
 # RECOMP_TARGET=macos: the same on macOS / Apple Silicon (Mach-O, .dylib files; plan/phases/MAC1_port.md). Work in progress:
-# the host runtime compiles; the lifted game is not built for it yet.
+# the host runtime compiles and its platform layer passes tests/plat_selftest.c; the game library and the module libraries
+# are made as .dylib (build_nro.py, build_opt.py), not yet built from a dump on a Mac (MAC3).
 TARGET_LINUX = os.environ.get('RECOMP_TARGET') == 'linux'
 TARGET_MACOS = os.environ.get('RECOMP_TARGET') == 'macos'
 TARGET_POSIX = TARGET_LINUX or TARGET_MACOS
@@ -100,7 +101,7 @@ def cmd_compile(jobs, force):
 
 # The lifted game code lives in ssbu_game.dll, linked only when obj\ changes; the exe holds just the
 # host runtime, so the edit-link-run loop costs a couple of seconds (see game_shim.c, gamedll.c).
-GAME_DLL = os.environ.get('RECOMP_DLL', 'ssbu_game_eh_o1.dll')
+GAME_DLL = os.environ.get('RECOMP_DLL', 'ssbu_game_eh_o1' + ('.dylib' if TARGET_MACOS else '.so' if TARGET_LINUX else '.dll'))
 HOST_FLAGS = ['-O1', '-g', '-w', '-fno-strict-aliasing', '-I', HERE, '-I', GEN, '-Dfn_table=(*game_fn_table_p)', '-Dfn_table_count=(*game_fn_table_count_p)',
               '-Ddyn_syms=(*game_dyn_syms_p)', '-Ddyn_sym_count=(*game_dyn_sym_count_p)',
               '-I', os.path.join(os.environ.get('SDL3_ROOT', os.path.join(HERE, '..', 'reference', 'upstream', 'SDL3-3.4.18-VC', 'SDL3-3.4.18')), 'include'),
