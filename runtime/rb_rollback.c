@@ -27,6 +27,7 @@ void rbn_set_lockstep(int on); int rbn_loop(void);      /* (hs13) */
  * its frame has arrived (delay-based; the input delay is chosen for that: rb_net.c lockstep), so no frame ever runs on a
  * guess and the two games stay identical; the other game may still roll back. SSBU_RB_NET_TEST_NOMEM forces it (test). */
 static int g_rbg_noring; static long long g_rbg_noring_matches;
+static int rbg_noring_now(void) { return g_rbg_noring; }
 int r1_ring_rebase(long long frame, Ctx *c);            /* r1_ring.c (hs12) */
 void input_mark(const char *what);                      /* nnhid.c: the input sequence can wait for it (@match1on, @match1over, ...) */
 /* (hs12) matches in one session: 0 = between matches, 1 = an online match runs (its base state made), 2 = a match that was
@@ -57,6 +58,10 @@ static long long g_rbg_test_f = -2; static int g_rbg_test_ms, g_rbg_test_k;    /
 static int g_rbg_recap = -1, g_rbg_keep = -1; static long long g_rbg_recap_first;
 static double g_rbg_t_pre, g_rbg_t_load, g_rbg_t_rerun, g_rbg_t_recap, g_rbg_t_pass0; static long long g_rbg_n_rerun, g_rbg_n_recap;
 
+/* (hs14) every capture of the match tells the ring the oldest frame a rollback may still need (r1_ring.c g_rg_need): the
+ * newest frame with both players' pads known (a wrong guess can only be at a later frame, and loads the state before it) */
+static long long g_rbg_short_waits;
+static int rbg_capture(long long i, Ctx *c) { g_rg_need = rbn_confirmed(); return r1_ring_capture(i, c); }
 void rbn_stats(int *delay, int *last, int *maxk) { *delay = rbn_delay(); *last = (int)g_rbg_last_k; *maxk = (int)g_rbg_max_k; }   /* net_relay.c net_stats_get (F2) */
 
 static void rbg_wait_until(double t) {                  /* a high-resolution timer for the long part, a spin for the last 0.3 ms */
@@ -153,7 +158,7 @@ static void rbg_step_body(Ctx *c) {
         else if (g_rbg_recap == 2) want = ((i - g_rbg_recap_first) & 1) == 0;
         else if (g_rbg_recap == 3) want = 0;                                  /* (3: the last one only; a later rollback may load the state this one loaded) */
         else want = i == g_rbg_recap_first;
-        if (want) { double tc = now_ms(); if (!r1_ring_capture(i, c)) g_rbg_capfail++; g_rbg_t_recap += now_ms() - tc; g_rbg_n_recap++; } else g_rbg_capskip++;
+        if (want) { double tc = now_ms(); if (!rbg_capture(i, c)) g_rbg_capfail++; g_rbg_t_recap += now_ms() - tc; g_rbg_n_recap++; } else g_rbg_capskip++;
         g_rgs_next = i + 1;
         if (--g_rgs_left > 0) { g_rbg_t_pass0 = now_ms(); return; }
         g_ra_phase = 0; g_ra_after_quiet = 1; g_rgs_left = 0;
@@ -170,13 +175,13 @@ static void rbg_step_body(Ctx *c) {
             /* captured anyway, with the threads kept held for the load that follows (R2 round 2: load hold 3.5 -> 0.2 ms);
              * SSBU_RB_NET_KEEP=0: no capture, the load holds the threads itself */
             double tp = now_ms();
-            if (g_rbg_keep == 1) { g_rg_keep = 1; if (!r1_ring_capture(i, c)) g_rbg_capfail++; g_rg_keep = 0; }
+            if (g_rbg_keep == 1) { g_rg_keep = 1; if (!rbg_capture(i, c)) g_rbg_capfail++; g_rg_keep = 0; }
             else if (g_rbg_keep == 2) r1_ring_hold();
             g_rbg_t_pre += now_ms() - tp;
             if (rbg_rollback(c, i, m)) return;
             r1_ring_let_go();
-            if (g_rbg_keep != 1 && !r1_ring_capture(i, c)) g_rbg_capfail++;
-        } else if (!r1_ring_capture(i, c)) g_rbg_capfail++;
+            if (g_rbg_keep != 1 && !rbg_capture(i, c)) g_rbg_capfail++;
+        } else if (!rbg_capture(i, c)) g_rbg_capfail++;
         if (g_rbg_test_f == -2) { const char *e = getenv("SSBU_RB_NET_TEST"); g_rbg_test_f = -1; if (e && *e) { long long tf = -1; int ms = 0, k = 0; sscanf(e, "%lld,%d,%d", &tf, &ms, &k); g_rbg_test_f = tf; g_rbg_test_ms = ms; g_rbg_test_k = k; } }
         if (g_rbg_test_f > 0 && i >= g_rbg_test_f && !g_rbg_noring) {    /* (the first real pass from that frame on without a rollback of its own) */
             g_rbg_test_f = -1;                        /* test: a long stall at this safe point, then a rollback (same pads: the timeline must not change) */
@@ -195,7 +200,9 @@ static void rbg_step_body(Ctx *c) {
         int m = rbn_take_mismatch();
         if (m > 0 && m <= i) { if (g_rbg_noring) { g_rbg_miss++; if (g_rbg_miss <= 10) LOG("r1: RB NET: wrong guess at frame %d WITHOUT the ring: cannot be rolled back (desync)\n", m); }
                                else { if (stalled) { g_rbg_stall_ms += now_ms() - ts; } if (rbg_rollback(c, i, m)) return; } }
-        if (g_rgs_next - rbn_confirmed() <= (g_rbg_noring ? 0 : rbn_ahead())) break;
+        /* (hs14) the ring short of pool memory (its last capture given up): no frame on a guess until a capture succeeds */
+        if (g_rgs_next - rbn_confirmed() <= (g_rbg_noring || g_rg_short ? 0 : rbn_ahead())) break;
+        if (!g_rbg_noring && g_rg_short && g_rgs_next - rbn_confirmed() <= rbn_ahead() && !stalled) g_rbg_short_waits++;
         if (rbn_peer_gone()) { if (!g_rbg_gone++) LOG("r1: RB NET: no message from the other player for 5 s at frame %lld: going on alone (guesses)\n", i); break; }
         if (!stalled) { stalled = 1; ts = now_ms(); g_rbg_stalls++; r1_ring_let_go(); }
         {   /* while waiting: our newest pads again every 50 ms (a lost datagram must not leave both games waiting), a line every 2 s */
@@ -292,7 +299,7 @@ static void rbg_fight_off(void) {
     g_rbg_in_match = 0;
     g_rbg_rb = 0; memset(g_rbg_k, 0, sizeof g_rbg_k); g_rbg_rerun = g_rbg_miss = g_rbg_stalls = g_rbg_capfail = g_rbg_capskip = g_rbg_lastlocal = g_rbg_real = g_rbg_gone = 0;
     g_rbg_stall_ms = g_rbg_load_ms = g_rbg_tick0 = g_rbg_next = g_rbg_last_go = 0;
-    g_rbg_last_k = 0; g_rbg_max_k = 0; g_rbg_nw = g_rbg_ng = g_rbg_tick_k = 0; g_rbg_rb_unheld = 0; g_rbg_recap_first = 0;
+    g_rbg_last_k = 0; g_rbg_max_k = 0; g_rbg_short_waits = 0; g_rg_short = 0; g_rg_need = -1; g_rbg_nw = g_rbg_ng = g_rbg_tick_k = 0; g_rbg_rb_unheld = 0; g_rbg_recap_first = 0;
     g_rbg_t_pre = g_rbg_t_load = g_rbg_t_rerun = g_rbg_t_recap = g_rbg_t_pass0 = 0; g_rbg_n_rerun = g_rbg_n_recap = 0;
     g_rbg_wd_before = g_ra_wd_fired;
     rbn_match_reset();
@@ -310,8 +317,10 @@ static void rbg_report(void) {
     if (g_rbg_noring) LOG("r1: RB NET report: this match ran WITHOUT rollback (not enough memory for the ring: %s); matches without the ring so far %lld\n", g_rg_nomem == 2 ? "broken for the session" : "base not made", g_rbg_noring_matches);
     LOG("r1: RB NET report: %lld real frames, %lld rollbacks, %lld frames run again (k: 1 %lld, 2 %lld, 3 %lld, 4 %lld, 5 %lld, 6 %lld, 7 %lld, more %lld); rollbacks impossible (state not in the ring) %lld\n",
         g_rbg_real, g_rbg_rb, g_rbg_rerun, g_rbg_k[1], g_rbg_k[2], g_rbg_k[3], g_rbg_k[4], g_rbg_k[5], g_rbg_k[6], g_rbg_k[7], g_rbg_k[RG_MAXSLOT + 1] + g_rbg_k[8], g_rbg_miss);
-    LOG("r1: RB NET report: stalls for the other player %lld (%.1f ms in all); captures failed %lld, re-run captures not needed %lld; load mean %.3f ms; peer silent %lld\n",
-        g_rbg_stalls, g_rbg_stall_ms, g_rbg_capfail, g_rbg_capskip, g_rbg_rb ? g_rbg_load_ms / g_rbg_rb : 0.0, g_rbg_gone);
+    LOG("r1: RB NET report: stalls for the other player %lld (%.1f ms in all; %lld of them because the ring was short of memory); captures failed %lld, re-run captures not needed %lld; load mean %.3f ms; peer silent %lld\n",
+        g_rbg_stalls, g_rbg_stall_ms, g_rbg_short_waits, g_rbg_capfail, g_rbg_capskip, g_rbg_rb ? g_rbg_load_ms / g_rbg_rb : 0.0, g_rbg_gone);
+    LOG("r1: RB NET report: ring memory (hs14, fix %s): captures given up %lld, old states freed early %lld, captures skipped to keep the oldest needed state %lld\n",
+        g_rg_poolfix ? "on" : "OFF", g_rg_short_n, g_rg_freed_slots, g_rg_skip_full);
     LOG("r1: RB NET report: task-worker watchdog releases %lld (since the process start), rollbacks with the workers not held %lld (watchdog paused at H2: %s)\n", g_ra_wd_fired, g_rbg_rb_unheld, g_rbg_wdfix ? "yes" : "NO");
     LOG("r1: RB NET report: loads that took the sound thread at another wait after 5 ms %lld; threads not at their wait after 500 ms %d (last load)\n", g_th_audio_other, g_th_mismatch);
     LOG("r1: RB NET report: fiber host stacks in use at a load (not copied back) %lld, seen %lld; fibers found running by their thread (TEB) at a capture %lld; catch table at loads: entries dropped %lld, live entries put back %lld, loads changed %lld (hs13)\n", g_fib_live_skip, g_fib_live_seen, g_fib_teb_running, g_rgc_dropped, g_rgc_kept, g_rgc_loads_changed);

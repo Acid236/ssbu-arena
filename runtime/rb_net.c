@@ -101,7 +101,7 @@ int rbn_bot_on(void) { return g_bot; }
  * (seconds, default 120). No agreement = this match is played locally (Final Destination, one stock) and left at once
  * (rb_rollback.c: player 1 walks off the stage), back to the menus; the other game is told (REFUSE) so that it stops waiting. */
 #include "rb_hs.h"
-#define RBH_PROTO 3                                     /* 3 (hs12): RbhMatch carries the stage set-up context */
+#define RBH_PROTO 4                                     /* 3 (hs12): RbhMatch carries the stage set-up context; 4 (hs14): PADS end with a mode byte, the stage is drawn from both picks */
 enum { RBH_CHOICE = 0x48, RBH_PROPOSE = 0x49, RBH_ACCEPT = 0x4a, RBH_REFUSE = 0x4b, RBH_BLOCK = 0x4c };
 #pragma pack(push, 1)
 typedef struct { uint8_t type, proto; int16_t game_build; uint32_t exe_stamp; uint32_t nonce, echo; RbhMatch m; } RbhMsg;
@@ -228,6 +228,24 @@ static int hs_stop_pressed(double waited_ms) {
     if (!since) since = now;
     return now - since >= 300;
 }
+/* (hs14) the fair rule for what the two players chose differently (host, when it builds the proposal):
+ *  - rules (stock / time kind, stocks, items, hazards) and the stage set-up's inputs: the host's (the joiner sees them in the
+ *    proposal and its game takes them; a different rule KIND on the joiner's screens is only reported, see debug_mode.c);
+ *  - the stage: one of the two players' own picks, drawn with the agreed seed (bit 40 of it: 0 = the host's pick, 1 = the
+ *    joiner's), so over many matches each player plays on his own pick half the time and neither game can steer it (the seed
+ *    is new for every match). A joiner pick that is not a stage entry (no ui_stage id) leaves the host's.
+ *    SSBU_RB_NET_STAGE=host / joiner forces one side (tests). */
+static void hs_stage_rule(RbhMatch *m, const RbhMatch *peer) {
+    const char *e = getenv("SSBU_RB_NET_STAGE");
+    uint64_t hs = *(const uint64_t *)m->stage, js = *(const uint64_t *)peer->stage; uint32_t hf = *(const uint32_t *)(m->stage + 8);
+    int valid = (js >> 56) == 0x69, draw = (int)((m->seed >> 40) & 1);
+    int joiner = valid && (e && !_stricmp(e, "joiner") ? 1 : e && !_stricmp(e, "host") ? 0 : draw);
+    if (joiner) memcpy(m->stage, peer->stage, sizeof m->stage);
+    printf("[rbnet] handshake: stage: the host picked %016llx form %u, the joiner %016llx form %u; drawn with the agreed seed (%s): the %s's pick%s\n",
+           (unsigned long long)hs, hf,
+           (unsigned long long)js, *(const uint32_t *)(peer->stage + 8), e && *e ? e : "random", joiner ? "joiner" : "host", valid ? "" : " (the joiner's is not a stage entry)");
+    fflush(stdout);
+}
 int rbn_handshake(const RbhMatch *mine, RbhMatch *out) {
     if (!rbn_handshake_wanted() || rbn_on() <= 0 || g_loop) return 0;
     LONG round = InterlockedIncrement(&g_hs_round);
@@ -257,6 +275,7 @@ int rbn_handshake(const RbhMatch *mine, RbhMatch *out) {
                 m.has_layout[1] = g_hs_peer.m.has_layout[0]; memcpy(m.layout[1], g_hs_peer.m.layout[0], sizeof m.layout[1]);
                 if (m.chara[1] == m.chara[0] && m.colour[1] == m.colour[0]) m.colour[1] = (uint8_t)((m.colour[0] + 1) & 7);   /* same fighter, same colour: the joiner takes the next one */
                 m.seed = hs_new_seed();
+                hs_stage_rule(&m, &g_hs_peer.m);
                 hs_head(&g_hs_prop, RBH_PROPOSE); g_hs_prop.echo = g_hs_peer.nonce; g_hs_prop.m = m; g_hs_have_prop = 1;
             }
             if (g_hs_accepted && g_hs_have_prop) { *out = g_hs_prop.m; ok = 1; }
@@ -345,20 +364,30 @@ static volatile LONG g_rtt_us = -1, g_rtt_min_us = -1;
 static long long g_rtt_n; static double g_rtt_sum;      /* (under g_rq_lock) */
 #define TSQ 64
 static int32_t g_tsq[TSQ]; static int g_tsq_n;          /* clock-offset samples waiting for the main thread (under g_rq_lock) */
+/* (hs14) the mode byte at the end of every PADS message (after the match tag): bit 7 = this game plays the match WITHOUT the
+ * ring (delay-based, r1_ring.c g_rg_nomem), bits 0..6 = the delay that covers the one-way trip as this game measured it at
+ * its match start (frozen then, so both games choose from the same two numbers). The start barrier ends only with a PADS
+ * message of the other game, so both know both bytes before frame 1. When either game has no ring, BOTH use the larger of
+ * the two delays (SSBU_RB_NET_PEERDELAY=0: the old way, the game with the ring keeps its own rollback delay and the one
+ * without it stalls almost every frame: pm1j 1,913 stalls in 2,400 frames). */
+static int g_lockstep, g_my_lockd, g_peerdelay = -1;
+static volatile LONG g_peer_mode = -1;                 /* the other game's mode byte of this match (-1 = none seen yet) */
+static uint8_t my_mode(void) { return (uint8_t)((g_lockstep ? 0x80 : 0) | (g_my_lockd & 0x7f)); }
 static void send_msg(const RbMsg *m) {
-    uint8_t b[RB_PADS_HEAD + RB_MAX_PADS_PER_MSG * RB_PAD_WIRE + 1];
-    size_t n = rb_msg_build(b, sizeof b - 1, m);
+    uint8_t b[RB_PADS_HEAD + RB_MAX_PADS_PER_MSG * RB_PAD_WIRE + 2];
+    size_t n = rb_msg_build(b, sizeof b - 2, m);
     if (!n || g_loop) return;
-    if (m->type == RB_MSG_PADS) b[n++] = pads_tag();      /* (hs12) the match these pads belong to: pads of another match are dropped */
+    if (m->type == RB_MSG_PADS) { b[n++] = pads_tag(); b[n++] = my_mode(); }      /* (hs12) the match these pads belong to: pads of another match are dropped; (hs14) this game's mode byte */
     if (net_rb_send(b, (int)n)) InterlockedIncrement64(&g_tx_pkts); else InterlockedIncrement64(&g_tx_fail);
 }
 /* net_relay.c's receive thread: one rollback message from the other player */
 void rbn_rx(const uint8_t *p, int n) {
     if (rbn_on() > 0 && n > 0 && hs_rx(p, n)) return;  /* the match handshake */
     if (rbn_on() <= 0 || n <= 0 || n > RQ_MAX) { InterlockedIncrement64(&g_rx_bad); return; }
-    if (p[0] == RB_MSG_PADS && n >= RB_PADS_HEAD + 1 && (n - RB_PADS_HEAD) % RB_PAD_WIRE == 1) {     /* (hs12) the match tag at the end */
-        if (!g_started || p[n - 1] != pads_tag()) { InterlockedIncrement64(&g_rx_oldmatch); return; }      /* (between matches: the other game sends them again) */
-        n--;
+    if (p[0] == RB_MSG_PADS && n >= RB_PADS_HEAD + 2 && (n - RB_PADS_HEAD) % RB_PAD_WIRE == 2) {     /* (hs12) the match tag, (hs14) then the mode byte, at the end */
+        if (!g_started || p[n - 2] != pads_tag()) { InterlockedIncrement64(&g_rx_oldmatch); return; }      /* (between matches: the other game sends them again) */
+        InterlockedExchange(&g_peer_mode, p[n - 1]);    /* (before it is queued: rbn_drain sees it with the message that starts the match) */
+        n -= 2;
     }
     InterlockedIncrement64(&g_rx_pkts); InterlockedExchange64(&g_rx_last_ms, (LONG64)GetTickCount64());
     if (p[0] == RB_MSG_PING) {                          /* answered at once on this thread (the round trip excludes the frame wait) */
@@ -412,17 +441,23 @@ static uint64_t g_hacc = 0xcbf29ce484222325ull; static int g_hlines;
 static uint64_t g_hash[HR]; static long long g_hframe[HR], g_hfinal_upto; static long long g_desync, g_check_ok, g_desync_first = -1;
 static long long g_peer_check_f; static uint32_t g_peer_check;
 
-static int g_lockstep;                                 /* (hs13) a match without the rollback ring: every frame waits for the other pad */
+/* (hs13) g_lockstep: a match without the rollback ring: every frame waits for the other pad */
 void rbn_set_lockstep(int on) { g_lockstep = on; }
 int rbn_loop(void) { return g_loop; }
+static int lock_delay(void) {                           /* the delay that covers the whole one-way trip (+ 1 frame): the wait is short or none */
+    if (g_loop) return g_loop_lat + 1;
+    int rt = g_rtt_min_us > 0 ? g_rtt_min_us : g_rtt_us;
+    if (rt <= 0) return 4;
+    int d = (int)ceil(rt / 2000.0 / (1000.0 / 60.0)) + 1;
+    return d < 1 ? 1 : d > 12 ? 12 : d;
+}
+static int peer_lockstep(void) { return g_peer_mode >= 0 && (g_peer_mode & 0x80) && g_peerdelay; }
 static int auto_delay(void) {
     if (g_delay_cfg >= 0) return g_delay_cfg;
-    if (g_lockstep) {                                   /* the delay that covers the whole one-way trip (+ 1 frame): the wait is short or none */
-        if (g_loop) return g_loop_lat + 1;
-        int rt = g_rtt_min_us > 0 ? g_rtt_min_us : g_rtt_us;
-        if (rt <= 0) return 4;
-        int d = (int)ceil(rt / 2000.0 / (1000.0 / 60.0)) + 1;
-        return d < 1 ? 1 : d > 12 ? 12 : d;
+    if (g_lockstep && (!g_peerdelay || g_loop)) return lock_delay();     /* (the old way; the loop test) */
+    if (g_lockstep || peer_lockstep()) {                /* (hs14) either game has no ring: both take the larger of the two announced delays */
+        int d = g_my_lockd, pd = g_peer_mode >= 0 ? (g_peer_mode & 0x7f) : 0;
+        return pd > d ? pd : d;
     }
     if (g_loop) return 2;
     int rtt = g_rtt_min_us > 0 ? g_rtt_min_us : g_rtt_us;
@@ -435,6 +470,8 @@ void rbn_start(long long f0) {
     g_f0 = f0; g_started = 1; g_match_n++;
     if (g_hlog) { fprintf(g_hlog, "m %d id %08x\n", g_match_n, g_match_id); fflush(g_hlog); }      /* (rbn_cmp.py: frames are per match) */
     g_remote = 1 - g_local;
+    if (g_peerdelay < 0) { const char *e = getenv("SSBU_RB_NET_PEERDELAY"); g_peerdelay = !(e && e[0] == '0'); }
+    g_my_lockd = lock_delay();                          /* (hs14) announced in every PADS message of this match (frozen here) */
     g_delay = auto_delay();
     if (g_delay < 1) g_delay = 1;                        /* (frames 1..delay are empty on both sides: no rollback can reach the base state, made before the start barrier) */
     rb_input_reset(2, g_local, g_delay);
@@ -448,6 +485,11 @@ void rbn_start(long long f0) {
  * pads of the other game already queued are sent again by it, from our acknowledgement on) */
 void rbn_choose_delay(void) {
     int d = auto_delay(); if (d < 1) d = 1;
+    if (g_lockstep && !g_peerdelay) printf("[rbnet] after the start barrier: this game has no snapshot ring (old way, SSBU_RB_NET_PEERDELAY=0): the other game keeps its own delay\n");
+    else if (!g_loop && (g_lockstep || peer_lockstep())) printf("[rbnet] after the start barrier: %s snapshot ring: delay-based pacing, both games use input delay %d (announced here %d, there %d; mode byte here %02x, there %02x)\n",
+        g_lockstep && peer_lockstep() ? "neither game has a" : g_lockstep ? "this game has no" : "the other game has no", d, g_my_lockd, g_peer_mode >= 0 ? (int)(g_peer_mode & 0x7f) : -1, my_mode(), (unsigned)(g_peer_mode & 0xff));
+    else if (!g_loop) printf("[rbnet] after the start barrier: both games have the ring (mode byte here %02x, there %02x)\n", my_mode(), (unsigned)(g_peer_mode & 0xff));
+    fflush(stdout);
     if (d == g_delay) return;
     printf("[rbnet] after the start barrier: input delay %d -> %d frames (round trip %.1f ms, best %.1f ms)\n", g_delay, d, g_rtt_us > 0 ? g_rtt_us / 1000.0 : -1.0, g_rtt_min_us > 0 ? g_rtt_min_us / 1000.0 : -1.0);
     fflush(stdout);
@@ -581,11 +623,17 @@ void rbn_finalize(long long cur) {
 }
 
 /* ---------------------------------------------------------------- time sync: extra wait per frame (ms) */
+static double g_tsbias = -1;
 double rbn_pace_extra(long long f) {
     if (!g_started || g_loop) return 0;
     if (f % 30 == 0) {
         rb_ts_decide((int)f);
         double est_ms = rb_ts_offset() / 1000.0;
+        /* (hs14) delay-based pacing (one game without the ring): that game aims at running half a frame BEHIND the other
+         * (SSBU_RB_NET_TSBIAS ms, default 8), so the other player's pad of its frame is there before it needs it (a stall there
+         * is a hitch); the game with the ring aims at the same split from its side */
+        if (g_tsbias < 0) { const char *e = getenv("SSBU_RB_NET_TSBIAS"); g_tsbias = e ? atof(e) : 8.0; }
+        if (g_peerdelay && g_lockstep) est_ms += g_tsbias; else if (peer_lockstep()) est_ms -= g_tsbias;
         /* ahead: half of the lead given back over the next 30 frames (the other game, behind, does nothing; both halves meet) */
         if (est_ms > 2.0) { g_ts_extra = est_ms / 2.0 / 30.0; if (g_ts_extra > 4.0) g_ts_extra = 4.0; g_ts_left = 30; g_ts_n++; }
         else g_ts_left = 0;
@@ -614,7 +662,7 @@ double rbn_offset_ms(void) { return rb_ts_offset() / 1000.0; }
  * belongs to one match starts over (input queues and frames at the next rbn_start, checksums, counters, the block check,
  * received messages not drained yet); the round trip, the pings and the transport stay. */
 void rbn_match_reset(void) {
-    g_started = 0; g_peer_started = 0; g_f0 = 0; g_peer_ack = 0; g_sent_newest = 0;
+    g_started = 0; g_peer_started = 0; g_f0 = 0; InterlockedExchange(&g_peer_mode, -1); g_peer_ack = 0; g_sent_newest = 0;
     g_stat_pred = g_stat_padget = g_stat_mis = 0; g_ts_n = 0; g_ts_extra = 0; g_ts_left = 0;
     g_hacc = 0xcbf29ce484222325ull; g_hlines = 0; g_lacc_n = 0;
     memset(g_hash, 0, sizeof g_hash); memset(g_hframe, 0, sizeof g_hframe); g_hfinal_upto = 0;

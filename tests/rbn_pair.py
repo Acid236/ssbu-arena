@@ -28,7 +28,7 @@ def main():
         print('QUIET_PLEASE: waiting', flush=True)
         time.sleep(25)
     base = dict(N5_EXE='ssbu_rbn6r.exe', N5_SAVE='../userdata_completo', N5_SEQ='seq_completo.txt', SSBU_NRO_BIN='nro_bin_eh_o2r1',
-                SSBU_DEBUG_END='2400', N5_SECS='480', SSBU_NET_SIM='75', SSBU_RB_NET='net', SSBU_ONLINE_STUN='off', SSBU_ONLINE_UPNP='off',
+                SSBU_DEBUG_END='2400', N5_SECS='480', SSBU_NET_SIM='75', SSBU_RB_NET='net', SSBU_ONLINE_STUN='off', SSBU_ONLINE_UPNP='off', SSBU_ONLINE_LOOPBACK='1',
                 N5_STOP_ON='fight.off', SSBU_DEBUG_MATCH='p1=mario,p2=donkey,p2=human,stage=end')
     base.update(both)
     port = base.pop('RBN_PORT', '39520')
@@ -53,11 +53,12 @@ def main():
         print('==', t)
         lines = open(os.path.join(LOGS, 'r1_%s.txt' % t), errors='replace').read().splitlines()
         keep = [l for l in lines if 'start barrier' in l or 'RB NET report' in l or ('RB NET TIMING' in l and 'with rollback' in l) or '[rbnet] report' in l or 'DESYNC' in l
-                or 'RING rebase' in l or 'match start, base' in l or 'not agreed' in l or 'RB NET: match' in l]
+                or 'RING rebase' in l or 'match start, base' in l or 'not agreed' in l or 'RB NET: match' in l or 'ring memory' in l
+                or ('RB NET TIMING' in l and 'tick to tick' in l)]
         for l in keep:                                # (hs12: one report per match now)
             print('  ' + l[:330])
         for l in open(os.path.join(LOGS, 'n11_%s.log' % t), errors='replace'):      # rbn9: the match handshake and the match block check
-            if 'handshake' in l and ('agreed' in l or 'FAILED' in l or 'the match:' in l or 'no panel' in l) or 'match block check' in l or 'notice drawn' in l                     or '[rbnet] match' in l or 'debug panels' in l:
+            if 'handshake' in l and ('agreed' in l or 'FAILED' in l or 'the match:' in l or 'no panel' in l) or 'match block check' in l or 'notice drawn' in l or 'handshake: stage' in l or 'after the start barrier' in l                     or '[rbnet] match' in l or 'debug panels' in l:
                 print('  ' + l.rstrip()[:330])
 
 

@@ -1661,12 +1661,12 @@ static void ra_line(Ctx *c, void *user) {           /* the fighters' frame line:
     if (g_ra_phase == 1 && (g_ra_skip & 8)) { g_ra_skipped_lines++; return; }      /* SSBU_RUNAHEAD_SKIP bit 8: a speculative pass's fighters do not run their frame (its result is thrown away) */
     g_orig_line(c);
 }
-static void ra_report(void);
+static void ra_report(void); static int rbg_noring_now(void);
 static void ra_frame_end(double te) {
     double fe = now_ms();
     if (g_ra_ready && g_t_poll > g_ra_t_mark && te > g_t_poll) { int k = g_ra_phase; g_rap[k][0] += g_t_poll - g_ra_t_mark; g_rap[k][1] += te - g_t_poll; g_rap[k][2] += fe - te; g_ra_fe_end = fe; g_ra_fe_kind = k + 1; }
     g_ra_fe++;
-    { static long long n; if (++n % 1200 == 0 && g_ra_ready) ra_report(); }
+    { static long long n; if (++n % 1200 == 0 && (g_ra_ready || rbg_noring_now())) ra_report(); }      /* (hs14: a match without the ring too) */
     if (InterlockedExchange(&g_ra_lines, 0) > 0) {      /* this iteration ran a fight frame: real or speculative (for tests\r1_ra_cmp.py) */
         if (g_ra_nkind >= g_ra_kcap) { g_ra_kcap = g_ra_kcap ? g_ra_kcap * 2 : 65536; g_ra_kind = realloc(g_ra_kind, (size_t)g_ra_kcap); }
         g_ra_kind[g_ra_nkind++] = g_ra_phase == 1 || (g_ra_phase == 2 && rgs_wanted()) ? 'S' : 'R';      /* (R2 simulation: a re-run pass = 'S') */
