@@ -123,8 +123,7 @@ static void vkd_device_info(VkDeviceCreateInfo *di, const VkExtensionProperties 
 #ifdef VK_KHR_portability_subset
     if (D.has_port)
         printf("nvn_vk: portability subset (MoltenVK): triangle fans %d, image view swizzle %d, format reinterpretation %d, events %d, point polygons %d, separate stencil ref %d, "
-               "constant alpha blend %d, sampler LOD bias %d, mutable comparison samplers %d, 2D views of 3D images %d, vertex access beyond stride %d
-",
+               "constant alpha blend %d, sampler LOD bias %d, mutable comparison samplers %d, 2D views of 3D images %d, vertex access beyond stride %d\n",
                (int)D.port.triangleFans, (int)D.port.imageViewFormatSwizzle, (int)D.port.imageViewFormatReinterpretation, (int)D.port.events, (int)D.port.pointPolygons,
                (int)D.port.separateStencilMaskRef, (int)D.port.constantAlphaColorBlendFactors, (int)D.port.samplerMipLodBias, (int)D.port.mutableComparisonSamplers,
                (int)D.port.imageView2DOn3DImage, (int)D.port.vertexAttributeAccessBeyondStride);
