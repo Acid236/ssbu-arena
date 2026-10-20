@@ -425,7 +425,8 @@ $script:cbRuntime = New-Check 'Use the prebuilt runtime (recommended)' $true
 $script:tips = New-Object System.Windows.Forms.ToolTip
 $script:tips.AutoPopDelay = 20000
 $script:tips.SetToolTip($script:cbRuntime, 'No Visual Studio needed (about 3 GB less disk), some minutes shorter. The game you get is the same.')
-$script:cbRb = New-Check 'Rollback netcode for online play (experimental; the first build takes about twice as long)' $false
+$script:cbRb = New-Check 'Rollback netcode (NOT WORKING between two PCs yet: being fixed)' $false
+$script:tips.SetToolTip($script:cbRb, 'Experimental. Between two PCs the rollback match does not start yet (both players wait, then the game leaves the match). Builds a second copy of the game (about twice as long).')
 $script:cbDry = New-Check 'Dry run (show what would happen, change nothing)' $false
 $fJobs = New-Object System.Windows.Forms.FlowLayoutPanel
 $fJobs.AutoSize = $true; $fJobs.WrapContents = $false
