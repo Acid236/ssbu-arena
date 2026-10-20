@@ -9,6 +9,9 @@ This is the game's own Local Wireless mode, played over a network. You only open
 4. Both players vote on a stage and pick their fighters.
 5. The host starts the match with L+R.
 
+No room to join? **F1 -> Online -> Find an opponent** asks the lobby for another player who is searching too (see
+[Find an opponent](#find-an-opponent-f1)).
+
 Online play is experimental and ON by default: the game joins the project's public lobby
 (`opensmash-lobby.duckdns.org:39500`) when it starts. To turn it off: F1 -> Experimental -> Online play: OFF
 (or `online_mode = off` in `config\graphics.ini`).
@@ -78,6 +81,7 @@ python tools/net/ssbu_lobby.py --bind 0.0.0.0 --port 39500 [--verbose]
 - On a Linux server (for example an Oracle Cloud Always Free Ubuntu VM): copy `tools/net/ssbu_lobby.py` and
   `tools/net/deploy_lobby.sh` to it and run `sudo bash deploy_lobby.sh [port]`. It installs a systemd service and opens
   the VM's firewall; open the same UDP port in the cloud's own firewall (Oracle: VCN Security List ingress rule).
+- Matchmaking needs lobby 1.3 or newer (`curl -s http://127.0.0.1:8080/status` on the server shows the version).
 - Update a running server: copy the new `tools/net/ssbu_lobby.py` next to `deploy_lobby.sh` and run
   `sudo bash deploy_lobby.sh [port]` again (add `DOMAIN=...` if you used it), or just
   `sudo install -m 644 ssbu_lobby.py /opt/ssbu-lobby/ && sudo systemctl restart ssbu-lobby`. Players reconnect by themselves.
@@ -102,14 +106,31 @@ python tools/net/ssbu_lobby.py --bind 0.0.0.0 --port 39500 [--verbose]
 - Both players need the same game update (13.0.4 or 13.0.5) and the same mods. The game version and a hash of the
   loaded mods are part of the build id (e.g. `ssbu-recomp-ldn1-13.0.5`, or `ssbu-recomp-ldn1-13.0.5+m1a2b3c4d` with
   mods), shown in the log lines `[online] on` and `[online] mods`.
-- Rooms of another version or another mod set are still listed (in the game's Rooms List and in F1 -> Online rooms),
+- Rooms of another version or another mod set are still listed (in the game's Rooms List and in F1 -> Online),
   but they cannot be joined: trying shows a box with the reason, for example
   "Different version: this room is 13.0.4, you have 13.0.5" or "MISSING: <mod names>".
 - For lobby and LAN, the lobby code must match.
 
+## Find an opponent (F1)
+
+F1 -> **Online** shows how many players are online with your version and mods, and how many are searching.
+Press **Find an opponent**: the lobby pairs you with another player of the same game version, the same mods and the
+same lobby code who is searching too, and says who hosts. You can keep playing meanwhile: a box at the top of the
+picture tells you when an opponent is found.
+
+- **You host:** open Local Wireless -> Create Room (a room you already have open counts), and accept the other player's
+  request when "wants to join!" appears.
+- **They host:** open Local Wireless -> Rooms List: their room is shown first (the box tells you when it is open).
+  Join it.
+
+The menus are not driven for you: you create or join the room in the game as usual. **Cancel** stops the search (or
+the match: the other player is told). A search with nobody to pair with ends after 2 minutes ("No opponent found");
+a match ends when you are both in the room, or after 3 minutes if you never meet there. Players of an older version
+of this project never search, so they are never matched; an older lobby server cannot match (F1 says so).
+
 ## Online rooms (F1)
 
-F1 -> **Online rooms** lists every room of your lobby: host, game version, mods, players, and whether you can join.
+F1 -> **Online** also lists every room of your lobby: host, game version, mods, players, and whether you can join.
 Select a row to see why a room cannot be joined. Joining itself is done in the game: Local Wireless -> Rooms List.
 
 Mods counted: the sub-folders of the characters folder (`SSBU_CHARACTERS`, a fighter's `fighter.json` name or the
