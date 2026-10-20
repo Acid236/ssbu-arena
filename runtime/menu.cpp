@@ -393,10 +393,11 @@ static void sec_graphics(void) {
 static void sec_audio(void) {
     int cur = nnaudio_volume();
     int v = S.volume < 0 ? (cur >= 0 ? cur : 100) : S.volume;
-    if (cur < 0) ImGui::BeginDisabled();
+    const bool dis_1 = cur < 0;
+    if (dis_1) ImGui::BeginDisabled();
     if (ImGui::SliderInt("Volume", &v, 0, 100, "%d %%")) { S.volume = v; nnaudio_set_volume(v); }
     if (ImGui::IsItemDeactivatedAfterEdit()) { char t[8]; snprintf(t, sizeof t, "%d", S.volume); ini("volume", t); }
-    if (cur < 0) ImGui::EndDisabled();
+    if (dis_1) ImGui::EndDisabled();
     tag(0, 0);
     if (cur < 0) help("No sound device in this copy (test copies, SSBU_AUDIO_MUTE): the volume is saved for the copies a person plays.");
     if (ImGui::Button("Volume: auto (100 %)")) { S.volume = -1; nnaudio_set_volume(100); ini("volume", "auto"); }
@@ -481,7 +482,8 @@ static void sec_controls(void) {
     char cur[160];
     if (dv) snprintf(cur, sizeof cur, "%s (%s)%s", dv->name, nnpad_type_label(dv->type), dv->player >= 0 ? "" : " - no player");
     else snprintf(cur, sizeof cur, "Keyboard");
-    if (capturing()) ImGui::BeginDisabled();
+    const bool dis_2 = capturing();
+    if (dis_2) ImGui::BeginDisabled();
     if (ImGui::BeginCombo("Device", cur)) {
         if (ImGui::Selectable("Keyboard", g_ctl_dev < 0)) g_ctl_dev = -1;
         for (int i = 0; i < g_ndev; i++) {
@@ -492,7 +494,7 @@ static void sec_controls(void) {
         }
         ImGui::EndCombo();
     }
-    if (capturing()) ImGui::EndDisabled();
+    if (dis_2) ImGui::EndDisabled();
     tag(0, 0);
     if (!g_ndev) { ImGui::SameLine(); ImGui::TextDisabled("(no controller connected)"); }
     dv = ctl_dev();
@@ -541,7 +543,8 @@ static void sec_controls(void) {
             else if (dv) { ImGui::TextUnformatted(name); ImGui::SameLine(); ImGui::TextDisabled(from == 2 ? "(this controller)" : from == 1 ? "(profile)" : "(default)"); }
             else ImGui::TextUnformatted(name);
             ImGui::TableSetColumnIndex(3);
-            if (capturing()) ImGui::BeginDisabled();
+            const bool dis_3 = capturing();
+            if (dis_3) ImGui::BeginDisabled();
             if (ImGui::SmallButton("Change")) {
                 g_cap_t0 = GetTickCount64();
                 if (dv) { g_pcap = i; nnpad_capture_begin(dv->index); } else g_capture = i;
@@ -550,12 +553,13 @@ static void sec_controls(void) {
             if (ImGui::SmallButton("Clear")) { if (dv) nnpad_target_set(dv->index, g_ctl_scope, i, "none"); else nnpad_kb_bind(i, 0); }
             ImGui::SameLine();
             if (ImGui::SmallButton("Default")) { if (dv) nnpad_target_set(dv->index, g_ctl_scope, i, NULL); else nnpad_kb_bind(i, nnpad_kb_default(i)); }
-            if (capturing()) ImGui::EndDisabled();
+            if (dis_3) ImGui::EndDisabled();
             ImGui::PopID();
         }
         ImGui::EndTable();
     }
-    if (capturing()) ImGui::BeginDisabled();
+    const bool dis_4 = capturing();
+    if (dis_4) ImGui::BeginDisabled();
     if (dv) {
         char rl[96];
         snprintf(rl, sizeof rl, "Reset %s to the default", g_ctl_scope ? "the profile" : "this controller");
@@ -574,7 +578,7 @@ static void sec_controls(void) {
     } else {
         if (ImGui::Button("All keys back to the default")) for (int i = 0; i < 24; i++) nnpad_kb_bind(i, nnpad_kb_default(i));
     }
-    if (capturing()) ImGui::EndDisabled();
+    if (dis_4) ImGui::EndDisabled();
     ImGui::Separator();
     test_area(dv ? dv->player : nnhid_kb_player());
 }
@@ -703,12 +707,13 @@ static int ra_build(void) {
 static bool onoff(const char *id, bool on, bool enabled) {     /* a big ON / OFF switch; true when clicked */
     char l[64];
     snprintf(l, sizeof l, "%s##%s", on ? "ON" : "OFF", id);
-    if (!enabled) ImGui::BeginDisabled();
+    const bool dis_5 = !enabled;
+    if (dis_5) ImGui::BeginDisabled();
     ImGui::PushStyleColor(ImGuiCol_Button, on ? ImVec4(0.20f, 0.60f, 0.25f, 1) : ImVec4(0.35f, 0.35f, 0.38f, 1));
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, on ? ImVec4(0.25f, 0.70f, 0.30f, 1) : ImVec4(0.45f, 0.45f, 0.48f, 1));
     bool c = ImGui::Button(l, ImVec2(ImGui::GetFontSize() * 4.0f, 0));
     ImGui::PopStyleColor(2);
-    if (!enabled) ImGui::EndDisabled();
+    if (dis_5) ImGui::EndDisabled();
     return c && enabled;
 }
 static int online_differs(void);
@@ -734,9 +739,10 @@ static void sec_experimental(void) {
     if (ImGui::IsItemDeactivatedAfterEdit()) ini("player_name", pname);
     tag(1, strcmp(pname, pname0) != 0);
     ImGui::SameLine();
-    if (g_osk_busy) ImGui::BeginDisabled();
+    const bool dis_6 = g_osk_busy;
+    if (dis_6) ImGui::BeginDisabled();
     if (ImGui::Button("Type with the controller##name")) { InterlockedExchange(&g_osk_busy, 1); CreateThread(NULL, 0, osk_name_thread, pname, 0, NULL); }
-    if (g_osk_busy) ImGui::EndDisabled();
+    if (dis_6) ImGui::EndDisabled();
     if (!pname[0]) ImGui::TextDisabled("Empty: the Windows user name is used.");
     ImGui::Separator();
     /* (3) online play (net_relay.c / nnldn.c) */
@@ -811,9 +817,10 @@ static void sec_online(void) {
         if (ImGui::IsItemDeactivatedAfterEdit()) changed = 1;
         tag(1, strcmp(O.join, O0.join) != 0);
         ImGui::SameLine();
-        if (g_osk_busy) ImGui::BeginDisabled();
+        const bool dis_7 = g_osk_busy;
+        if (dis_7) ImGui::BeginDisabled();
         if (ImGui::Button("Type with the controller")) { InterlockedExchange(&g_osk_busy, 1); CreateThread(NULL, 0, osk_code_thread, NULL, 0, NULL); }
-        if (g_osk_busy) ImGui::EndDisabled();
+        if (dis_7) ImGui::EndDisabled();
         if (O0.mode == 3 && net_room_code()[0]) ImGui::TextDisabled("Your own code (only if the host's router blocks you; the host sets it as online_peer): %s", net_room_code());
     }
     if (O.mode == 4) {
@@ -856,9 +863,10 @@ static void sec_dlc(void) {
         if (ImGui::Checkbox(label, &on)) { d->on = on; g_dlc_dirty = 1; }
     }
     ImGui::EndChild();
-    if (!g_dlc_dirty) ImGui::BeginDisabled();
+    const bool dis_8 = !g_dlc_dirty;
+    if (dis_8) ImGui::BeginDisabled();
     if (ImGui::Button("Save the list")) dlc_save();
-    if (!g_dlc_dirty) ImGui::EndDisabled();
+    if (dis_8) ImGui::EndDisabled();
     ImGui::SameLine();
     if (ImGui::Button("Read it again")) dlc_load();
     tag(1, g_dlc_dirty);
