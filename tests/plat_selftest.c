@@ -1,4 +1,4 @@
-/* Self-test of runtime/plat_posix.c (the Win32 subset of the Linux build). Build from runtime/:
+/* Self-test of runtime/plat_posix.c (the Win32 subset of the Linux and macOS builds). Build from runtime/:
  *   clang -O1 -include plat/plat_pre.h -I plat $(pkg-config --cflags sdl3 openssl) ../tests/plat_selftest.c plat_posix.c -o plat_selftest $(pkg-config --libs sdl3 openssl) -lpthread -ldl */
 #include <windows.h>
 #include <stdio.h>
@@ -124,6 +124,7 @@ int main(void) {
     CHECK(any && ((uintptr_t)any & 0xffff) == 0, "VirtualAlloc(NULL) 64 KB aligned");
     int local;
     CHECK(VirtualQuery(&local, &mi, sizeof mi) && mi.State == MEM_COMMIT && (mi.Protect & PAGE_READWRITE), "VirtualQuery of the stack (/proc/self/maps)");
+#ifdef __linux__                 /* the comparison reads /proc (Linux only) */
     {   /* untracked memory against the text of /proc/self/maps: every mapping (start and middle) and every gap */
         static unsigned long lo[4096], hi[4096]; static char perm[4096][8]; int n = 0, bad = 0, asked = 0;
         FILE *f = fopen("/proc/self/maps", "r"); char line[512];
@@ -152,10 +153,12 @@ int main(void) {
         QueryPerformanceCounter(&t1);
         printf("     VirtualQuery of the stack: %.2f us a call\n", (double)(t1.QuadPart - t0.QuadPart) * 1e6 / (double)fq.QuadPart / 2000);
     }
+#endif
+    void *pages[64]; ULONG_PTR cnt = 64; ULONG gr = 0;
+#ifdef __linux__                 /* macOS: no write watch yet (plan/phases/MAC1_port.md) */
     /* write watch */
     uint8_t *ww = VirtualAlloc(NULL, 0x400000, MEM_RESERVE | MEM_WRITE_WATCH, PAGE_NOACCESS);
     VirtualAlloc(ww, 0x100000, MEM_COMMIT, PAGE_READWRITE);
-    void *pages[64]; ULONG_PTR cnt = 64; ULONG gr = 0;
     CHECK(GetWriteWatch(WRITE_WATCH_FLAG_RESET, ww, 0x100000, pages, &cnt, &gr) == 0 && cnt == 0 && gr == 4096, "write watch: nothing written");
     ww[0x3000] = 1; ww[0x3001] = 2; ww[0x9000] = 3;
     cnt = 64;
@@ -164,6 +167,7 @@ int main(void) {
     CHECK(GetWriteWatch(0, ww, 0x100000, pages, &cnt, &gr) == 0 && cnt == 0, "write watch: reset");
     ww[0x9000] = 4; cnt = 64;
     CHECK(GetWriteWatch(0, ww + 0x8000, 0x2000, pages, &cnt, &gr) == 0 && cnt == 1 && GetWriteWatch(0, ww, 0x1000, pages, &cnt, &gr) == 0 && cnt == 0, "write watch: sub-range");
+#endif
     cnt = 64;
     CHECK(GetWriteWatch(0, any, 4096, pages, &cnt, &gr) != 0, "write watch: unwatched memory refused");
     /* fibers */
@@ -192,7 +196,7 @@ int main(void) {
     CHECK(exe[0] == '\\' && !strchr(exe, '/') && strlen(exe) > 1, "GetModuleFileNameA (Windows separators)");
     /* modules */
     HMODULE vk = LoadLibraryA("vulkan-1.dll");
-    CHECK(vk && GetProcAddress(vk, "vkGetInstanceProcAddr"), "LoadLibrary(vulkan-1.dll) -> libvulkan.so.1");
+    CHECK(vk && GetProcAddress(vk, "vkGetInstanceProcAddr"), "LoadLibrary(vulkan-1.dll) -> the Vulkan loader");
     HMODULE bc = LoadLibraryA("bcrypt.dll");
     typedef LONG (*Hash)(void *, uint8_t *, ULONG, const uint8_t *, ULONG, uint8_t *, ULONG);
     uint8_t dg[32];

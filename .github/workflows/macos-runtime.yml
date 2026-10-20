@@ -42,7 +42,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Dependencies (Homebrew)
-        run: brew install --quiet pkgconf sdl3 openssl@3
+        run: brew install --quiet pkgconf sdl3 openssl@3 vulkan-loader molten-vk
       - name: Build and run the platform self-test
         working-directory: runtime
         run: |
