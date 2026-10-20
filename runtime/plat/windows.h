@@ -82,6 +82,7 @@ typedef UINT MMRESULT;
 #define ERROR_NO_MORE_FILES 18
 #define ERROR_SHARING_VIOLATION 32
 #define ERROR_HANDLE_EOF 38
+#define ERROR_TIMEOUT 1460                 /* SleepConditionVariable* on a timeout (plat_posix.c cv_wait) */
 #define ERROR_FILE_EXISTS 80
 #define ERROR_INVALID_PARAMETER 87
 #define ERROR_DISK_FULL 112

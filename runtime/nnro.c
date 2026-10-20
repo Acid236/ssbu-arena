@@ -55,6 +55,8 @@ typedef struct {
     void (*stx_diag)(Ctx *, uint64_t, uint64_t, uint64_t, uint64_t, int);
     void (*nro_import)(Ctx *, void *, int);
     void (*catch_call)(Ctx *, void (*)(Ctx *, uint64_t));      /* nnunwind.c: entry of functions with a catch clause */
+    void (*site_inline)(Ctx *, uint64_t);                      /* site callouts of a re-lifted module (nro_bin_sky, relift_sites.py) */
+    int (*site_midhook)(Ctx *, uint64_t);
 } NroHost;
 typedef struct { uint64_t lp; void (*fn)(Ctx *, uint64_t); } NroResume;      /* landing pad -> resume entry (nnunwind.c) */
 /* a DLL built before the exception support fills only the first four fields: resume stays NULL */
@@ -73,6 +75,9 @@ typedef struct NroModule {
     uint64_t dt_init, dt_fini;
     const NroResume *resume; int resume_count; /* landing pads the unwinder can enter, sorted; NULL for an old DLL */
     struct FsMod *fighter;                     /* S1: C++ source of some of its script functions (fighter_sdk\fighter_host.c), or NULL */
+    int plugin;                                /* a Skyline plugin (skyline.c: plugin_bin\plugins.txt), not a module of the game */
+    uint64_t rtld_obj;                         /* its rtld ModuleObject while loaded (skyline.c: in g_pManualLoadList) */
+    uint64_t *got;                             /* per dynamic symbol: guest address of its GOT entry, 0 = none (plugins rewrite GOT entries) */
 } NroModule;
 
 void input_mark(const char *what);             /* nnhid.c */
@@ -81,7 +86,15 @@ int eh_register_image(uint64_t base, uint64_t size, uint64_t eh_frame_hdr);    /
 void eh_unregister_image(uint64_t base);
 uint64_t import_address(int sym);              /* hostrt.c: what main's relocations use for an imported symbol */
 
-static NroModule *g_mods;                      /* one per registry entry */
+static NroModule *g_mods;                      /* one per registry entry, then one per Skyline plugin */
+static int g_mod_count;                        /* nro_registry_count + plugins */
+static int sky_registry(void);                 /* skyline.c */
+static NroInfo g_sky_info[];
+static void sky_module_loaded(NroModule *m, uint64_t obj);
+static void sky_module_unloaded(NroModule *m);
+static uint64_t sky_data_symbol(const char *name);
+static uint64_t sky_sdk_symbol(const char *name);
+static const char *sky_bin_dir(void);
 static NroModule *volatile g_slot[NRO_MAX_SLOTS];   /* 2 MB address slot -> module, set while loaded */
 static SRWLOCK g_ro_lock = SRWLOCK_INIT;
 
@@ -141,8 +154,11 @@ static void ro_init_tables(void) {
             while (g_main_hash[i] >= 0 && strcmp(dyn_syms[g_main_hash[i]].name, dyn_syms[s].name) != 0) i = (i + 1) & g_main_mask;
             if (g_main_hash[i] < 0) g_main_hash[i] = s;
         }
-        g_mods = calloc((size_t)nro_registry_count, sizeof *g_mods);
+        int np = sky_registry();
+        g_mods = calloc((size_t)(nro_registry_count + np), sizeof *g_mods);
         for (int i = 0; i < nro_registry_count; i++) g_mods[i].info = &nro_registry[i];
+        for (int i = 0; i < np; i++) { g_mods[nro_registry_count + i].info = &g_sky_info[i]; g_mods[nro_registry_count + i].plugin = 1; }
+        g_mod_count = nro_registry_count + np;
         done = 1;
     }
     ReleaseSRWLockExclusive(&g_ro_lock);
@@ -208,7 +224,7 @@ void module_coverage_report(FILE *out) {
     int mods = 0;
     if (!modcov_on() || !g_mods) return;
     fprintf(out, "script module coverage (SSBU_MODCOV: functions entered by an indirect call or seen by the 1 ms sampler; a LOWER bound):\n");
-    for (int i = 0; i < nro_registry_count && i < 512; i++) {
+    for (int i = 0; i < g_mod_count && i < 512; i++) {
         NroModule *m = &g_mods[i];
         long long hit = 0;
         if (!m->fns || !m->fn_count) continue;                 /* never loaded in this run */
@@ -216,7 +232,7 @@ void module_coverage_report(FILE *out) {
         fprintf(out, "  %-28s %6lld of %6d lifted functions (%.1f%%)%s\n", m->info->name, hit, m->fn_count, 100.0 * (double)hit / m->fn_count, m->loaded ? "" : "  [unloaded again]");
         tot_fn += m->fn_count; tot_hit += hit; mods++;
     }
-    fprintf(out, "  modules loaded in this run: %d of %d; functions marked: %lld of %lld in the loaded modules (%.2f%%)\n", mods, nro_registry_count, tot_hit, tot_fn, tot_fn ? 100.0 * (double)tot_hit / (double)tot_fn : 0.0);
+    fprintf(out, "  modules loaded in this run: %d of %d; functions marked: %lld of %lld in the loaded modules (%.2f%%)\n", mods, g_mod_count, tot_hit, tot_fn, tot_fn ? 100.0 * (double)tot_hit / (double)tot_fn : 0.0);
 }
 
 static int fighter_dispatch(Ctx *c, NroModule *m, uint64_t addr, ImportFn lifted);      /* fighter_sdk\fighter_host.c, included below */
@@ -257,7 +273,7 @@ int nro_unwind_module(uint64_t pc, uint64_t *base, uint64_t *size, const NroResu
 
 /* crash reports: guest function whose host code contains `rip`, or 0 */
 uint64_t nro_guest_function_of(uint64_t rip) {
-    for (int i = 0; g_mods && i < nro_registry_count; i++) {
+    for (int i = 0; g_mods && i < g_mod_count; i++) {
         NroModule *m = &g_mods[i];
         if (!m->by_host || rip < (uintptr_t)m->by_host[0].fn) continue;
         int lo = 0, hi = m->fn_count - 1, best = -1;
@@ -282,6 +298,14 @@ static uint64_t resolve(NroModule *m, int sym, int *from_main) {
     if (s->defined) return m->info->base + s->value;
     const Export *e = exp_find(s->name);
     if (e) return e->value;
+    if (m->plugin) {    /* skyline.c: names the game never imports (only plugins do): host handlers, SDK data, SDK addresses */
+        if (mi >= 0 && import_lookup(s->name)) return import_address(mi);
+        ImportFn x = extra_import_lookup(s->name);
+        if (x) return hostfn_address(s->name, x);
+        uint64_t d = sky_data_symbol(s->name);
+        if (!d) d = sky_sdk_symbol(s->name);
+        if (d) return d;
+    }
     if (mi >= 0) return import_address(mi);
     return 0;                                   /* __rel_dyn_start and friends: weak, stay 0 */
 }
@@ -315,6 +339,10 @@ static void nro_import_host_inner(Ctx *c, void *module, int sym) {
     extern volatile LONG g_guest_frozen;        /* hostrt.c: the application is suspended (close4) */
     void guest_freeze_wait(void);
     if (g_guest_frozen) guest_freeze_wait();
+    if (m->got && m->got[sym]) {                /* a plugin rewrote the GOT entry (smashline's rtld crate does): call what it holds now */
+        uint64_t cur = rd64(m->got[sym]);
+        if (cur != m->bind_addr[sym] && cur) { call_indirect(c, cur); return; }
+    }
     if (fn) { fn(c); return; }
     uint64_t addr = m->bind_addr[sym];
     if (!addr) {                                /* provider was not loaded when this module was bound: try again */
@@ -361,7 +389,7 @@ static void find_dynamic(NroModule *m, uint64_t *rela, uint64_t *relasz, uint64_
 static int relocate(NroModule *m, int *preempted) {
     uint64_t base = m->info->base, tab[2], size[2];
     find_dynamic(m, &tab[0], &size[0], &tab[1], &size[1]);
-    int bad = 0;
+    int bad = 0, keep_got = sky_registry() > 0;         /* GOT entries are noted only with plugins: they rewrite them */
     for (int t = 0; t < 2; t++)
         for (uint64_t i = 0; i < size[t] / 24; i++) {
             uint64_t e = base + tab[t] + i * 24;
@@ -373,6 +401,10 @@ static int relocate(NroModule *m, int *preempted) {
                 uint64_t s = sym < m->sym_count ? resolve(m, sym, &from_main) : 0;
                 if (s && from_main && m->syms[sym].defined) (*preempted)++;
                 wr64(base + off, s ? s + (type == 0x101 ? addend : 0) : 0);
+                if (type != 0x101 && sym < m->sym_count && keep_got) {
+                    if (!m->got) m->got = calloc((size_t)m->sym_count, sizeof *m->got);
+                    m->got[sym] = base + off;
+                }
             } else if (bad++ < 8) trace_printf("  %s: unsupported relocation type 0x%x at +0x%llx\n", m->info->name, type, (unsigned long long)off);
         }
     return bad;
@@ -383,7 +415,9 @@ static int cmp_host(const void *a, const void *b) {
     return x < y ? -1 : x > y;
 }
 
-static const NroHost g_host = {call_indirect, host_import, guest_trap, guest_unimpl, guest_svc, stx_diag, nro_import_host, nro_catch_call};
+void sky_site_inline(Ctx *c, uint64_t pc);                   /* skyline.c (included below) */
+int sky_site_midhook(Ctx *c, uint64_t pc);
+static const NroHost g_host = {call_indirect, host_import, guest_trap, guest_unimpl, guest_svc, stx_diag, nro_import_host, nro_catch_call, sky_site_inline, sky_site_midhook};
 
 /* Load nro_bin\<module>.dll (next to the exe) and take its tables. */
 static int attach_dll(NroModule *m) {
@@ -392,8 +426,16 @@ static int attach_dll(NroModule *m) {
     DWORD n = GetModuleFileNameA(NULL, path, MAX_PATH);
     while (n && path[n - 1] != '\\' && path[n - 1] != '/') n--;
     const char *bin = getenv("SSBU_NRO_BIN");               /* folder of the module DLLs next to the exe (default nro_bin) */
+    if (m->plugin) bin = sky_bin_dir();                     /* skyline.c: plugin_bin (SSBU_PLUGIN_BIN) */
     snprintf(path + n, sizeof path - n, "%s\\%s.dll", bin && bin[0] ? bin : "nro_bin_eh_o2", m->info->name);      /* P3 (2026-10-09): the optimised modules are the default; SSBU_NRO_BIN=nro_bin_eh = the -O0 ones */
-    HMODULE dll = LoadLibraryA(path);
+    HMODULE dll = NULL;
+    if (!m->plugin && sky_registry() > 0) {                 /* skyline.c: a module re-lifted with the plugins' sites (relift_sites.py --module) */
+        char hp[MAX_PATH * 2];
+        snprintf(hp, sizeof hp, "%.*snro_bin_sky\\%s.dll", (int)n, path, m->info->name);
+        dll = LoadLibraryA(hp);
+        if (dll) printf("nn::ro: %s from %s\n", m->info->name, hp);
+    }
+    if (!dll) dll = LoadLibraryA(path);
     const char *python = getenv("SSBU_NRO_AUTOBUILD");       /* development aid: path of python.exe; lift a missing module on demand */
     if (!dll && python && python[0]) {
         char cmd[MAX_PATH * 4];
@@ -438,8 +480,47 @@ static int publish_exports(NroModule *m, int on) {
     return n;
 }
 
+/* The SDK's LoadModule ends with BindVariables of every other loaded module against the new one: imports that nothing
+ * provided when those modules were loaded get their address now (a plugin loaded at boot imports lua2cpp_common's
+ * functions, which load with the first fight). Every relocation of such a symbol is rewritten: a symbol can have a PLT
+ * slot (calls) and GOT slots (its address taken). Under g_ro_lock. Returns the number of symbols bound. Only with plugins
+ * (skyline.c): without them the game's modules keep the binding they had, and an import resolved late is found by
+ * nro_import_host_inner when it is called, as before. */
+static void find_dynamic(NroModule *m, uint64_t *rela, uint64_t *relasz, uint64_t *jmprel, uint64_t *pltrelsz);
+static int rebind_others(NroModule *nm) {
+    int n = 0;
+    if (sky_registry() <= 0) return 0;
+    for (int i = 0; i < g_mod_count; i++) {
+        NroModule *m = &g_mods[i];
+        if (m == nm || !m->loaded || !m->bind_addr) continue;
+        uint8_t *fresh = NULL;
+        for (int k = 1; k < m->sym_count; k++) {
+            if (m->bind_addr[k] || m->syms[k].defined || !m->syms[k].name[0]) continue;
+            const Export *e = exp_find(m->syms[k].name);
+            if (!e || e->mod != nm) continue;
+            m->bind_addr[k] = e->value;
+            m->bind_fn[k] = function_at(e->value);
+            if (!fresh) fresh = calloc((size_t)m->sym_count, 1);
+            fresh[k] = 1;
+            n++;
+        }
+        if (!fresh) continue;
+        uint64_t base = m->info->base, tab[2], size[2];
+        find_dynamic(m, &tab[0], &size[0], &tab[1], &size[1]);
+        for (int t = 0; t < 2; t++)
+            for (uint64_t r = 0; r < size[t] / 24; r++) {
+                uint64_t e = base + tab[t] + r * 24, off = rd64(e), info = rd64(e + 8), addend = rd64(e + 16);
+                uint32_t type = (uint32_t)info, sym = (uint32_t)(info >> 32);
+                if ((type == 0x101 || type == 0x401 || type == 0x402) && sym < (uint32_t)m->sym_count && fresh[sym])
+                    wr64(base + off, m->bind_addr[sym] + (type == 0x101 ? addend : 0));
+            }
+        free(fresh);
+    }
+    return n;
+}
+
 static NroModule *module_of_image(uint64_t nro) {
-    for (int i = 0; i < nro_registry_count; i++)
+    for (int i = 0; i < g_mod_count; i++)
         if (memcmp(g_mods[i].info->build_id, (const void *)(uintptr_t)(nro + 0x40), 20) == 0) return &g_mods[i];
     return NULL;
 }
@@ -574,7 +655,8 @@ static void ro_LoadModule(Ctx *c) {              /* (Module *out, const void *nr
     int flag = (int)c->x[4];
     ro_init_tables();
     if (rd32(nro + 0x10) != 0x304f524eu) { c->x[0] = RO_INVALID_NRO; return; }
-    {
+    NroModule *pm = module_of_image(nro);
+    if (!pm || !pm->plugin) {                    /* Skyline plugins: installed by the user, not checked */
         uint8_t hash[32];
         int listed = nro_hash_registered(nro, hash);
         if (listed < 0) guest_trap("nn::ro::LoadModule: SHA-256 is not available on this Windows (bcrypt.dll): the module cannot be checked", c->x[30] - 4);
@@ -632,6 +714,7 @@ static void ro_LoadModule(Ctx *c) {              /* (Module *out, const void *nr
     uint64_t obj = mh + (int32_t)rd32(mh + 0x18);       /* the loader's RoModule object inside the image */
     wr64(obj, obj); wr64(obj + 8, obj);
     wr64(obj + 0x20, in->base);
+    if (sky_registry() > 0) sky_module_loaded(m, obj);      /* skyline.c (plugins only): the whole rtld ModuleObject, in g_pManualLoadList */
     /* close5: the module's text and read-only data (NRO header: data segment offset at +0x30) are read-only after relocation,
      * as nn::ro maps them on the console */
     if (!getenv("SSBU_NO_PROTECT")) {
@@ -642,6 +725,7 @@ static void ro_LoadModule(Ctx *c) {              /* (Module *out, const void *nr
     for (uint64_t s = 0; s < (span + (1u << NRO_SLOT_SHIFT) - 1) >> NRO_SLOT_SHIFT; s++)
         g_slot[((in->base - NRO_BASE) >> NRO_SLOT_SHIFT) + s] = m;
     published = publish_exports(m, 1);
+    int rebound = rebind_others(m);              /* after m->loaded: exp_find skips modules not loaded */
     ReleaseSRWLockExclusive(&g_ro_lock);
     int eh = eh_register_image(in->base, in->image_size, 0);        /* its .eh_frame_hdr, for C++ exceptions (after relocation) */
     QueryPerformanceCounter(&t1); QueryPerformanceFrequency(&freq);
@@ -653,6 +737,7 @@ static void ro_LoadModule(Ctx *c) {              /* (Module *out, const void *nr
              !eh ? " (NO unwind tables)" : m->resume ? "" : " (DLL built without resume entries: exceptions cannot be caught in it)", 1000.0 * (double)(t1.QuadPart - t0.QuadPart) / (double)freq.QuadPart);
     printf("%s\n", line);
     trace_printf("%s\n", line);
+    if (rebound) printf("nn::ro::LoadModule: %d imports of other modules bound to %s\n", rebound, in->name);
     wr64(out, obj); wr32(out + 8, 1); wr64(out + 0x10, nro); wr64(out + 0x18, bss);
     fighter_attach(m);                           /* S1: fighters_bin\<name>.dll, if this module has C++ source */
     hook_module_loaded(m);                       /* S3: hooks that were waiting for a name this module exports (fighter_sdk\hook_host.c) */
@@ -682,6 +767,7 @@ static void ro_UnloadModule(Ctx *c) {            /* (Module *) */
     eh_unregister_image(m->info->base);
     fighter_detach(m);                           /* S1 */
     AcquireSRWLockExclusive(&g_ro_lock);
+    sky_module_unloaded(m);
     publish_exports(m, 0);
     m->loaded = 0;
     size_t span = ((size_t)m->info->image_size + 0xffff) & ~(size_t)0xffff;
@@ -699,7 +785,7 @@ static void ro_UnloadModule(Ctx *c) {            /* (Module *) */
  * be committed, the Module object must say "not loaded") and loaded again with the same arguments; the game then goes on with
  * the reloaded image. Counters are printed per module and summed in ro_reload_report (boot.c calls nothing: see the log lines). */
 static int g_reload_ok, g_reload_bad;
-static void ro_LoadModule_entry(Ctx *c) {
+static void ro_LoadModule_test(Ctx *c) {
     if (!getenv("SSBU_RO_RELOAD_TEST")) { ro_LoadModule(c); return; }
     uint64_t a[5]; memcpy(a, c->x, sizeof a);
     ro_LoadModule(c);
@@ -723,6 +809,20 @@ static void ro_LoadModule_entry(Ctx *c) {
            gone ? "released" : "STILL MAPPED", back ? "ok" : "FAILED", (unsigned long)m2.Protect, g_reload_ok, g_reload_bad);
 }
 
+/* LoadModule(module, nro, bss, size, flag) is LoadModuleInternal(..., false) in the SDK; plugins hook either one (nro_hook the
+ * first, smashline the second), so the 5-argument form goes through the host function the plugins see for the second. */
+#define RO_LMI "_ZN2nn2ro18LoadModuleInternalEPNS0_6ModuleEPKvPvmib"
+static void ro_LoadModuleInternal(Ctx *c) { ro_LoadModule_test(c); }
+static void ro_LoadModule_entry(Ctx *c) {
+    static uint64_t lmi;
+    if (sky_registry() <= 0) { ro_LoadModule_test(c); return; }     /* no plugins: as before */
+    if (!lmi) lmi = hostfn_address(RO_LMI, ro_LoadModuleInternal);
+    c->x[5] = 0;
+    call_indirect(c, lmi);
+}
+
+#include "skyline.c"                           /* Skyline plugins (docs/SKYLINE.md): loader, Skyline's exports, rtld lists */
+
 /* ---------------------------------------------------------------- C runtime entries the modules' _init / _fini use */
 static void musl_init_dso(Ctx *c) { c->x[0] = 2; }      /* anything but 1: the module then runs its own init_array */
 static void musl_fini_dso(Ctx *c) { (void)c; }
@@ -735,6 +835,9 @@ static const ImportDef ro_imports[] = {
     {"_ZN2nn2ro10LoadModuleEPNS0_6ModuleEPKvPvmi", ro_LoadModule_entry},
     {"_ZN2nn2ro12UnloadModuleEPNS0_6ModuleE", ro_UnloadModule},
     {"__nnmusl_init_dso", musl_init_dso}, {"__nnmusl_fini_dso", musl_fini_dso},
+    {RO_LMI, ro_LoadModuleInternal},
+    {"_ZN2nn2ro12LookupSymbolEPmPKc", ro_LookupSymbol},
+    {"_ZN2nn2ro18LookupModuleSymbolEPmPKNS0_6ModuleEPKc", ro_LookupModuleSymbol},
 };
 
 /* The modules have fixed guest addresses (0x7200000000 + their slot). Their whole range is reserved at start-up, before
@@ -746,6 +849,10 @@ static void ro_reserve_range(void) {
         uint64_t e = nro_registry[i].base + (((uint64_t)nro_registry[i].image_size + 0xffff) & ~(uint64_t)0xffff);
         if (e > end) end = e;
     }
+    for (int i = 0, np = sky_registry(); i < np; i++) {          /* Skyline plugins (0x7280000000 ...) */
+        uint64_t e = g_sky_info[i].base + (((uint64_t)g_sky_info[i].image_size + 0xffff) & ~(uint64_t)0xffff);
+        if (e > end) end = e;
+    }
     if (end == NRO_BASE) return;
     if (VirtualAlloc((void *)(uintptr_t)NRO_BASE, (SIZE_T)(end - NRO_BASE), MEM_RESERVE, PAGE_NOACCESS) == (void *)(uintptr_t)NRO_BASE) g_ro_reserved = 1;
     else printf("nn::ro: could not reserve %llx..%llx for the script modules (Windows error %lu): each module is mapped when it is loaded\n",
@@ -755,6 +862,7 @@ static void ro_reserve_range(void) {
 void register_ro_imports(void) {
     ro_reserve_range();
     register_imports(ro_imports, (int)(sizeof ro_imports / sizeof ro_imports[0]));
+    sky_register();                              /* skyline.c: Skyline's exports; plugins load at the first MountRom */
 }
 
 #include "fighter_sdk/newmodule_host.c"        /* N5: the fighter registry (SSBU_CHARACTERS) and script modules that exist only as our DLL; nothing runs without that variable */
