@@ -36,6 +36,12 @@ if [ "$(uname -s)" != "Darwin" ]; then
     die "This script is for macOS. On Linux use scripts/linux/install_deps.sh."
 fi
 if [ "$(uname -m)" != "arm64" ]; then
+    # an Apple Silicon Mac whose Terminal runs as Intel code (Rosetta) also says x86_64 here
+    if [ "$(sysctl -n hw.optional.arm64 2>/dev/null)" = "1" ]; then
+        die "This Mac has Apple Silicon, but this Terminal runs under Rosetta (as an Intel program), so the build would be made
+for Intel. Fix: quit Terminal; in Finder > Applications > Utilities, select Terminal, File > Get Info, untick
+'Open using Rosetta'; open Terminal again and run this script again. (Or run: arch -arm64 bash $0 $*)"
+    fi
     die "This Mac has an Intel processor ($(uname -m)). Intel Macs are not supported: only Apple Silicon (M1 or newer)."
 fi
 OSV="$(sw_vers -productVersion)"
@@ -56,10 +62,17 @@ if ! xcode-select -p >/dev/null 2>&1; then
 fi
 echo "  Xcode Command Line Tools: ok"
 
-if ! command -v brew >/dev/null 2>&1; then
-    if [ -x /opt/homebrew/bin/brew ]; then
-        eval "$(/opt/homebrew/bin/brew shellenv)"
-    fi
+# Apple Silicon's Homebrew lives in /opt/homebrew. Use it even when the PATH names another brew first: a Homebrew in
+# /usr/local is the Intel one (moved over from an Intel Mac, or installed from a Rosetta Terminal) and has Intel libraries.
+if [ -x /opt/homebrew/bin/brew ]; then
+    eval "$(/opt/homebrew/bin/brew shellenv)"
+elif command -v brew >/dev/null 2>&1 && [ "$(brew --prefix 2>/dev/null)" = "/usr/local" ]; then
+    echo "  The Homebrew found ($(command -v brew)) is the Intel Homebrew in /usr/local: its libraries are Intel code."
+    echo "  Install the Apple Silicon Homebrew too (it goes to /opt/homebrew and does not disturb the other one):"
+    echo
+    echo '    /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
+    echo
+    die "Then open a new Terminal window and run this script again."
 fi
 if ! command -v brew >/dev/null 2>&1; then
     echo "  Homebrew (the package manager) is not installed."
@@ -95,6 +108,11 @@ brew install pkgconf sdl3 freetype openssl@3 ffmpeg glslang molten-vk vulkan-loa
 PY="$(brew --prefix python@3.12)/bin/python3.12"
 [ -x "$PY" ] || PY="$(command -v python3.12 || command -v python3)"
 [ -x "$PY" ] || die "Python was not found after the Homebrew install."
+# a venv made earlier by an Intel (Rosetta) Python, or whose Python was removed, is made again
+if [ -e "$DEPS/venv" ] && ! "$DEPS/venv/bin/python" -c 'import platform, sys; sys.exit(platform.machine() != "arm64")' >/dev/null 2>&1; then
+    say "deps/venv does not run as Apple Silicon code (or its Python is gone): making it again"
+    rm -rf "$DEPS/venv"
+fi
 if [ ! -x "$DEPS/venv/bin/python" ]; then
     say "Python virtual environment: deps/venv"
     mkdir -p "$DEPS"
