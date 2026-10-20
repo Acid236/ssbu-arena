@@ -47,8 +47,11 @@ static const uint64_t g_code_13_0_5[][2] = {         /* 13.0.4 -> 13.0.5 offsets
     {0x3544e18, 0x35453c8}, /* inflate thread call site 2 (loose_files.c) */
     {0x3545198, 0x3545748}, /* inflate thread call site 3 (loose_files.c) */
     {0x35456d8, 0x3545c88},     /* and the end of its range (loose_files.c) */
+    {0x3548240, 0x35487f0}, /* job runner (r1_ring.c, profile 2) */
     {0x3549170, 0x3549720}, /* worker kick 2 (r1_state.c) */
     {0x354c720, 0x354ccd0}, /* worker kick (r1_state.c) */
+    {0x355b540, 0x355baf0}, /* EffectManager update (r1_ring.c, profile 2) */
+    {0x3569c70, 0x356a220}, /* pad sentinel reset (r1_ring.c, profile 2) */
     {0x356d7a0, 0x356dd50}, /* rollback re-run / snapshot ring (r1_ring.c, r1_state.c), test switches only */
     {0x3575c60, 0x3576210}, /* rollback re-run / snapshot ring (r1_ring.c, r1_state.c), test switches only */
     {0x3575fa0, 0x3576550}, /* rollback re-run / snapshot ring (r1_ring.c, r1_state.c), test switches only */
@@ -63,6 +66,7 @@ static const uint64_t g_code_13_0_5[][2] = {         /* 13.0.4 -> 13.0.5 offsets
     {0x361d040, 0x361d5f0}, /* rollback re-run / snapshot ring (r1_ring.c, r1_state.c), test switches only */
     {0x361e7e0, 0x361ed90}, /* rollback re-run / snapshot ring (r1_ring.c, r1_state.c), test switches only */
     {0x3632850, 0x3632e00}, /* rollback re-run / snapshot ring (r1_ring.c, r1_state.c), test switches only */
+    {0x36676e0, 0x3667c90}, /* input poll (r1_ring.c, profile 2) */
     {0x366d1f0, 0x366d7a0},     /* clock read return address (nnsdk.c, fixed seed) */
     {0x366d388, 0x366d938},     /* clock read return address (nnsdk.c, fixed seed) */
     {0x36e6e00, 0x36e73b0}, /* rollback re-run / snapshot ring (r1_ring.c, r1_state.c), test switches only */
@@ -71,6 +75,7 @@ static const uint64_t g_code_13_0_5[][2] = {         /* 13.0.4 -> 13.0.5 offsets
     {0x36f2d40, 0x36f32f0}, /* rollback re-run / snapshot ring (r1_ring.c, r1_state.c), test switches only */
     {0x36f6070, 0x36f6620},     /* movie audio output Flush (nnmovie_mf.c), 0x114 bytes, the same in both */
     {0x36f7410, 0x36f79c0}, /* rollback re-run / snapshot ring (r1_ring.c, r1_state.c), test switches only */
+    {0x3724a80, 0x3725030}, /* task tree walker (r1_ring.c, profile 2) */
     {0x3747270, 0x3747820}, /* rollback re-run / snapshot ring (r1_ring.c, r1_state.c), test switches only */
     {0x3747b7c, 0x374812c}, /* render loop call site (r1_state.c) */
     {0x37494fc, 0x3749aac}, /* render loop call site, workers hold (r1_state.c) */
@@ -83,6 +88,7 @@ static const uint64_t g_code_13_0_5[][2] = {         /* 13.0.4 -> 13.0.5 offsets
     {0x374c398, 0x374c948}, /* render loop: logic call (r1_state.c) */
     {0x374c5b8, 0x374cb68}, /* render loop: logic call 2 (r1_state.c) */
     {0x374e000, 0x374e5b0}, /* rollback re-run / snapshot ring (r1_ring.c, r1_state.c), test switches only */
+    {0x375ea70, 0x375f020}, /* input dispatch (r1_ring.c, profile 2) */
     {0x37857f0, 0x3785da0}, /* rollback re-run / snapshot ring (r1_ring.c, r1_state.c), test switches only */
     {0x37a3ea0, 0x37a4450}, /* message text (newmodule_host.c) */
     {0x37a3fc0, 0x37a4570}, /* message label exists (newmodule_host.c) */

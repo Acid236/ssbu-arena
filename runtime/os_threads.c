@@ -308,10 +308,18 @@ void os_r1_objs(void (*cb)(uint64_t key, int signaled, int count, uint64_t len, 
             cb(o->key, o->signaled, o->count, o->len, (uint64_t)(uintptr_t)o->thread | (uint64_t)(uintptr_t)o->fiber, o->thread ? o->stack : 0, o->thread ? o->stack_size : 0);
 }
 /* R1: every fiber that has run: its guest context and stack */
+/* (R2 round 3) the objects that have a host fiber are cached in table order: the full walk of the 65,536 buckets cost
+ * ~0.15 ms per call, 3 calls per ring capture. The cache is rebuilt when a fiber is made or handed back (g_fib_gen). */
+static volatile LONG g_fib_gen = 1; static LONG g_fib_cgen; static Obj **g_fib_c; static int g_fib_cn, g_fib_ccap;
 void os_r1_fibers(void (*cb)(uint64_t key, Ctx *c, uint64_t stack, uint64_t stack_size, void *fiber)) {
-    for (int h = 0; h < BUCKETS; h++)
-        for (Obj *o = g_table[h]; o; o = o->next)
-            if (o->fiber) cb(o->key, o->fctx, o->stack, o->stack_size, o->fiber);
+    if (g_fib_cgen != g_fib_gen) {
+        LONG gen = g_fib_gen; g_fib_cn = 0;
+        for (int h = 0; h < BUCKETS; h++)
+            for (Obj *o = g_table[h]; o; o = o->next)
+                if (o->fiber) { if (g_fib_cn >= g_fib_ccap) { g_fib_ccap = g_fib_ccap ? g_fib_ccap * 2 : 256; g_fib_c = realloc(g_fib_c, (size_t)g_fib_ccap * sizeof *g_fib_c); } g_fib_c[g_fib_cn++] = o; }
+        g_fib_cgen = gen;
+    }
+    for (int i = 0; i < g_fib_cn; i++) { Obj *o = g_fib_c[i]; if (o->fiber) cb(o->key, o->fctx, o->stack, o->stack_size, o->fiber); }
 }
 void os_thread_report(FILE *out) {
     if (!g_oslog_n) return;
@@ -642,6 +650,7 @@ static void fib_init(Ctx *c) {                        /* (FiberType*, fn, arg, s
     Obj *o = obj(A0);
     o->fn = A1; o->arg = A2; o->stack = A3; o->stack_size = A4;
     o->fiber = CreateFiberEx(1 << 20, (SIZE_T)256 << 20, 0, fiber_main, o);
+    InterlockedIncrement(&g_fib_gen);
     if (g_r1_keep_fibers) { o->fctx = NULL; o->fls = NULL; o->fls_fiber = NULL; o->run_tid = 0; }      /* (R2) a new host fiber: no context, no block yet */
     RET(0);
 }
@@ -673,17 +682,18 @@ long long g_r1_fls_stale;                              /* (R2) notes of a block 
 void *os_r1_fiber_fls(uint64_t key) { Obj *o = obj_peek(key); if (!o) return NULL; if (o->fls && o->fls_fiber != o->fiber) { g_r1_fls_stale++; return NULL; } return o->fls; }
 void os_r1_fiber_put_fls(uint64_t key, void *fiber, void *fls) { Obj *o = obj_peek(key); if (o) { o->fls = fls; o->fls_fiber = fls ? fiber : NULL; } }      /* (R2) ring load: the note goes back with the host fiber */
 void os_r1_fiber_get(uint64_t key, uint64_t v[6]) { Obj *o = obj_peek(key); if (!o) return; v[0] = (uint64_t)(uintptr_t)o->fiber; v[1] = (uint64_t)(uintptr_t)o->fctx; v[2] = o->fn; v[3] = o->arg; v[4] = o->stack; v[5] = o->stack_size; }
-void os_r1_fiber_put(uint64_t key, const uint64_t v[6]) { Obj *o = obj_peek(key); if (!o) return; o->fiber = (void *)(uintptr_t)v[0]; o->fctx = (Ctx *)(uintptr_t)v[1]; o->fn = v[2]; o->arg = v[3]; o->stack = v[4]; o->stack_size = v[5]; }
+void os_r1_fiber_put(uint64_t key, const uint64_t v[6]) { Obj *o = obj_peek(key); if (!o) return; o->fiber = (void *)(uintptr_t)v[0]; o->fctx = (Ctx *)(uintptr_t)v[1]; o->fn = v[2]; o->arg = v[3]; o->stack = v[4]; o->stack_size = v[5]; InterlockedIncrement(&g_fib_gen); }
 /* R1 restore: give a guest fiber back the host fiber it had at the save (kept alive by g_r1_keep_fibers), or a fresh one */
 void os_r1_fiber_set(uint64_t key, void *fiber, Ctx *fctx, int fresh) {
     Obj *o = obj_peek(key); if (!o) return;
     if (fresh) { o->fiber = CreateFiberEx(1 << 20, (SIZE_T)256 << 20, 0, fiber_main, o); o->fctx = NULL; }
     else { o->fiber = fiber; o->fctx = fctx; }
+    InterlockedIncrement(&g_fib_gen);
 }
 static void fib_current(Ctx *c) { RET(fiber_cur()); }
 int g_r1_keep_fibers;                                  /* R1 (r1_state.c, SSBU_R1 only): a finalized fiber's host fiber is kept, so a
                                                         * restore that brings the guest fiber back finds it (resumed, it starts over) */
-static void fib_finalize(Ctx *c) { Obj *o = obj(A0); if (o->fiber && !g_r1_keep_fibers) { DeleteFiber(o->fiber); o->fiber = NULL; } }
+static void fib_finalize(Ctx *c) { Obj *o = obj(A0); if (o->fiber && !g_r1_keep_fibers) { DeleteFiber(o->fiber); o->fiber = NULL; InterlockedIncrement(&g_fib_gen); } }
 
 /* ---------------------------------------------------------------- misc */
 static void os_ConvertToTick(Ctx *c) { RET((uint64_t)((double)(int64_t)A0 * (double)TICK_HZ / 1e9)); }

@@ -30,6 +30,7 @@
  * kick-skip mask in re-run passes except the last one (experiment). SSBU_RB_PARK_MS (default 30): hold limit. */
 
 #define RG_MAXSLOT 16
+extern volatile int g_rgp_seg;                            /* (R2 round 3, profile 3: which part of a pass main is in) */
 #define RG_FLAT 0u
 #define RG_DECOM 1u
 #define RG_POOL_MAX (1u << 20)                 /* 4 GB of 4 KB buffers (reserved, committed as used) */
@@ -129,7 +130,16 @@ static void rg_sweep(void (*fn)(uint32_t id, int w, size_t j)) {
         }
     }
 }
-static RgSlot *g_rg_cur; static int g_rg_fail_now;
+static RgSlot *g_rg_cur; static int g_rg_fail_now; static int g_rgs_left;
+/* (R2 round 3) SSBU_RB_SIM_PAGES=1: the captured pages counted per 1 MB block and pass kind (0 real, 1 re-run with the skips, 2 the
+ * last re-run pass): which memory a frame writes, and which of it only the presentation writes (absent from the skipped passes). */
+static int g_rgpg_on = -1; static int g_rgpg_kind; static long long g_rgpg_caps[3];
+#define RGPG_N 16384
+static struct { uint64_t blk; long long n[3]; } g_rgpg[RGPG_N];
+static void rgpg_note(uint8_t *a) {
+    uint64_t b = (uint64_t)(uintptr_t)a >> 20; unsigned h = (unsigned)((b * 0x9e3779b97f4a7c15ull) >> 50) % RGPG_N;
+    for (int i = 0; i < 64; i++) { unsigned k = (h + (unsigned)i) % RGPG_N; if (g_rgpg[k].blk == b) { g_rgpg[k].n[g_rgpg_kind]++; return; } if (!g_rgpg[k].blk) { g_rgpg[k].blk = b; g_rgpg[k].n[g_rgpg_kind]++; return; } }
+}
 static void rg_cap_page(uint32_t id, int w, size_t j) {
     if (g_rg_fail_now) return;
     uint32_t old = g_rg_idx[id];
@@ -143,6 +153,7 @@ static void rg_cap_page(uint32_t id, int w, size_t j) {
     if (!nb || !rg_push(g_rg_cur, id, old)) { if (nb) rg_pool_put(nb); g_rg_fail_now = 1; return; }
     cp_add(rg_pool_ptr(nb), rg_addr(id));
     g_rg_idx[id] = nb; g_rg_cur->pages++;
+    if (g_rgpg_on > 0) rgpg_note(rg_addr(id));
 }
 static void rg_load_page(uint32_t id, int w, size_t j) { (void)w; (void)j; rg_touch(id); }
 static void rg_slot_drop(RgSlot *s, int log_too) {     /* log_too: the values in its undo log are no longer reachable */
@@ -241,8 +252,9 @@ void r1_ring_release(void) {                              /* every slot dropped:
     g_rg_count = 0; g_rg_head = 0;
 }
 int r1_ring_capture(long long frame, Ctx *c) {
-    double t0 = now_ms();
+    double t0 = now_ms(); int seg_was = g_rgp_seg; g_rgp_seg = 4;
     if (!g_rg_ready) {                                    /* the first time: r1's full save (shadow filled, marks on: one hitch), the ring's base */
+        g_rgp_seg = seg_was;
         g_save_failed = 0; g_ra_wd_pause = 1;
         save(c); release();
         g_ra_wd_pause = 0;
@@ -257,16 +269,21 @@ int r1_ring_capture(long long frame, Ctx *c) {
         LOG("r1: RING: base state (frame %lld): full save in %.1f ms\n", frame, now_ms() - t0);
         return 1;
     }
-    if (!ra_hold_quiet(g_rg_park_ms)) { g_rg_cap_fail++; if (g_rg_cap_fail <= 20 || g_rg_cap_fail % 100 == 0) LOG("r1: RING: capture %lld (frame %lld) skipped: thread %s not at a wait within %.1f ms\n", g_rg_cap_fail, frame, g_ra_busy ? g_ra_busy : "?", g_rg_park_ms); return 0; }
+    if (!ra_hold_quiet(g_rg_park_ms)) { g_rgp_seg = seg_was; g_rg_cap_fail++; if (g_rg_cap_fail <= 20 || g_rg_cap_fail % 100 == 0) LOG("r1: RING: capture %lld (frame %lld) skipped: thread %s not at a wait within %.1f ms\n", g_rg_cap_fail, frame, g_ra_busy ? g_ra_busy : "?", g_rg_park_ms); return 0; }
     double t1 = now_ms();
     if (g_rg_count == g_rg_cap) { rg_slot_drop(rg_slot(0), 1); g_rg_head = (g_rg_head + 1) % g_rg_cap; g_rg_count--; }
     RgSlot *s = rg_slot(g_rg_count);
     s->frame = frame; s->nent = 0; s->pages = 0; s->xpages = 0;
     g_rg_cur = s; g_rg_fail_now = 0;
+    static uint8_t *xdiff; if (!xdiff) xdiff = calloc(g_rg_nx + 1, 1);
+    for (size_t e = 0; e < g_rg_nx; e++) cp_add(g_rg_xa[e], rg_src((uint32_t)(g_rg_n1 + g_rg_n2 + e)));      /* (round 3) extras compared by main + the copy threads */
+    g_cp_cmp = xdiff; cp_run(); g_cp_cmp = NULL;
+    if (g_rgpg_on < 0) g_rgpg_on = getenv("SSBU_RB_SIM_PAGES") != NULL;
+    g_rgpg_kind = g_ra_phase != 2 ? 0 : g_rgs_left > 1 ? 1 : 2; g_rgpg_caps[g_rgpg_kind]++;
     rg_sweep(rg_cap_page);
     for (size_t e = 0; e < g_rg_nx && !g_rg_fail_now; e++) {             /* extras: the pages that differ from their newest value */
         uint32_t id = (uint32_t)(g_rg_n1 + g_rg_n2 + e);
-        if (!memcmp(g_rg_xa[e], rg_src(id), PG)) continue;
+        if (!xdiff[e]) continue;
         uint32_t nb = rg_pool_get();
         if (!nb || !rg_push(s, id, g_rg_idx[id])) { if (nb) rg_pool_put(nb); g_rg_fail_now = 1; break; }
         cp_add(rg_pool_ptr(nb), g_rg_xa[e]); g_rg_idx[id] = nb; s->xpages++;
@@ -286,7 +303,7 @@ int r1_ring_capture(long long frame, Ctx *c) {
         LOG("r1: RING: capture at frame %lld ran out of room (pool %u buffers): older states dropped\n", frame, g_rg_bump);
         while (g_rg_count > 1) { rg_slot_drop(rg_slot(0), 1); g_rg_head = (g_rg_head + 1) % g_rg_cap; g_rg_count--; }
     }
-    g_rg_last[0] = t5 - t0;
+    g_rg_last[0] = t5 - t0; g_rgp_seg = seg_was;
     if (g_rgc_n < RG_NST) { int i = g_rgc_n++; g_rgc[0][i] = t5 - t0; g_rgc[1][i] = t1 - t0; g_rgc[2][i] = t2 - t1; g_rgc[3][i] = t3 - t2; g_rgc[4][i] = (t4 - t3) + (t5 - t4); g_rgc_pg[i] = s->pages; g_rgc_xp[i] = s->xpages; }
     return 1;
 }
@@ -294,7 +311,7 @@ int r1_ring_load(long long frame, Ctx *c) {
     int si = -1;
     for (int i = 0; i < g_rg_count; i++) if (rg_slot(i)->frame == frame) si = i;
     if (si < 0) return 0;
-    double t0 = now_ms();
+    double t0 = now_ms(); g_rgp_seg = 5;
     RgSlot *g = rg_slot(si);
     int k = g_rg_count - 1 - si;
     static Th cur[256]; int ncur = g_rg_kept ? g_nth : 0;  /* threads still held from the capture just made (g_rg_keep) */
@@ -352,16 +369,18 @@ int r1_ring_load(long long frame, Ctx *c) {
     *c = g->ctx;
     g_rg_loads++;
     if (g_th_mismatch || g_fib_diff) LOG("r1: RING load of frame %lld (k %d): %d threads not at their wait, %d fibers not restored\n", frame, k, g_th_mismatch, g_fib_diff);
-    g_rg_last[1] = now_ms() - t0;
+    g_rg_last[1] = now_ms() - t0; g_rgp_seg = 1;
     if (k < RG_MAXSLOT && g_rgl_n[k] < RG_NL) { int i = g_rgl_n[k]++; g_rgl[k][i][0] = now_ms() - t0; g_rgl[k][i][1] = t1 - t0; g_rgl[k][i][2] = t2 - t1; g_rgl_pg[k][i] = pages; (void)t3; }
     return 1;
 }
 
 /* ---------------------------------------------------------------- the rollback simulation (SSBU_RB_SIM) */
+static DWORD g_rgp_main; static int g_rgs_prof; extern volatile int g_rgp_seg; static void rgs_samp_start(void);
 static int g_rgs_on = -1, g_rgs_n = 10, g_rgs_k = 7, g_rgs_warm = 30, g_rgs_skip, g_rgs_left, g_rgs_ki;
 static long long g_rgs_next, g_rgs_real_since, g_rgs_done, g_rgs_nocap, g_rgs_padmiss, g_rgs_ksum[RG_MAXSLOT];
 static PadRec g_rgs_pad[256]; static long long g_rgs_padf[256]; static int g_rgs_polls_cur; static long long g_rgs_multi;
 static double g_rgs_pass_t0, g_rgs_pass[2]; static long long g_rgs_npass[2];
+static double g_rgs_pl[2], g_rgs_plv[2][RG_NST / 4]; static long long g_rgs_npl[2]; static int g_rgs_nplv[2];      /* (round 3) re-run passes: 0 = skipped ones (not the last), 1 = the last one */
 static double g_rgs_pass_v[2][RG_NST / 4]; static int g_rgs_pass_nv[2];
 static int rgs_wanted(void) {
     if (g_rgs_on < 0) { const char *e = getenv("SSBU_RB_SIM"); g_rgs_on = e && e[0] && e[0] != '0'; if (g_rgs_on) sscanf(e, "%d,%d,%d", &g_rgs_n, &g_rgs_k, &g_rgs_warm); if (g_rgs_k < 1) g_rgs_k = 1; if (g_rgs_k > RG_MAXSLOT - 1) g_rgs_k = RG_MAXSLOT - 1; if (g_rgs_n < 1) g_rgs_n = 1; }
@@ -371,8 +390,10 @@ static void rgs_report(void);
 /* at the safe point (H2) of every pass while the fight runs */
 static void rgs_step(Ctx *c) {
     double t = now_ms();
+    g_rgp_main = GetCurrentThreadId(); g_rgp_seg = 1; if (g_rgs_prof == 3 && g_rg_ready) rgs_samp_start();
     if (g_rgs_pass_t0 > 0 && g_rg_ready) {                /* the pass that just ended: real (0) or re-run (1), without the capture / load */
         int kd = g_ra_phase == 2; double d = t - g_rgs_pass_t0;
+        if (kd) { int l = g_rgs_left <= 1; g_rgs_pl[l] += d; g_rgs_npl[l]++; if (g_rgs_nplv[l] < RG_NST / 4) g_rgs_plv[l][g_rgs_nplv[l]++] = d; }
         g_rgs_pass[kd] += d; g_rgs_npass[kd]++; if (g_rgs_pass_nv[kd] < RG_NST / 4) g_rgs_pass_v[kd][g_rgs_pass_nv[kd]++] = d;
     }
     if (g_rgs_polls_cur > 1) g_rgs_multi++;
@@ -421,7 +442,7 @@ static RgsLite g_rgl_h[] = {
     {0x710356d7a0ull, 64, 0},
 };
 #define RGL_N ((int)(sizeof g_rgl_h / sizeof g_rgl_h[0]))
-static int g_rgs_lite, g_rgs_prof; static uint64_t g_rgl_lo, g_rgl_hi;
+static int g_rgs_lite; static uint64_t g_rgl_lo, g_rgl_hi;
 static void rgs_lite_hook(Ctx *c, void *user) {
     RgsLite *h = user; uint64_t lr = c->x[30];
     int inloop = lr >= g_rgl_lo && lr < g_rgl_hi, kd = g_ra_phase == 2;
@@ -429,8 +450,163 @@ static void rgs_lite_hook(Ctx *c, void *user) {
     if (!g_rgs_prof || !inloop) { h->orig(c); return; }
     double t = now_ms(); h->orig(c); h->ms[kd] += now_ms() - t; h->n[kd]++;
 }
+/* ---- SSBU_RB_SIM_PROF=2 (R2 round 3): where the logic step's time goes. The game's task tree walker FUN 0x7103724a80
+ * (main_loop calls it at 0x710374c624 per sim step; it calls node->vt[0x28], the children through vt[0x28] of the child
+ * container with a callback that re-enters the walker, then node->vt[0x30]) is timed per node class (vtable), exclusive of
+ * its children, on the main thread; the job-counter waits by return address; the job runner FUN 0x7103548240 per job
+ * (worker CPU time, keyed by the job object's vtable). Real and re-run passes apart. */
+#define RGP_N 4096
+typedef struct { uint64_t key; long long n[2]; double incl[2], excl[2]; int dmin; } RgpE;
+static RgpE g_rgp[RGP_N], g_rgpj[RGP_N], g_rgpw[64]; static SRWLOCK g_rgpj_lock = SRWLOCK_INIT;
+static ImportFn g_rgp_orig_tree, g_rgp_orig_run, g_rgp_orig_x[8]; static int g_rgp_depth; static double g_rgp_child[256];
+static RgpE *rgp_slot(RgpE *t, int cap, uint64_t key) {
+    unsigned h = (unsigned)((key * 0x9e3779b97f4a7c15ull) >> 52) % (unsigned)cap;
+    for (int i = 0; i < cap; i++) { RgpE *e = &t[(h + (unsigned)i) % (unsigned)cap]; if (e->key == key) return e; if (!e->key) { e->key = key; e->dmin = 999; return e; } }
+    return NULL;
+}
+static void rgp_tree(Ctx *c, void *user) {
+    (void)user;
+    if (!g_rg_ready || GetCurrentThreadId() != g_rgp_main || g_rgp_depth >= 255) { g_rgp_orig_tree(c); return; }
+    uint64_t node = c->x[0], vt = node ? rd64(node) : 0, lr = c->x[30]; int kd = g_ra_phase == 2, d = g_rgp_depth;
+    g_rgp_child[d + 1] = 0; g_rgp_depth++;
+    double t0 = now_ms(); g_rgp_orig_tree(c); double dt = now_ms() - t0;
+    g_rgp_depth--;
+    RgpE *e = rgp_slot(g_rgp, RGP_N, vt ? vt : 1);
+    if (e) { e->n[kd]++; e->incl[kd] += dt; e->excl[kd] += dt - g_rgp_child[d + 1]; if (d < e->dmin) e->dmin = d; }
+    g_rgp_child[d] += dt;
+    if (d == 0) { RgpE *w = rgp_slot(g_rgpw, 64, lr | (1ull << 62)); if (w) { w->n[kd]++; w->incl[kd] += dt; } }
+}
+static void rgp_run(Ctx *c, void *user) {          /* the job runner (task workers): x0 = the job's node */
+    (void)user;
+    if (!g_rg_ready) { g_rgp_orig_run(c); return; }
+    uint64_t node = c->x[0], vt = node ? rd64(node - 8) : 0; int kd = g_ra_phase == 2;
+    double t0 = now_ms(); g_rgp_orig_run(c); double dt = now_ms() - t0;
+    AcquireSRWLockExclusive(&g_rgpj_lock);
+    RgpE *e = rgp_slot(g_rgpj, RGP_N, vt ? vt : 1); if (e) { e->n[kd]++; e->incl[kd] += dt; }
+    ReleaseSRWLockExclusive(&g_rgpj_lock);
+}
+/* a few single functions of the logic step, timed when called on main: poll, dispatch, the EffectManager update */
+#define RGP_NX 4
+static uint64_t g_rgp_xa[RGP_NX];                        /* (the running build's addresses, set by rgp_init) */
+static void rgp_x(Ctx *c, void *user) {
+    int i = (int)(intptr_t)user; int kd = g_ra_phase == 2;
+    if (!g_rg_ready || GetCurrentThreadId() != g_rgp_main) { g_rgp_orig_x[i](c); return; }
+    double t0 = now_ms(); g_rgp_orig_x[i](c); double dt = now_ms() - t0;
+    RgpE *w = rgp_slot(g_rgpw, 64, g_rgp_xa[i] | (2ull << 62)); if (w) { w->n[kd]++; w->incl[kd] += dt; }
+}
+static void rgp_wait_note(uint64_t lr, double dt) {      /* from ra_kick: a job-counter wait on main */
+    if (g_rgs_prof < 2 || !g_rg_ready || GetCurrentThreadId() != g_rgp_main) return;
+    RgpE *w = rgp_slot(g_rgpw, 64, lr | (3ull << 62)); if (w) { w->n[g_ra_phase == 2]++; w->incl[g_ra_phase == 2] += dt; }
+}
+static void rgp_init(void) {
+    g_rgp_xa[0] = GA(0x71036676e0ull); g_rgp_xa[1] = GA(0x710375ea70ull); g_rgp_xa[2] = GA(0x710355b540ull); g_rgp_xa[3] = GA(0x7103569c70ull);
+    int a = hook_install(GA(0x7103724a80ull), rgp_tree, NULL, &g_rgp_orig_tree), b = hook_install(GA(0x7103548240ull), rgp_run, NULL, &g_rgp_orig_run), x = 0;
+    for (int i = 0; i < RGP_NX; i++) x += hook_install(g_rgp_xa[i], rgp_x, (void *)(intptr_t)i, &g_rgp_orig_x[i]);
+    LOG("r1: RB SIM profile 2: task tree walker %s, job runner %s, %d of %d single functions\n", a ? "hooked" : "FAILED", b ? "hooked" : "FAILED", x, RGP_NX);
+}
+static int rgp_cmp(const void *a, const void *b) { const RgpE *x = a, *y = b; double p = x->excl[0] + x->incl[0] * 1e-9, q = y->excl[0] + y->incl[0] * 1e-9; return p < q ? 1 : p > q ? -1 : 0; }
+static int rgp_cmpi(const void *a, const void *b) { const RgpE *x = a, *y = b; return x->incl[0] < y->incl[0] ? 1 : x->incl[0] > y->incl[0] ? -1 : 0; }
+/* ---- SSBU_RB_SIM_PROF=3: a SAMPLING profile of the main thread during the fight (one helper thread suspends main every
+ * ~100 us, walks its host stack with the x64 unwind data and maps every frame to the lifted guest function it is in,
+ * guest_function_of). Per segment of the pass (1 = safe point -> poll, 2 = poll -> frame end = the logic step, 3 = frame
+ * end -> safe point) and pass kind (real / re-run): self and inclusive sample counts per guest function. Test only. */
+uint64_t guest_function_of(uint64_t rip);
+volatile int g_rgp_seg;                                     /* set by r1_poll / r1_frame_end / rgs_step */
+#define RGS_SN 65536
+typedef struct { uint64_t fn; long long self[2][6], incl[2][6]; } RgsS;
+static RgsS g_rgss[RGS_SN]; static long long g_rgss_tot[2][6], g_rgss_host[2][6]; static HANDLE g_rgss_main; static volatile int g_rgss_run;
+static RgsS *rgss_slot(uint64_t fn) {
+    unsigned h = (unsigned)((fn * 0x9e3779b97f4a7c15ull) >> 48) % RGS_SN;
+    for (int i = 0; i < 64; i++) { RgsS *e = &g_rgss[(h + (unsigned)i) % RGS_SN]; if (e->fn == fn) return e; if (!e->fn) { e->fn = fn; return e; } }
+    return NULL;
+}
+static DWORD WINAPI rgss_thread(void *p) {
+    (void)p; uint64_t fr[64]; int nf;
+    double next = now_ms();
+    for (;;) {
+        while (now_ms() < next) YieldProcessor();
+        next += 0.1;
+        int seg = g_rgp_seg, kd = g_ra_phase == 2;
+        if (kd && g_rgs_left <= 1 && seg < 4) continue;              /* (the last re-run pass runs everything: not counted) */
+        if (!g_rg_ready || !g_rgss_main || seg < 1 || seg > 5) { if (now_ms() > next + 5) next = now_ms(); continue; }
+        if (SuspendThread(g_rgss_main) == (DWORD)-1) continue;
+        CONTEXT x; memset(&x, 0, sizeof x); x.ContextFlags = CONTEXT_FULL; nf = 0;
+        if (GetThreadContext(g_rgss_main, &x)) {
+            for (int d = 0; d < 64 && nf < 64; d++) {
+                DWORD64 base = 0; PRUNTIME_FUNCTION f = RtlLookupFunctionEntry(x.Rip, &base, NULL);
+                uint64_t g = guest_function_of(x.Rip);
+                if (g && (!nf || fr[nf - 1] != g)) fr[nf++] = g; else if (!g && d == 0) fr[nf++] = ((uint64_t)x.Rip >> 4 << 4) | (1ull << 63);      /* 1 = host code (imports, hooks); capture / load: the host address */
+                if (!f) break;
+                void *hd; DWORD64 est; RtlVirtualUnwind(UNW_FLAG_NHANDLER, base, x.Rip, f, &x, &hd, &est, NULL);
+                if (!x.Rip) break;
+            }
+        }
+        ResumeThread(g_rgss_main);
+        if (!nf) continue;
+        g_rgss_tot[kd][seg]++;
+        RgsS *e = rgss_slot(fr[0]); if (e) e->self[kd][seg]++;
+        if (fr[0] == 1 || (fr[0] >> 63)) g_rgss_host[kd][seg]++;
+        for (int i = 0; i < nf; i++) { int dup = 0; for (int j = 0; j < i; j++) if (fr[j] == fr[i]) dup = 1; if (dup) continue; RgsS *q = rgss_slot(fr[i]); if (q) q->incl[kd][seg]++; }
+    }
+    return 0;
+}
+static void rgs_samp_start(void) {
+    if (g_rgss_run || g_rgs_prof != 3) return;
+    g_rgss_run = 1;
+    DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &g_rgss_main, 0, FALSE, DUPLICATE_SAME_ACCESS);
+    CloseHandle(CreateThread(NULL, 0, rgss_thread, NULL, 0, NULL));
+    LOG("r1: RB PROF 3: sampling the main thread every 0.1 ms during the fight\n");
+}
+static int g_rgss_k[3];
+static int rgss_cmp(const void *a, const void *b) {
+    const RgsS *x = a, *y = b; int k = g_rgss_k[0];
+    int sg = g_rgss_k[2]; long long p = g_rgss_k[1] ? x->incl[k][sg] : x->self[k][sg], q = g_rgss_k[1] ? y->incl[k][sg] : y->self[k][sg];
+    return p < q ? 1 : p > q ? -1 : 0;
+}
+static RgsS g_rgss_c[RGS_SN];
+static void rgs_samp_report(void) {
+    if (!g_rgss_run) return;
+    long long np = g_rgs_npass[0] ? g_rgs_npass[0] : 1, nr = g_rgs_npl[0] ? g_rgs_npl[0] : 1;      /* re-run = the skipped passes only */
+    LOG("r1: RB PROF 3 samples (0.1 ms each) real / re-run: start->poll %lld / %lld, logic %lld / %lld, frame end->safe point %lld / %lld; host code in the logic %lld / %lld; passes %lld / %lld\n",
+        g_rgss_tot[0][1], g_rgss_tot[1][1], g_rgss_tot[0][2], g_rgss_tot[1][2], g_rgss_tot[0][3], g_rgss_tot[1][3], g_rgss_host[0][2], g_rgss_host[1][2], np, nr);
+    LOG("r1: RB PROF 3 samples in captures %lld / %lld, loads %lld / %lld (host code %lld / %lld)\n", g_rgss_tot[0][4], g_rgss_tot[1][4], g_rgss_tot[0][5], g_rgss_tot[1][5], g_rgss_host[0][4] + g_rgss_host[0][5], g_rgss_host[1][4] + g_rgss_host[1][5]);
+    memcpy(g_rgss_c, g_rgss, sizeof g_rgss);
+    static const char *sgn[6] = {"", "start->poll", "logic", "frame end->safe point", "capture", "load"};
+    for (int sg = 1; sg <= 5; sg++) for (int kd = 0; kd < 2; kd++) for (int inc = 1; inc >= 0; inc--) {
+        if (sg >= 4 && kd == 1) continue;                    /* captures / loads: one list (real + re-run passes together) */
+        if (sg != 2 && kd == 0 && sg < 4) continue;          /* start->poll / tail: the re-run passes only */
+        g_rgss_k[0] = kd; g_rgss_k[1] = inc; g_rgss_k[2] = sg;
+        if (sg >= 4) for (int i = 0; i < RGS_SN; i++) { g_rgss_c[i].self[0][sg] += g_rgss[i].self[1][sg]; g_rgss_c[i].incl[0][sg] += g_rgss[i].incl[1][sg]; }
+        qsort(g_rgss_c, RGS_SN, sizeof *g_rgss_c, rgss_cmp);
+        long long tot = sg >= 4 ? g_rgss_tot[0][sg] + g_rgss_tot[1][sg] : g_rgss_tot[kd][sg]; long long div = sg >= 4 ? (g_rg_caps + g_rg_loads ? (sg == 4 ? g_rg_caps : g_rg_loads) : 1) : (kd ? nr : np);
+        for (int i = 0; i < (sg == 2 ? 80 : 40); i++) {
+            RgsS *e = &g_rgss_c[i]; long long v = inc ? e->incl[kd][sg] : e->self[kd][sg]; if (!v) break;
+            LOG("r1: RB PROF 3 %s %s %s %llx: %.4f ms per %s (%lld of %lld samples); self %.4f\n", kd ? "re-run" : "real", sgn[sg], inc ? "incl" : "self", (unsigned long long)e->fn,
+                v * 0.1 / div, sg == 4 ? "capture" : sg == 5 ? "load" : "pass", v, tot, e->self[kd][sg] * 0.1 / div);
+        }
+        memcpy(g_rgss_c, g_rgss, sizeof g_rgss);
+    }
+}
+static RgpE g_rgp_s[RGP_N];
+static void rgp_report(void) {
+    if (g_rgs_prof < 2) return;
+    rgs_samp_report();
+    if (g_rgs_prof != 2) return;
+    long long np = g_rgs_npass[0] ? g_rgs_npass[0] : 1, nr = g_rgs_npass[1] ? g_rgs_npass[1] : 1;
+    LOG("r1: RB PROF per pass (real %lld, re-run %lld): ms per pass real / re-run\n", g_rgs_npass[0], g_rgs_npass[1]);
+    memcpy(g_rgp_s, g_rgpw, sizeof g_rgpw); qsort(g_rgp_s, 64, sizeof *g_rgp_s, rgp_cmpi);
+    for (int i = 0; i < 64; i++) if (g_rgp_s[i].key) { uint64_t k = g_rgp_s[i].key; int ty = (int)(k >> 62); k &= ~(3ull << 62);
+        LOG("r1: RB PROF %s %llx: calls %lld / %lld, %.4f / %.4f ms per pass\n", ty == 1 ? "tree walk from" : ty == 2 ? "function" : "wait at", (unsigned long long)k, g_rgp_s[i].n[0], g_rgp_s[i].n[1], g_rgp_s[i].incl[0] / np, g_rgp_s[i].incl[1] / nr); }
+    memcpy(g_rgp_s, g_rgp, sizeof g_rgp); qsort(g_rgp_s, RGP_N, sizeof *g_rgp_s, rgp_cmp);
+    for (int i = 0; i < RGP_N && i < 80; i++) if (g_rgp_s[i].key) LOG("r1: RB PROF node vt %llx depth %d: calls/pass %.2f / %.2f, exclusive %.4f / %.4f ms per pass, inclusive %.4f / %.4f\n",
+        (unsigned long long)g_rgp_s[i].key, g_rgp_s[i].dmin, g_rgp_s[i].n[0] / (double)np, g_rgp_s[i].n[1] / (double)nr, g_rgp_s[i].excl[0] / np, g_rgp_s[i].excl[1] / nr, g_rgp_s[i].incl[0] / np, g_rgp_s[i].incl[1] / nr);
+    AcquireSRWLockExclusive(&g_rgpj_lock); memcpy(g_rgp_s, g_rgpj, sizeof g_rgpj); ReleaseSRWLockExclusive(&g_rgpj_lock); qsort(g_rgp_s, RGP_N, sizeof *g_rgp_s, rgp_cmpi);
+    for (int i = 0; i < RGP_N && i < 60; i++) if (g_rgp_s[i].key) LOG("r1: RB PROF job vt %llx: jobs/pass %.2f / %.2f, worker ms per pass %.4f / %.4f\n",
+        (unsigned long long)g_rgp_s[i].key, g_rgp_s[i].n[0] / (double)np, g_rgp_s[i].n[1] / (double)nr, g_rgp_s[i].incl[0] / np, g_rgp_s[i].incl[1] / nr);
+}
 static void rgs_lite_init(void) {
-    const char *e = getenv("SSBU_RB_SIM_LITE"); g_rgs_lite = e ? atoi(e) : 0; g_rgs_prof = getenv("SSBU_RB_SIM_PROF") != NULL;
+    const char *e = getenv("SSBU_RB_SIM_LITE"); g_rgs_lite = e ? atoi(e) : 0; g_rgs_prof = getenv("SSBU_RB_SIM_PROF") ? atoi(getenv("SSBU_RB_SIM_PROF")) : 0;
+    if (g_rgs_prof == 2) rgp_init();
     if (!g_rgs_lite && !g_rgs_prof) return;
     g_rgl_lo = GA(0x7103747270ull); g_rgl_hi = GA(0x710374e000ull);
     int ok = 0;
@@ -455,9 +631,10 @@ static uint64_t rgv_hash(const uint8_t *p) {
     for (int i = 0; i < PG / 8; i++) h = (h ^ q[i]) * 1099511628211ull + (h >> 29);
     return h;
 }
+static void rgvd_keep(size_t n, const uint8_t *src); static void rgvd_show(size_t n, uint32_t id, const uint8_t *now);
 static uint8_t *rg_src_v(uint32_t id, uint32_t v) { uint32_t s = g_rg_idx[id]; g_rg_idx[id] = v; uint8_t *r = rg_src(id); g_rg_idx[id] = s; return r; }
 static void rgv_before(int si, long long target) {        /* in r1_ring_load, before the undo logs are applied */
-    if (g_rgv_on < 0) g_rgv_on = getenv("SSBU_RB_SIM_VERIFY") != NULL;
+    if (g_rgv_on < 0) g_rgv_on = getenv("SSBU_RB_SIM_VERIFY") ? (atoi(getenv("SSBU_RB_SIM_VERIFY")) > 1 ? 2 : 1) : 0;
     if (!g_rgv_on) return;
     size_t tot = g_rg_n1 + g_rg_n2 + g_rg_nx;
     if (!g_rgv_in) { g_rgv_in = calloc(tot, 1); g_rgv_id = malloc((size_t)RGV_MAX * 4); g_rgv_h = malloc((size_t)RGV_MAX * 8); }
@@ -466,10 +643,28 @@ static void rgv_before(int si, long long target) {        /* in r1_ring_load, be
         RgSlot *s = rg_slot(i);
         for (size_t n = 0; n < s->nent; n++) {
             uint32_t id = s->ent[2 * n]; if (g_rgv_in[id] || g_rgv_n >= RGV_MAX / 2) continue;
-            g_rgv_in[id] = 1; g_rgv_id[g_rgv_n] = id; g_rgv_h[g_rgv_n] = rgv_hash(rg_src(id)); g_rgv_n++;
+            g_rgv_in[id] = 1; g_rgv_id[g_rgv_n] = id; g_rgv_h[g_rgv_n] = rgv_hash(rg_src(id)); rgvd_keep(g_rgv_n, rg_src(id)); g_rgv_n++;
         }
     }
     g_rgv_target = target; g_rgv_from = rg_slot(si)->frame;
+}
+/* (R2 round 3) SSBU_RB_SIM_VERIFY=2: for the first 12 rollbacks the original bytes of the compared pages are kept and every
+ * differing page is printed: its address (where()), the number of differing 8-byte words, the first 4 (offset, original, re-run). */
+#define RGVD_MAX 8192
+static uint8_t *g_rgvd; static long long g_rgvd_lines;
+static void rgvd_keep(size_t n, const uint8_t *src) {
+    if (g_rgv_on < 2 || g_rgv_runs >= 12 || n >= RGVD_MAX) return;
+    if (!g_rgvd) g_rgvd = VirtualAlloc(NULL, (size_t)RGVD_MAX * PG, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    if (!g_rgvd) return;
+    if (!src) memset(g_rgvd + n * PG, 0, PG); else if (src == (uint8_t *)1) memset(g_rgvd + n * PG, 0xdd, PG); else memcpy(g_rgvd + n * PG, src, PG);
+}
+static void rgvd_show(size_t n, uint32_t id, const uint8_t *now) {
+    if (g_rgv_on < 2 || g_rgv_runs >= 12 || n >= RGVD_MAX || !g_rgvd || g_rgvd_lines > 6000) return;
+    static uint8_t z[PG]; if (!now) now = z; if (now == (uint8_t *)1) return;
+    const uint64_t *a = (const uint64_t *)(g_rgvd + n * PG), *b = (const uint64_t *)now; int nd = 0; char t[400]; int o = 0; t[0] = 0;
+    for (int i = 0; i < PG / 8; i++) if (a[i] != b[i]) { nd++; if (nd <= 4 && o < 360) o += snprintf(t + o, sizeof t - o, " +%03x: %llx -> %llx", i * 8, (unsigned long long)a[i], (unsigned long long)b[i]); }
+    g_rgvd_lines++;
+    LOG("r1: RB VERIFY page %s (%p) rollback %lld: %d words differ;%s\n", where(rg_addr(id)), (void *)rg_addr(id), g_rgv_runs, nd, t);
 }
 static int rgv_kind(uint32_t id) { return id < g_rg_n1 ? 0 : id < g_rg_n1 + g_rg_n2 ? 1 : 2; }
 /* differing pages by 64 KB block (where() name of the block), over every rollback: which memory is not reproduced */
@@ -493,7 +688,7 @@ static void rgv_after(void) {                               /* right after the c
     long long d[3] = {0, 0, 0}, pages = (long long)g_rgv_n; char first[400]; int o = 0; first[0] = 0;
     for (size_t n = 0; n < g_rgv_n; n++) {
         uint32_t id = g_rgv_id[n];
-        if (rgv_hash(rg_src(id)) != g_rgv_h[n]) { int k = rgv_kind(id); d[k]++; rgv_note(id); if (o < 330 && d[k] <= 3) o += snprintf(first + o, sizeof first - o, " %s", where(rg_addr(id))); }
+        if (rgv_hash(rg_src(id)) != g_rgv_h[n]) { int k = rgv_kind(id); d[k]++; rgv_note(id); rgvd_show(n, id, rg_src(id)); if (o < 330 && d[k] <= 3) o += snprintf(first + o, sizeof first - o, " %s", where(rg_addr(id))); }
     }
     size_t extra = 0;
     for (int i = 0; i < g_rg_count; i++) {                  /* pages the re-run wrote that the original window did not */
@@ -546,10 +741,20 @@ static void rgs_report(void) {
         if (g_rgv_on > 0) rgv_blocks_report();
         if (g_rgv_on > 0) LOG("r1: RB VERIFY: %lld rollbacks checked, %lld with window pages differing; pages compared %lld; differ: window 1 %lld, window 2 %lld, extras %lld\n", g_rgv_runs, g_rgv_bad_runs, g_rgv_pages, g_rgv_diff[0], g_rgv_diff[1], g_rgv_diff[2]);
         rgs_lite_report();
+        if (g_rgpg_on > 0) {
+            static struct { uint64_t blk; long long n[3]; } c[RGPG_N]; memcpy(c, g_rgpg, sizeof c);
+            for (int i = 0; i < RGPG_N; i++) for (int j = i + 1; j < RGPG_N; j++) if (c[j].n[0] > c[i].n[0]) { uint64_t b = c[i].blk; long long n0 = c[i].n[0], n1 = c[i].n[1], n2 = c[i].n[2]; c[i] = c[j]; c[j].blk = b; c[j].n[0] = n0; c[j].n[1] = n1; c[j].n[2] = n2; }
+            double t0 = 0, t1 = 0; for (int i = 0; i < RGPG_N; i++) { t0 += c[i].n[0]; t1 += c[i].n[1]; }
+            LOG("r1: RB PAGES captures real %lld / re-run skipped %lld / last re-run %lld; pages per capture real %.0f, re-run skipped %.0f\n", g_rgpg_caps[0], g_rgpg_caps[1], g_rgpg_caps[2], t0 / (g_rgpg_caps[0] ? g_rgpg_caps[0] : 1), t1 / (g_rgpg_caps[1] ? g_rgpg_caps[1] : 1));
+            for (int i = 0; i < 60 && c[i].n[0]; i++) LOG("r1: RB PAGES block %s (1 MB): per capture real %.1f, re-run skipped %.1f, last re-run %.1f\n", where((uint8_t *)(uintptr_t)(c[i].blk << 20)),
+                c[i].n[0] / (double)(g_rgpg_caps[0] ? g_rgpg_caps[0] : 1), c[i].n[1] / (double)(g_rgpg_caps[1] ? g_rgpg_caps[1] : 1), c[i].n[2] / (double)(g_rgpg_caps[2] ? g_rgpg_caps[2] : 1));
+        }
+        rgp_report();
         LOG("r1: RB SIM: %lld rollbacks (k: 1 %lld, 2 %lld, 3 %lld, 4 %lld, 5 %lld, 6 %lld, 7 %lld), captures failed %lld, re-run pads missing %lld, passes with more than one poll %lld\n",
             g_rgs_done, g_rgs_ksum[1], g_rgs_ksum[2], g_rgs_ksum[3], g_rgs_ksum[4], g_rgs_ksum[5], g_rgs_ksum[6], g_rgs_ksum[7], g_rgs_nocap, g_rgs_padmiss, g_rgs_multi);
         LOG("r1: RB SIM passes (safe point to safe point, without the capture / load): real %lld mean %.3f median %.3f ms; re-run %lld mean %.3f median %.3f ms (kick skip mask in re-run passes but the last: %d)\n",
             g_rgs_npass[0], g_rgs_npass[0] ? g_rgs_pass[0] / g_rgs_npass[0] : 0, rg_pct(g_rgs_pass_v[0], g_rgs_pass_nv[0], 50), g_rgs_npass[1], g_rgs_npass[1] ? g_rgs_pass[1] / g_rgs_npass[1] : 0, rg_pct(g_rgs_pass_v[1], g_rgs_pass_nv[1], 50), g_rgs_skip);
+        LOG("r1: RB SIM re-run passes but the last (the replayed frames a rollback pays for): %lld mean %.3f median %.3f ms; last re-run passes %lld mean %.3f median %.3f ms\n", g_rgs_npl[0], g_rgs_npl[0] ? g_rgs_pl[0] / g_rgs_npl[0] : 0, rg_pct(g_rgs_plv[0], g_rgs_nplv[0], 50), g_rgs_npl[1], g_rgs_npl[1] ? g_rgs_pl[1] / g_rgs_npl[1] : 0, rg_pct(g_rgs_plv[1], g_rgs_nplv[1], 50));
         for (int k = 0; k < 3; k += 2) if (g_rapn[k]) LOG("r1: RB SIM %s passes (%lld), means ms: pass start -> poll %.3f, poll -> frame end %.3f, frame end call %.3f, frame end -> safe point %.3f\n",
             k == 0 ? "real" : "re-run", g_rapn[k], g_rap[k][0] / g_rapn[k], g_rap[k][1] / g_rapn[k], g_rap[k][2] / g_rapn[k], g_rap[k][3] / g_rapn[k]);
     }

@@ -56,7 +56,7 @@ static long long g_pass_frames;
 
 /* run-ahead (round 5): SSBU_RUNAHEAD=1 (or graphics.ini `runahead = on`, gfx_options.c); default OFF.
  * R2 (r1_ring.c): SSBU_RB_SIM (the snapshot ring's rollback simulation) uses the same machinery; default OFF. */
-static int rgs_wanted(void); static void rgs_step(Ctx *c); static int rgs_poll(void); static void rgs_pad(uint64_t *b, int *lx, int *ly, int *rx, int *ry); static int rgs_skip_now(void); static void rgs_report(void);
+static int rgs_wanted(void); static void rgs_step(Ctx *c); static int rgs_poll(void); static void rgs_pad(uint64_t *b, int *lx, int *ly, int *rx, int *ry); static int rgs_skip_now(void); static void rgs_report(void); static void rgp_wait_note(uint64_t lr, double dt);
 static int ra_wanted(void) {
     static int w = -1;
     if (w < 0) { const char *e = getenv("SSBU_RUNAHEAD"); int gfx_runahead(void); w = rgs_wanted() || (e ? (e[0] && e[0] != '0') : gfx_runahead()); }
@@ -340,7 +340,8 @@ static int fib_host(void *fiber, uint64_t *rsp, uint64_t *base) {
 }
 static void fib_cb(uint64_t key, Ctx *c, uint64_t stack, uint64_t size, void *fiber) {
     DWORD tid = os_r1_fiber_tid(key);
-    if (getenv("SSBU_R1_FIBLOG")) LOG("r1:   [%s] fiber %llx %s tid %lu fn %llx imp %s @%llx sp %llx stack %llx..%llx host %p ctx %p" "\n", g_fib_mode ? "R" : "S", (unsigned long long)key, !c ? "NEVER-RUN" : tid ? "RUNNING" : c->in_import ? "SWITCHED-AWAY" : "FINISHED", (unsigned long)tid, c ? (unsigned long long)c->fn : 0ull, c && c->in_import ? c->in_import : "-", c ? (unsigned long long)c->import_from : 0ull, c ? (unsigned long long)c->x[31] : 0ull, (unsigned long long)stack, (unsigned long long)(stack + size), fiber, (void *)c);
+    static int fiblog = -1; if (fiblog < 0) fiblog = getenv("SSBU_R1_FIBLOG") != NULL;
+    if (fiblog) LOG("r1:   [%s] fiber %llx %s tid %lu fn %llx imp %s @%llx sp %llx stack %llx..%llx host %p ctx %p" "\n", g_fib_mode ? "R" : "S", (unsigned long long)key, !c ? "NEVER-RUN" : tid ? "RUNNING" : c->in_import ? "SWITCHED-AWAY" : "FINISHED", (unsigned long)tid, c ? (unsigned long long)c->fn : 0ull, c && c->in_import ? c->in_import : "-", c ? (unsigned long long)c->import_from : 0ull, c ? (unsigned long long)c->x[31] : 0ull, (unsigned long long)stack, (unsigned long long)(stack + size), fiber, (void *)c);
     if (g_fib_mode == 1) {                                    /* restore: the current host fiber / context of each key */
         if (g_ncur < 2048) { g_cur[g_ncur].key = key; g_cur[g_ncur].fiber = fiber; g_cur[g_ncur].c = c; g_cur[g_ncur].tid = tid; g_ncur++; }
         return;
@@ -880,11 +881,12 @@ static int g_ncp = -1;
 static HANDLE g_cp_go[8], g_cp_done[8];
 static void cp_add(uint8_t *d, const uint8_t *s) { if (g_ncj >= g_cjcap) { g_cjcap = g_cjcap ? g_cjcap * 2 : 65536; g_cj = realloc(g_cj, g_cjcap * sizeof *g_cj); } g_cj[g_ncj].d = d; g_cj[g_ncj].s = s; g_ncj++; }
 static void cp_add_range(uint8_t *d, const uint8_t *s, size_t n) { for (size_t o = 0; o < n; o += PG) cp_add(d + o, s + o); }
-static void cp_part(int k) { size_t a = g_ncj * (size_t)k / (size_t)(g_ncp + 1), b = g_ncj * (size_t)(k + 1) / (size_t)(g_ncp + 1); for (size_t i = a; i < b; i++) memcpy(g_cj[i].d, g_cj[i].s, PG); }
+static uint8_t *g_cp_cmp;                             /* (R2 round 3) set: the queued jobs are COMPARED (g_cp_cmp[i] = 1 if they differ), not copied */
+static void cp_part(int k) { size_t a = g_ncj * (size_t)k / (size_t)(g_ncp + 1), b = g_ncj * (size_t)(k + 1) / (size_t)(g_ncp + 1); if (g_cp_cmp) { for (size_t i = a; i < b; i++) g_cp_cmp[i] = memcmp(g_cj[i].d, g_cj[i].s, PG) != 0; } else for (size_t i = a; i < b; i++) memcpy(g_cj[i].d, g_cj[i].s, PG); }
 static DWORD WINAPI cp_thread(void *p) { int k = (int)(intptr_t)p; for (;;) { WaitForSingleObject(g_cp_go[k], INFINITE); cp_part(k + 1); SetEvent(g_cp_done[k]); } return 0; }
 static void cp_init(void) {
     if (g_ncp >= 0) return;
-    const char *e = getenv("SSBU_RUNAHEAD_COPY_THREADS"); g_ncp = e ? atoi(e) : 2; if (g_ncp > 8) g_ncp = 8; if (g_ncp < 0) g_ncp = 0;
+    const char *e = getenv("SSBU_RUNAHEAD_COPY_THREADS"); g_ncp = e ? atoi(e) : rgs_wanted() ? 6 : 2;      /* (R2 round 3: the ring, 6) */ if (g_ncp > 8) g_ncp = 8; if (g_ncp < 0) g_ncp = 0;
     SYSTEM_INFO si; GetSystemInfo(&si); if (g_ncp > (int)si.dwNumberOfProcessors - 2) g_ncp = (int)si.dwNumberOfProcessors > 2 ? (int)si.dwNumberOfProcessors - 2 : 0;
     for (int k = 0; k < g_ncp; k++) { g_cp_go[k] = CreateEventA(NULL, FALSE, FALSE, NULL); g_cp_done[k] = CreateEventA(NULL, FALSE, FALSE, NULL); HANDLE t = CreateThread(NULL, 0, cp_thread, (void *)(intptr_t)k, 0, NULL); SetThreadPriority(t, THREAD_PRIORITY_HIGHEST); CloseHandle(t); }
 }
@@ -1183,16 +1185,26 @@ static int ra_hold_save(void) {
         Th *t = &g_th[g_nth++]; memset(t, 0, sizeof *t); t->h = h; t->c = tc; t->name = nm ? nm : "?";
     }
     g_ninfo = 0; while (guest_thread_info(g_ninfo, &tc, &nm, &h)) g_ninfo++;
+    static int all_first = -1; if (all_first < 0) { const char *e = getenv("SSBU_RB_HOLD_ALL"); all_first = rgs_wanted() && e && atoi(e) != 0; }      /* opt-in: saved ~0.07 ms only; rb2f1 crashed with it (cause not shown) */
+    static uint8_t pre[256];                                /* (R2 round 3, ring only) every thread suspended first, then checked: the kernel delivers the suspends together */
+    if (all_first) for (int i = 0; i < g_nth; i++) pre[i] = !ra_free(g_th[i].name) && SuspendThread(g_th[i].h) != (DWORD)-1;
     for (int i = 0; i < g_nth; i++) {
         Th *t = &g_th[i];
         if (ra_free(t->name)) continue;
         double t0 = now_ms();
+        if (all_first && pre[i]) {
+            pre[i] = 0;
+            if (waiting_import(t->c->in_import) && th_blocked(t->h)) { t->held = 1; t->parked = 1; t->from = t->c->import_from; t->imp = t->c->in_import; t->regs = *t->c; continue; }
+            ResumeThread(t->h);
+            for (int j = i + 1; j < g_nth; j++) if (pre[j]) { ResumeThread(g_th[j].h); pre[j] = 0; }      /* a thread not at a wait: the others go too (it may wait for one of them) */
+        }
         for (;;) {
             if (SuspendThread(t->h) == (DWORD)-1) break;
             if (waiting_import(t->c->in_import) && th_blocked(t->h)) { t->held = 1; t->parked = 1; break; }
             ResumeThread(t->h);
             if (now_ms() - t0 > g_ra_park_ms) {
                 for (int j = 0; j < i; j++) if (g_th[j].held) { ResumeThread(g_th[j].h); g_th[j].held = 0; }
+                if (all_first) for (int j = i + 1; j < g_nth; j++) if (pre[j]) { ResumeThread(g_th[j].h); pre[j] = 0; }
                 g_ra_busy = t->name;
                 if (strstr(t->name, "TaskWorker")) g_ra_skip_why[0]++; else if (ra_audio(t->name)) g_ra_skip_why[1]++; else g_ra_skip_why[2]++;
                 return 0;
@@ -1375,7 +1387,9 @@ static ImportFn g_orig_kick2;
 static void ra_kick(Ctx *c, void *user) {            /* hook on FUN 0x710354c720 (wait on a job counter): a point at its RETURN */
     (void)user;
     uint64_t lr = c->x[30];
+    double tw = now_ms();
     g_orig_kick(c);
+    rgp_wait_note(lr, now_ms() - tw);
     if (lr == g_ra_site) ra_step(c);
 }
 /* The task workers are busy at the save point (the preparation jobs of the kick at 0x71037494f8 run for 10 ms and more),
@@ -1510,6 +1524,7 @@ static void r1_frame_end(Ctx *c, void *user) {
     (void)user;
     uint64_t lr = c->x[30];
     double te = now_ms();
+    { extern volatile int g_rgp_seg; if (g_rgp_seg == 2) g_rgp_seg = 3; }
     int rerun = g_phase == 2;
     g_orig_frame_end(c);         /* (round 2 tried skipping the whole frame end in re-run frames: the game crashed in the first one) */
     if (lr != GA(0x7103747b7cull)) return;
@@ -1551,6 +1566,7 @@ static void r1_frame_end(Ctx *c, void *user) {
 int r1_poll(int ticks) {
     g_ff += ticks;
     g_t_poll = now_ms();
+    { extern volatile int g_rgp_seg; g_rgp_seg = 2; }
     if (g_ra > 0 && rgs_wanted()) return rgs_poll();     /* R2 simulation: a re-run pass's poll does not advance it either */
     if (g_ra > 0) return g_ra_phase == 1;                 /* run-ahead: the speculative pass's poll does not advance the input sequence */
     return g_phase == 2 && g_ipad < g_npad;
