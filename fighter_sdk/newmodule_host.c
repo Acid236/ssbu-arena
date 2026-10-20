@@ -639,16 +639,20 @@ static void nm_h_portrait(Ctx *c, void *user) {
         char t[320]; snprintf(t, sizeof t, "ui_chara_%s", nm->f.name);
         if ((id & 0xffffffffffULL) != nm_hash40(t)) continue;
         uint64_t got = c->x[0], hd = 0; int found = -1, cc = -1, asked_own = 0; char own[320] = "";
+        /* a DLC donor's pictures are ui/replace_patch/... (Terry: chara_2_dolly_00 is only there, 2026-10-21): both forms */
         for (int ty = 0; ty < 16 && found < 0; ty++)
-            for (int col = 0; col < 16; col++) {
-                snprintf(t, sizeof t, "ui/replace/chara/chara_%d/chara_%d_%s_%02d.bntx", ty, ty, nm->f.donor, col);
+            for (int col = 0; col < 16 && found < 0; col++)
+              for (int patch = 0; patch < 2; patch++) {
+                snprintf(t, sizeof t, "ui/%s/chara/chara_%d/chara_%d_%s_%02d.bntx", patch ? "replace_patch" : "replace", ty, ty, nm->f.donor, col);
                 hd = nm_hash40(t);
-                snprintf(own, sizeof own, "ui/replace/chara/chara_%d/chara_%d_%s_%02d.bntx", ty, ty, nm->f.name, col);
+                snprintf(own, sizeof own, "ui/replace/chara/chara_%d/chara_%d_%s_%02d.bntx", ty, ty, nm->f.name, col);    /* the folder's file */
+                char ask[320]; snprintf(ask, sizeof ask, "ui/%s/chara/chara_%d/chara_%d_%s_%02d.bntx", patch ? "replace_patch" : "replace", ty, ty, nm->f.name, col);
                 /* with a "display_name" the row's name_id is the fighter's own name (nm_h_nameid): the answer then
-                 * already names the fighter's own file, and the DONOR's is the fallback when the folder has none */
+                 * already names the fighter's own file (in the donor's form: replace_patch for a DLC donor), and the
+                 * DONOR's, in the same form, is the fallback when the folder has none */
                 if (hd == (got & 0xffffffffffULL)) { found = ty; cc = col; break; }
-                if (nm_hash40(own) == (got & 0xffffffffffULL)) { found = ty; cc = col; asked_own = 1; break; }
-            }
+                if (nm_hash40(ask) == (got & 0xffffffffffULL)) { found = ty; cc = col; asked_own = 1; break; }
+              }
         int has = 0; uint64_t h = 0;
         if (found >= 0) {
             h = nm_hash40(own);

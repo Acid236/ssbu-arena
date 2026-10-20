@@ -101,6 +101,21 @@ def clone_files(name, donor, out_root, dry=False):
             with open(dst, 'wb') as f:
                 f.write(data)
 
+    # the fighter's pictures (portrait, stock icon, select-screen images): a file of the package keeps its own bytes,
+    # a missing one is the donor's; either way it gets a row, which is what lets the loose-file layer serve it (2026-10-21:
+    # without these rows Waluigi's own HUD portrait was "not in the archive and no donor file: NOT served")
+    for n in range(8):
+        tpl = 'ui/replace/chara/chara_%d/chara_%d_' % (n, n) + '%s_00.bntx'
+        new, old = tpl % name, tpl % donor
+        try:
+            arc.get(old)
+        except Exception:                     # noqa: BLE001  a DLC donor's pictures are under ui/replace_patch/
+            old = old.replace('ui/replace/', 'ui/replace_patch/')
+        own = os.path.join(out_root, new.replace('/', os.sep))
+        if os.path.exists(own):
+            rows.append({'path': new, 'donor': old, 'donor_hash': '0x%x' % cf.hash40(old), 'new_hash': '0x%x' % cf.hash40(new), 'size': os.path.getsize(own)})
+        else:
+            files.append(tpl)
     for p in files:
         new, old = p % name, p % donor
         data = None
