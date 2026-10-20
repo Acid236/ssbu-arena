@@ -4,9 +4,9 @@ name: macOS runtime
 
 on:
   push:
-    paths: ['runtime/**', 'tests/plat_selftest.c', 'tools/lifter/**', 'scripts/macos/**', 'scripts/setup.py', 'scripts/run.py', 'BUILDING_MAC.md', 'play_mac.sh', '.github/workflows/macos-runtime.yml']
+    paths: ['runtime/**', 'fighter_sdk/**', 'tests/plat_selftest.c', 'tools/lifter/**', 'scripts/macos/**', 'scripts/setup.py', 'scripts/run.py', 'BUILDING_MAC.md', 'play_mac.sh', '.github/workflows/macos-runtime.yml']
   pull_request:
-    paths: ['runtime/**', 'tests/plat_selftest.c', 'tools/lifter/**', 'scripts/macos/**', 'scripts/setup.py', 'scripts/run.py', 'BUILDING_MAC.md', 'play_mac.sh', '.github/workflows/macos-runtime.yml']
+    paths: ['runtime/**', 'fighter_sdk/**', 'tests/plat_selftest.c', 'tools/lifter/**', 'scripts/macos/**', 'scripts/setup.py', 'scripts/run.py', 'BUILDING_MAC.md', 'play_mac.sh', '.github/workflows/macos-runtime.yml']
   workflow_dispatch:
 
 jobs:
