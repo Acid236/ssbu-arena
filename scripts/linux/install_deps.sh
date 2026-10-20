@@ -106,6 +106,17 @@ else
     git -c advice.detachedHead=false clone --quiet --depth 1 --branch "$VK_TAG" https://github.com/KhronosGroup/Vulkan-Headers.git "$DEPS/Vulkan-Headers"
 fi
 
+# ---------------------------------------------------------------------------------------------- Dear ImGui (the F1 settings menu)
+IMGUI_TAG=v1.91.9b                 # MIT; the version the Windows build pins (scripts/install.py). Optional: without it no menu
+if [ -f "$DEPS/imgui/imgui.h" ] && [ -f "$DEPS/imgui/imgui.cpp" ]; then
+    say "deps/imgui: present"
+else
+    say "deps/imgui: Dear ImGui $IMGUI_TAG (the in-game settings menu, F1)"
+    rm -rf "$DEPS/imgui"
+    git -c advice.detachedHead=false clone --quiet --depth 1 --branch "$IMGUI_TAG" https://github.com/ocornut/imgui.git "$DEPS/imgui" || \
+        say "WARNING: Dear ImGui could not be fetched: the game builds without the settings menu (F1)"
+fi
+
 # ---------------------------------------------------------------------------------------------- 4. reference data
 if [ -f "$DEPS/suyu/src/core/hle/service/mii/types/raw_data.cpp" ]; then
     say "deps/suyu: present"

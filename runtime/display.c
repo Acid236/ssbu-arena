@@ -462,6 +462,35 @@ static bool SDLCALL close_watch(void *user, SDL_Event *e) {
     }
     return true;
 }
+/* U2, the settings menu (menu.cpp, render thread) asks; the window thread does it (window_mode_service), as WM_APP + 0x51 /
+ * 0x52 on Windows. mode: 0 windowed, 1 borderless over the screen, 2 the desktop's fullscreen (graphics.ini window). */
+static volatile LONG g_mode_req = -1, g_size_req, g_size_w, g_size_h, g_mode_now;
+static int g_win_w, g_win_h;                          /* the windowed size, for the way back from borderless / fullscreen */
+void display_set_window_mode(int mode) { InterlockedExchange(&g_mode_req, mode < 0 ? 0 : mode > 2 ? 2 : mode); }
+void display_set_client_size(int w, int h) { InterlockedExchange(&g_size_w, w); InterlockedExchange(&g_size_h, h); InterlockedExchange(&g_size_req, 1); }
+int display_window_mode(void) { return g_mode_now; }
+static void window_mode_service(SDL_Window *w) {
+    LONG m = InterlockedExchange(&g_mode_req, -1);
+    if (m >= 0) {
+        if (m == 2) { SDL_SetWindowFullscreenMode(w, NULL); SDL_SetWindowFullscreen(w, true); }      /* NULL: the desktop's mode, no mode change */
+        else {
+            SDL_SetWindowFullscreen(w, false);
+            SDL_SetWindowBordered(w, m == 0);
+            SDL_Rect r;
+            if (m == 1 && SDL_GetDisplayBounds(SDL_GetDisplayForWindow(w), &r)) { SDL_SetWindowPosition(w, r.x, r.y); SDL_SetWindowSize(w, r.w, r.h); }
+            else if (m == 0) { SDL_SetWindowSize(w, g_win_w, g_win_h); SDL_SetWindowPosition(w, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED); }
+        }
+        InterlockedExchange(&g_mode_now, m);
+        printf("display: window mode %s (settings menu)\n", m == 2 ? "fullscreen" : m ? "borderless" : "windowed"); fflush(stdout);
+    }
+    if (InterlockedExchange(&g_size_req, 0)) {
+        g_win_w = g_size_w; g_win_h = g_size_h;
+        if (g_mode_now) printf("display: window size %dx%d kept for the windowed mode (settings menu)\n", g_win_w, g_win_h);
+        else { SDL_SetWindowSize(w, g_win_w, g_win_h); printf("display: window client %dx%d (settings menu)\n", g_win_w, g_win_h); }
+        fflush(stdout);
+    }
+}
+void menu_sdl_attach(void *window); void menu_sdl_service(void);      /* menu.cpp (or menu_stub.c): the settings menu's input */
 static DWORD WINAPI window_thread(LPVOID arg) {
     (void)arg;
     SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, "1");
@@ -480,6 +509,8 @@ static DWORD WINAPI window_thread(LPVOID arg) {
     SDL_Window *w = SDL_CreateWindow(g_title, cw, ch, flags);
     if (!w) { printf("display: SDL_CreateWindow failed: %s\n", SDL_GetError()); fflush(stdout); ExitProcess(5); }
     SDL_AddEventWatch(close_watch, NULL);
+    g_win_w = go->width; g_win_h = go->height; g_mode_now = go->window_mode;
+    menu_sdl_attach(w);
     g_hwnd = (HWND)w;
     plat_game_window = (HWND)w;
     InterlockedExchange(&g_ready, 1);
@@ -487,6 +518,8 @@ static DWORD WINAPI window_thread(LPVOID arg) {
         SDL_Event e;
         if (SDL_WaitEventTimeout(&e, 8)) { while (SDL_PollEvent(&e)) {} }       /* the watch saw them; the keyboard state is current */
         plat_window_service();
+        window_mode_service(w);
+        menu_sdl_service();
     }
     return 0;
 }

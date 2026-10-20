@@ -78,7 +78,7 @@ by default; **In progress**; **Planned**.
 | Native x64 program by static recompilation (AArch64 to C), game versions 13.0.4 and 13.0.5 | Done |
 | One-click installer: private Python, PC check, finds keys and games in emulator folders, update + DLC, prebuilt runtime (no Visual Studio), no firmware needed, shortcuts, self-update, resume | Done |
 | Vulkan renderer (OpenGL fallback), shaders loaded at start, 16:9 window, F11 borderless | Done |
-| In-game settings menu (F1 or controller Home, on by default): graphics, window / fullscreen / borderless, volume, full key and button remapping for keyboard and controllers per player, log viewer and export, F2 stats overlay | Done |
+| In-game settings menu (F1, controller Home, or − and + held 1 s; on by default): graphics, window / fullscreen / borderless, volume, full key and button remapping for keyboard and controllers per player, log viewer and export, F2 stats overlay | Done |
 | On-screen keyboard for controllers (no Windows dialogs) | Done |
 | Any controller through SDL3 (hot-plug, up to 8 players, rumble, gyro) | Done in automated tests with virtual devices; physical pads not yet confirmed |
 | Online play through the game's Local Wireless over a LAN, a room code or a lobby server ([docs/ONLINE.md](docs/ONLINE.md)) | Experimental |
@@ -91,7 +91,7 @@ by default; **In progress**; **Planned**.
 | Freeze watchdog: a report with the stack of every thread | Done |
 | Fixed 60 fps in every mode | In progress |
 | Items and stages as source | Planned |
-| Native Linux build ([BUILDING_LINUX.md](BUILDING_LINUX.md)): movies, menus, a whole match at 60 fps with sound on one PC (CachyOS, NVIDIA, Wayland); no F1 menu or online play there yet; Steam Deck not tested | In progress |
+| Native Linux build ([BUILDING_LINUX.md](BUILDING_LINUX.md)): movies, menus, a whole match at 60 fps with sound on one PC (CachyOS, NVIDIA, Wayland); F1 menu built (not yet tried on Linux), no online play there yet; Steam Deck not tested | In progress |
 
 ### Game modes (measured on the development PC)
 
