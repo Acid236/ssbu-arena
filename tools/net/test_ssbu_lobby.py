@@ -5,6 +5,9 @@ endpoint (--status-port: counts only, CORS header, no addresses or names).
 O1 room browser: players of two builds (another game version, another mod set) and an older game in one lobby code:
 the older game sees only its own build's rooms; LIST flag 1 lists every build with the host's build at the end; ROOMS
 names host, players, build and mods; a join across builds never reaches the other host.
+O2 matchmaking: only players of the same build and lobby code are paired, the one that waited longer (or the one with an
+open room) hosts, the guest is told when the host's room opens and sees it first in its list, both are told when they
+are in one room; cancel, leaving, timeout and expiry; an older game is never matched; PONG counts the searching players.
     python test_ssbu_lobby.py        (starts the lobby itself on a free port; standard library only)
     LOBBY_EXE=<minilobby.exe> python test_ssbu_lobby.py   (the same against net_minilobby.c built standalone:
         clang -DMINILOBBY_MAIN -x c net_minilobby.c -o minilobby.exe -lws2_32 -ladvapi32; no status endpoint there)"""
@@ -14,6 +17,7 @@ import socket
 import struct
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -45,8 +49,8 @@ def get_status(port):
 
 
 class Fake:
-    def __init__(self, lobby, name, build=b"build-x", mods=None):
-        self.build, self.mods = build, mods
+    def __init__(self, lobby, name, build=b"build-x", mods=None, code=b"test"):
+        self.build, self.mods, self.code = build, mods, code
         self.s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.s.bind(("127.0.0.1", 0))
         self.s.settimeout(0.2)
@@ -72,12 +76,40 @@ class Fake:
 
     def join(self):
         port = self.s.getsockname()[1]
-        self.tx(L.JOIN, self.nonce + b"test".ljust(32, b"\0") + self.name.encode().ljust(32, b"\0") + self.build.ljust(40, b"\0")
+        self.tx(L.JOIN, self.nonce + self.code.ljust(32, b"\0") + self.name.encode().ljust(32, b"\0") + self.build.ljust(40, b"\0")
                 + struct.pack(">IHB", 0x7F000001, port, 1) + (b"MS" + self.mods if self.mods is not None else b""))
         b = self.rx(L.WELCOME)
         assert b[:8] == self.nonce
         self.ip, self.cookie = struct.unpack_from(">IQ", b, 8)
         return self.ip
+
+    def match(self, op, sid):
+        self.tx(L.MATCH, struct.pack(">QBI", self.cookie, op, sid))
+
+    def state(self, secs=2.0):
+        """the next MATCH_STATE: (id, state, role, flags, peer, peer name, searching, players, waited)"""
+        b = self.rx(L.MATCH_STATE, secs)
+        assert len(b) == 49, len(b)
+        sid, st, role, flags, peer = struct.unpack_from(">IBBBI", b)
+        return (sid, st, role, flags, peer, b[11:43].rstrip(b"\0")) + struct.unpack_from(">HHH", b, 43)
+
+    def until(self, want, secs=3.0):
+        """MATCH_STATEs until one has state want (earlier ones skipped)"""
+        end = time.time() + secs
+        while time.time() < end:
+            try:
+                st = self.state(0.3)
+            except AssertionError as e:
+                if "no packet" not in str(e):
+                    raise
+                continue
+            if st[1] == want:
+                return st
+        raise AssertionError("%s: no MATCH_STATE %d" % (self.name, want))
+
+    def ping(self):
+        self.tx(L.PING, struct.pack(">QQB", self.cookie, 1234, 0))
+        return self.rx(L.PONG)
 
     def ldn(self, dst, kind, payload):
         self.tx(L.DATA, struct.pack(">IIHH", self.ip, dst, L.LDN_PORT, L.LDN_PORT) + bytes((ord("L"), kind, 0, 0)) + payload)
@@ -185,21 +217,123 @@ def room_browser(lob):
     time.sleep(0.2)
 
 
+def matchmaking(lob):
+    """O2: the lobby runs with a 3 s search limit and a 5 s match limit (--search-secs / SSBU_LOBBY_SEARCH_SECS)."""
+    X, Y = b"ssbu-recomp-ldn1-13.0.5", b"ssbu-recomp-ldn1-13.0.4"
+    a, b, y, e, old = Fake(lob, "MA", X, mods()), Fake(lob, "MB", X, mods()), Fake(lob, "MY", Y, mods()), Fake(lob, "ME", X, mods(), b"other"), Fake(lob, "MOld", X)
+    ia, ib, iy, ie, iold = a.join(), b.join(), y.join(), e.join(), old.join()
+    a.match(1, 101)
+    st = a.state()
+    assert st[:5] == (101, L.MS_SEARCHING, 0, 0, 0) and st[6] == 1 and st[7] == 3, st      # searching 1, players of X/test: MA, MB, MOld
+    y.match(1, 201)                                  # another version: never paired with MA
+    assert y.state()[1] == L.MS_SEARCHING
+    e.match(1, 301)                                  # another lobby code: never paired with MA
+    assert e.state()[1] == L.MS_SEARCHING
+    pong = a.ping()
+    assert len(pong) >= 16 and struct.unpack_from(">HHHH", pong, 8) == (3, 0, 1, 4), pong.hex()   # players, rooms, searching, all builds of "test"
+    a.match(1, 101)                                  # the same search asked again: still searching, no new search
+    assert a.state()[1] == L.MS_SEARCHING
+    time.sleep(0.3)
+    b.match(1, 102)
+    sa, sb = a.until(L.MS_MATCHED), b.until(L.MS_MATCHED)
+    assert sa[:6] == (101, L.MS_MATCHED, L.ROLE_HOST, 0, ib, b"MB"), sa       # MA waited longer: MA hosts
+    assert sb[:6] == (102, L.MS_MATCHED, L.ROLE_JOIN, 0, ia, b"MA"), sb
+    b.match(1, 102)                                  # asked again (a lost answer): the same match
+    assert b.state()[:3] == (102, L.MS_MATCHED, L.ROLE_JOIN)
+    assert none_of(old, L.MATCH_STATE, 0.3) and none_of(y, L.MATCH_STATE, 0.3), "an older game or another build heard of the match"
+    # another room of the same build already open: the guest's list still has the matched host's room first
+    o = Fake(lob, "MOther", X, mods())
+    io = o.join()
+    o.ldn(L.BROADCASTS[0], L.M_ADVERTISE, network_info(io, os.urandom(16)))
+    time.sleep(0.2)
+    session = os.urandom(16)
+    a.ldn(L.BROADCASTS[0], L.M_ADVERTISE, network_info(ia, session))
+    sb = b.until(L.MS_MATCHED)
+    assert sb[3] & 1, ("the guest was not told the host's room is open", sb)
+    b.tx(L.LIST, struct.pack(">QIB", b.cookie, 9, 1))
+    first = b.rx(L.LISTING)
+    assert struct.unpack_from(">I", first, 4)[0] == ia, "the matched host's room is not first in the guest's list"
+    b.rx(L.LISTING)
+    assert b.rx(L.LIST_END)[4] == 2
+    # the guest joins, the host accepts: both are told they are together; asking again repeats it (no new search)
+    b.ldn(ia, L.M_JOIN, session + b"MB".ljust(32, b"\0") + b"\0\0")
+    a.rx(L.DATA)
+    a.ldn(L.BROADCASTS[0], L.M_ADVERTISE, network_info(ia, session, ib))
+    ta, tb = a.until(L.MS_TOGETHER), b.until(L.MS_TOGETHER)
+    assert ta[:6] == (101, L.MS_TOGETHER, L.ROLE_HOST, 0, ib, b"MB") and tb[:6] == (102, L.MS_TOGETHER, L.ROLE_JOIN, 0, ia, b"MA"), (ta, tb)
+    b.match(1, 102)
+    assert b.state()[:2] == (102, L.MS_TOGETHER)
+    # cancel: the other player is told
+    f, g = Fake(lob, "MF", X, mods()), Fake(lob, "MG", X, mods())
+    f.join(), g.join()
+    f.match(1, 1)
+    f.state()
+    g.match(1, 2)
+    f.until(L.MS_MATCHED), g.until(L.MS_MATCHED)
+    g.match(0, 2)
+    assert g.until(L.MS_IDLE)[0] == 2
+    sf = f.until(L.MS_PEER_LEFT)
+    assert sf[5] == b"MG", sf
+    # leaving the lobby: the other player is told
+    h, i = Fake(lob, "MH", X, mods()), Fake(lob, "MI", X, mods())
+    h.join(), i.join()
+    h.match(1, 5)
+    h.state()
+    i.match(1, 6)
+    h.until(L.MS_MATCHED), i.until(L.MS_MATCHED)
+    h.tx(L.LEAVE, struct.pack(">Q", h.cookie))
+    assert i.until(L.MS_PEER_LEFT)[5] == b"MH"
+    # the one with an open room hosts, even when it searched second
+    k, m = Fake(lob, "MK", X, mods()), Fake(lob, "MM", X, mods())
+    ik, im = k.join(), m.join()
+    k.ldn(L.BROADCASTS[0], L.M_ADVERTISE, network_info(ik, os.urandom(16)))
+    time.sleep(0.2)
+    m.match(1, 7)
+    m.state()
+    k.match(1, 8)
+    sk, sm = k.until(L.MS_MATCHED), m.until(L.MS_MATCHED)
+    assert sk[2] == L.ROLE_HOST and sm[2] == L.ROLE_JOIN and sm[3] & 1 and sm[4] == ik, (sk, sm)
+    # no opponent: the searches of another build / another code end with TIMEOUT; a match nobody follows EXPIRES
+    assert y.until(L.MS_TIMEOUT, 6.0)[0] == 201 and e.until(L.MS_TIMEOUT, 3.0)[0] == 301
+    for x in (k, m, o, y, e, old):                   # (keep them in the lobby: no PING otherwise in this test)
+        x.ping()
+    assert k.until(L.MS_EXPIRED, 7.0)[4] == im and m.until(L.MS_EXPIRED, 3.0)[4] == ik
+    y.match(1, 201)                                  # the ended search asked again: its end again, not a new search
+    assert y.state()[:2] == (201, L.MS_TIMEOUT)
+    y.match(1, 202)                                  # a new search
+    assert y.state()[:2] == (202, L.MS_SEARCHING)
+    y.match(0, 202)
+    assert y.until(L.MS_IDLE)[0] == 202
+    assert none_of(old, L.MATCH_STATE, 0.2), "an older game got a MATCH_STATE"
+    for x in (a, b, y, e, old, o, f, g, i, k, m):
+        x.tx(L.LEAVE, struct.pack(">Q", x.cookie))
+    time.sleep(0.2)
+
+
 def main():
     port, sport = free_port(), free_tcp_port()
     exe = os.environ.get("LOBBY_EXE")
     if exe:
-        proc = subprocess.Popen([exe, str(port)], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        proc = subprocess.Popen([exe, str(port)], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                                env=dict(os.environ, SSBU_LOBBY_SEARCH_SECS="3", SSBU_LOBBY_MATCH_SECS="5"))
     else:
         proc = subprocess.Popen([sys.executable, "-I", os.path.join(HERE, "ssbu_lobby.py"), "--bind", "127.0.0.1", "--port", str(port), "--stats", "0",
-                                 "--status-port", str(sport)],
+                                 "--status-port", str(sport), "--search-secs", "3", "--match-secs", "5"],
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    lines = []          # the lobby's output, read all along (a full pipe would stop the lobby on its next line)
+    reader = threading.Thread(target=lambda: lines.extend(iter(proc.stdout.readline, "")), daemon=True)
+    reader.start()
     try:
-        time.sleep(2.0 if exe else 0.5)
+        deadline = time.time() + 10
+        while time.time() < deadline and not any("UDP" in l for l in lines) and proc.poll() is None:
+            time.sleep(0.05)
+        time.sleep(0.2)
         lob = ("127.0.0.1", port)
         room_browser(lob)
+        matchmaking(lob)
         if exe:
-            print("lobby self-test (%s): ok (room browser: builds parted, LIST flag, ROOMS, older game, cross-build join dropped)" % os.path.basename(exe))
+            print("lobby self-test (%s): ok (room browser: builds parted, LIST flag, ROOMS, older game, cross-build join dropped; "
+                  "matchmaking: same build and code only, host choice, room open, list order, together, cancel, leave, timeout, expiry, older game)" % os.path.basename(exe))
             return 0
         code, _, body = get_status(sport)
         st = json.loads(body)
@@ -244,7 +378,7 @@ def main():
         assert headers.get("Content-Type", "").startswith("application/json")
         assert st["players"] == 3 and st["rooms"] == 1 and st["up"] is True, body
         assert isinstance(st["uptime_s"], int) and st["uptime_s"] >= 0 and st["version"], body
-        assert set(st) == {"up", "players", "rooms", "version", "uptime_s"}, body
+        assert set(st) == {"up", "players", "rooms", "searching", "version", "uptime_s"}, body
         for leak in ("127.0.0.1", "10.13.", "Alice", "Bob", "Carol", "Host", "test", "build-x"):
             assert leak not in body, ("status leaks", leak, body)
         try:
@@ -256,14 +390,16 @@ def main():
         assert b.rx(L.DATA)[13] == L.M_GONE
         time.sleep(0.2)
         assert json.loads(get_status(sport)[2])["rooms"] == 0
-        print("lobby self-test: ok (room browser: builds parted, LIST flag, ROOMS, older game, cross-build join dropped; join, list, room join, PEERS, "
+        print("lobby self-test: ok (room browser: builds parted, LIST flag, ROOMS, older game, cross-build join dropped; "
+              "matchmaking: same build and code only, host choice, room open, list order, together, cancel, leave, timeout, expiry, older game; join, list, room join, PEERS, "
               "broadcast + unicast relay, outsider refused, room closed, status endpoint)")
         return 0
     finally:
         proc.terminate()
-        out = proc.communicate(timeout=5)[0]
+        proc.wait(5)
+        reader.join(2)
         if os.environ.get("LOBBY_LOG"):
-            print(out)
+            print("".join(lines))
 
 
 if __name__ == "__main__":

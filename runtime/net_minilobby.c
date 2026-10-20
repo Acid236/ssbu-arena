@@ -23,6 +23,10 @@
 enum { ML_PROTO = 1, ML_JOIN = 1, ML_WELCOME, ML_REJECT, ML_PING, ML_PONG, ML_DATA, ML_LEAVE, ML_LIST, ML_LISTING,
        ML_LIST_END, ML_PEERS, ML_PUNCH, ML_DIRECT, ML_BCAST };
 enum { ML_ROOMS = 17, ML_ROOM_INFO, ML_ROOMS_END };     /* O1 room browser (net_relay.c head, ssbu_lobby.py on_rooms) */
+enum { ML_MATCH = 20, ML_MATCH_STATE };                 /* O2 matchmaking (net_relay.c head, ssbu_lobby.py on_match) */
+enum { ML_MS_IDLE, ML_MS_SEARCHING, ML_MS_MATCHED, ML_MS_TIMEOUT, ML_MS_PEER_LEFT, ML_MS_TOGETHER, ML_MS_EXPIRED };
+#define ML_SEARCH_FOR 120000                            /* ms; SSBU_LOBBY_SEARCH_SECS / SSBU_LOBBY_MATCH_SECS change them */
+#define ML_MATCH_FOR 180000
 #define ML_MODS_MAX 32
 #define ML_MOD_NAME 31
 #define ML_MODS_BYTES (1 + ML_MODS_MAX * (5 + ML_MOD_NAME))
@@ -72,6 +76,16 @@ typedef struct ml_client {
     uint8_t peers_sent[7 * ML_PEER_LEN];
     int mods_len;             /* O1: its mod-set block (0: an older game that does not send it) */
     uint8_t mods[ML_MODS_BYTES];
+    /* O2 matchmaking */
+    int has_search, searching, room_said;
+    uint32_t search_id;
+    ULONGLONG search_since, match_at;
+    struct ml_client *mpeer;  /* the player it is matched with (NULL: none) */
+    int mrole;                /* 1 it hosts, 2 it joins */
+    int has_final;            /* how its last search ended (sent again when asked about that search) */
+    uint32_t final_id, final_peer;
+    int final_state, final_role;
+    char final_name[ML_NAME_LEN + 1];
 } ml_client;
 
 struct ml_room {
@@ -98,6 +112,7 @@ static HANDLE ml_thread;
 static int ml_no_peers;
 static struct { struct sockaddr_in at; int used; } ml_open[ML_OPEN_MAX];
 static uint64_t ml_rng_state;
+static ULONGLONG ml_search_for = ML_SEARCH_FOR, ml_match_for = ML_MATCH_FOR;
 
 #define ml_log(...) do { printf("[online] lobby: " __VA_ARGS__); printf("\n"); fflush(stdout); } while (0)
 
@@ -251,7 +266,16 @@ static void ml_close_room(ml_room *room, const char *why) {
     ml_log("room of %s closed (%s)", owner->name, why);
 }
 
+static void ml_match_end(ml_client *c, int state, int role, const ml_client *peer, const char *why, ULONGLONG now);
 static void ml_drop(ml_client *c, const char *why) {
+    if (c->mpeer) {
+        ml_client *o = c->mpeer;
+        char w[96];
+        c->mpeer = NULL;
+        snprintf(w, sizeof w, "%s left the lobby", c->name);
+        ml_match_end(o, ML_MS_PEER_LEFT, o->mrole, c, w, GetTickCount64());
+    }
+    c->searching = 0;
     if (c->room) ml_close_room(c->room, "host left");
     if (c->has_claim) {
         ml_room *r = ml_find_room(c->claim);
@@ -331,6 +355,7 @@ static int ml_room_rank(const ml_room *r) {   /* open rooms first, then fuller o
  * lobby code (O1: a newer game's list, and the room browser), its own build's rooms first */
 static int ml_select(ml_client *c, ULONGLONG now, int other, int with_own, ml_room **sel, int max) {
     int n = 0;
+    const ml_client *mhost = c->mpeer && c->mrole == 2 ? c->mpeer : NULL;     /* O2: the matched host's room first */
     for (int i = 0; i < ML_MAX_ROOMS; i++) {
         ml_room *r = &ml_rooms[i];
         if (!r->used || (r->owner == c && !with_own) || now - r->updated > ML_LISTED_FOR) continue;
@@ -338,7 +363,8 @@ static int ml_select(ml_client *c, ULONGLONG now, int other, int with_own, ml_ro
         int k = n < max ? n++ : max;   /* insertion sort keeping the best max */
         sel[k] = r;
         while (k > 0) {
-            int ra = ml_room_rank(sel[k]) + (ml_same_part(sel[k]->owner, c) ? 0 : 10000), rb = ml_room_rank(sel[k - 1]) + (ml_same_part(sel[k - 1]->owner, c) ? 0 : 10000);
+            int ra = ml_room_rank(sel[k]) + (ml_same_part(sel[k]->owner, c) ? 0 : 10000) - (sel[k]->owner == mhost ? 100000 : 0),
+                rb = ml_room_rank(sel[k - 1]) + (ml_same_part(sel[k - 1]->owner, c) ? 0 : 10000) - (sel[k - 1]->owner == mhost ? 100000 : 0);
             if (!(ra < rb || (ra == rb && sel[k]->created < sel[k - 1]->created))) break;
             ml_room *t = sel[k]; sel[k] = sel[k - 1]; sel[k - 1] = t; k--;
         }
@@ -388,6 +414,105 @@ static void ml_on_rooms(ml_client *c, const uint8_t *seq, ULONGLONG now) {     /
     memcpy(p, seq, 4);
     p[4] = (uint8_t)n;
     ml_send(end, sizeof end, &c->at);
+}
+
+/* ---- O2 matchmaking (ssbu_lobby.py match_send / match_end / on_match / match_room) */
+static int ml_room_open(const ml_room *r, ULONGLONG now) {
+    return r && r->info[ML_NI_POLICY] != 1 && r->info[ML_NI_NODE_COUNT] < r->info[ML_NI_NODE_MAX] && now - r->updated <= ML_LISTED_FOR;
+}
+/* MATCH_STATE: search id u32, state u8, role u8, flags u8 (1 the host's room is open), peer u32, peer name[32],
+ * searching u16, players u16 (of c's build and code), seconds waited u16 */
+static void ml_match_send(ml_client *c, ULONGLONG now) {
+    uint8_t pkt[4 + 49], *p = ml_hdr(pkt, ML_MATCH_STATE);
+    uint32_t sid = c->search_id, peer = 0;
+    int state, role = 0, flags = 0, searching = 0, players = 0;
+    const char *name = "";
+    ULONGLONG since = 0;
+    if (c->mpeer) {
+        state = ML_MS_MATCHED; role = c->mrole; peer = c->mpeer->ip; name = c->mpeer->name; since = c->match_at;
+        ml_client *host = c->mrole == 1 ? c : c->mpeer;
+        if (ml_room_open(host->room, now)) flags |= 1;
+    } else if (c->searching) { state = ML_MS_SEARCHING; since = c->search_since; }
+    else if (c->has_final) { sid = c->final_id; state = c->final_state; role = c->final_role; peer = c->final_peer; name = c->final_name; }
+    else state = ML_MS_IDLE;
+    for (int i = 0; i < ML_MAX_CLIENTS; i++)
+        if (ml_clients[i].used && ml_same_part(&ml_clients[i], c)) { players++; searching += ml_clients[i].searching; }
+    ULONGLONG waited = since ? (now - since) / 1000 : 0;
+    p = ml_put32(p, sid);
+    *p++ = (uint8_t)state; *p++ = (uint8_t)role; *p++ = (uint8_t)flags;
+    p = ml_put32(p, peer);
+    memset(p, 0, ML_NAME_LEN); memcpy(p, name, strlen(name)); p += ML_NAME_LEN;
+    p = ml_put16(p, (unsigned)searching); p = ml_put16(p, (unsigned)players); p = ml_put16(p, waited > 65535 ? 65535u : (unsigned)waited);
+    ml_send(pkt, (int)(p - pkt), &c->at);
+}
+static void ml_match_end(ml_client *c, int state, int role, const ml_client *peer, const char *why, ULONGLONG now) {
+    c->has_final = 1; c->final_id = c->search_id; c->final_state = state; c->final_role = role;
+    c->final_peer = peer ? peer->ip : 0;
+    snprintf(c->final_name, sizeof c->final_name, "%s", peer ? peer->name : "");
+    c->searching = 0; c->mpeer = NULL;
+    ml_match_send(c, now);
+    ml_log("match: %s: %s", c->name, why);
+}
+static void ml_match_end_pair(ml_client *a, int state, const char *wa, const char *wb, ULONGLONG now) {  /* a and its peer */
+    ml_client *b = a->mpeer;
+    if (!b) return;
+    ml_match_end(a, state, a->mrole, b, wa, now);
+    ml_match_end(b, state, b->mrole, a, wb, now);
+}
+static void ml_match_room(ml_client *host, ml_room *room, ULONGLONG now) {
+    ml_client *g = host->mpeer;
+    if (!g || host->mrole != 1) return;
+    if (ml_has_node(room, g->ip) && g->has_claim && !memcmp(g->claim, room->session, 16)) {
+        char wa[96], wb[96];
+        snprintf(wa, sizeof wa, "in a room with %s", g->name);
+        snprintf(wb, sizeof wb, "in %s's room", host->name);
+        ml_match_end_pair(host, ML_MS_TOGETHER, wa, wb, now);
+        return;
+    }
+    if (ml_room_open(room, now) && !host->room_said) { host->room_said = 1; ml_match_send(g, now); ml_match_send(host, now); }
+}
+static void ml_on_match(ml_client *c, int op, uint32_t sid, ULONGLONG now) {
+    char w[96];
+    if (op == 0) {
+        if (c->mpeer) {
+            ml_client *o = c->mpeer;
+            c->mpeer = NULL;
+            snprintf(w, sizeof w, "%s cancelled the match", c->name);
+            ml_match_end(o, ML_MS_PEER_LEFT, o->mrole, c, w, now);
+        }
+        if (c->searching) ml_log("match: %s stopped searching", c->name);
+        c->searching = 0; c->has_search = 1; c->search_id = sid;
+        c->has_final = 1; c->final_id = sid; c->final_state = ML_MS_IDLE; c->final_role = 0; c->final_peer = 0; c->final_name[0] = 0;
+        ml_match_send(c, now);
+        return;
+    }
+    if (op != 1) return;
+    if (c->has_search && c->search_id == sid && (c->mpeer || c->searching || c->has_final)) { ml_match_send(c, now); return; }
+    if (c->mpeer) {
+        ml_client *o = c->mpeer;
+        c->mpeer = NULL;
+        snprintf(w, sizeof w, "%s searches again", c->name);
+        ml_match_end(o, ML_MS_PEER_LEFT, o->mrole, c, w, now);
+    }
+    c->has_search = 1; c->search_id = sid; c->searching = 1; c->search_since = now; c->has_final = 0;
+    ml_log("match: %s searches an opponent (build %s)", c->name, c->build);
+    ml_client *o = NULL;
+    for (int i = 0; i < ML_MAX_CLIENTS; i++) {
+        ml_client *x = &ml_clients[i];
+        if (x->used && x != c && x->searching && !x->mpeer && ml_same_part(x, c) && (!o || x->search_since < o->search_since)) o = x;
+    }
+    if (!o) { ml_match_send(c, now); return; }
+    int c_open = ml_room_open(c->room, now), o_open = ml_room_open(o->room, now);
+    ml_client *host = c_open && !o_open ? c : o, *guest = host == c ? o : c;     /* an open room hosts, else the one that waited longer */
+    host->mpeer = guest; guest->mpeer = host;
+    host->mrole = 1; guest->mrole = 2;
+    host->match_at = guest->match_at = now;
+    host->searching = guest->searching = 0;
+    host->room_said = 0;
+    ml_log("match: %s hosts, %s joins", host->name, guest->name);
+    ml_match_send(host, now);
+    ml_match_send(guest, now);
+    if (host->room) ml_match_room(host, host->room, now);
 }
 
 /* NetworkInfo's station addresses (node 0 = owner) into out[]; -1 if it is not one a game makes */
@@ -457,6 +582,7 @@ static void ml_on_advertise(ml_client *c, const uint8_t *p, int len, const uint8
         for (int k = 0; k < i; k++) dup |= m == (k < nb ? before[k] : after[k - nb]);
         if (m != c && !dup) ml_send(p, len, &m->at);
     }
+    if (c->mpeer && c->mrole == 1) ml_match_room(c, room, now);
 }
 
 static void ml_on_ldn(ml_client *c, const uint8_t *p, int len, uint32_t dst, unsigned sport, unsigned dport, ULONGLONG now) {
@@ -524,9 +650,14 @@ static void ml_packet(const uint8_t *p, int len, const struct sockaddr_in *at, U
         int players = 0, rooms = 0;
         for (int i = 0; i < ML_MAX_CLIENTS; i++) players += ml_clients[i].used && ml_same_part(&ml_clients[i], c);
         for (int i = 0; i < ML_MAX_ROOMS; i++) rooms += ml_rooms[i].used && ml_same_part(ml_rooms[i].owner, c);
-        uint8_t pong[4 + 8 + 4], *q = ml_hdr(pong, ML_PONG);
+        int searching = 0, code = 0;       /* O2: players searching (this build and code), players of this code (any build) */
+        for (int i = 0; i < ML_MAX_CLIENTS; i++) {
+            searching += ml_clients[i].used && ml_clients[i].searching && ml_same_part(&ml_clients[i], c);
+            code += ml_clients[i].used && !strcmp(ml_clients[i].code, c->code);
+        }
+        uint8_t pong[4 + 8 + 8], *q = ml_hdr(pong, ML_PONG);
         memcpy(q, p + 12, 8);
-        ml_put16(ml_put16(q + 8, players), rooms);
+        ml_put16(ml_put16(ml_put16(ml_put16(q + 8, players), rooms), searching), code);
         ml_send(pong, sizeof pong, at);
     } else if (kind == ML_LEAVE && len >= 12 && cookie_ok) {
         ml_drop(c, "left");
@@ -534,6 +665,8 @@ static void ml_packet(const uint8_t *p, int len, const struct sockaddr_in *at, U
         ml_on_list(c, p + 12, now, len >= 17 && (p[16] & 1));
     } else if (kind == ML_ROOMS && len >= 16 && cookie_ok) {
         ml_on_rooms(c, p + 12, now);
+    } else if (kind == ML_MATCH && len >= 17 && cookie_ok) {
+        ml_on_match(c, p[12], ml_get32(p + 13), now);
     } else if (kind == 16 && len > 16 && len <= 1500 && cookie_ok) {      /* R3: a rollback message (net_relay.c T_RB) to the other players of its lobby code */
         uint32_t dst = ml_get32(p + 12);
         static uint8_t out[1600];   /* (only used under ml_lock) */
@@ -567,6 +700,20 @@ static void ml_sweep(ULONGLONG now) {
         if (ml_clients[i].used && now - ml_clients[i].seen > ML_CLIENT_TIMEOUT) ml_drop(&ml_clients[i], "silent for 10 s");
     for (int i = 0; i < ML_MAX_ROOMS; i++)
         if (ml_rooms[i].used && now - ml_rooms[i].updated > ML_ROOM_TIMEOUT) ml_close_room(&ml_rooms[i], "no advertisement for 10 s");
+    for (int i = 0; i < ML_MAX_CLIENTS; i++) {        /* O2: searches without an opponent, matches nobody followed */
+        ml_client *c = &ml_clients[i];
+        char w[96], wb[96];
+        if (!c->used) continue;
+        if (c->searching && !c->mpeer && now - c->search_since > ml_search_for) {
+            snprintf(w, sizeof w, "no opponent in %u s", (unsigned)(ml_search_for / 1000));
+            ml_match_end(c, ML_MS_TIMEOUT, 0, NULL, w, now);
+        }
+        if (c->mpeer && c->mrole == 1 && now - c->match_at > ml_match_for) {
+            snprintf(w, sizeof w, "the match with %s expired", c->mpeer->name);
+            snprintf(wb, sizeof wb, "the match with %s expired", c->name);
+            ml_match_end_pair(c, ML_MS_EXPIRED, w, wb, now);
+        }
+    }
 }
 
 static DWORD WINAPI ml_thread_main(LPVOID arg) {
@@ -627,6 +774,9 @@ static uint16_t minilobby_start(uint32_t bind_ip_host_order, uint16_t port, int 
     ml_next_ip = ML_SUBNET + 2;
     ml_relayed = ml_ldn_msgs = ml_dropped = 0;
     ml_no_peers = no_peers;
+    {   const char *e = getenv("SSBU_LOBBY_SEARCH_SECS"), *m = getenv("SSBU_LOBBY_MATCH_SECS");     /* (tests: shorter) */
+        if (e && atof(e) > 0) ml_search_for = (ULONGLONG)(atof(e) * 1000);
+        if (m && atof(m) > 0) ml_match_for = (ULONGLONG)(atof(m) * 1000); }
     ml_sock = s;
     ml_running = 1;
     LeaveCriticalSection(&ml_lock);

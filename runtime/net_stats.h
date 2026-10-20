@@ -35,6 +35,24 @@ typedef struct {
 int net_rooms_get(NetRoom *out, int max, int *state);
 const char *net_build_id(void);             /* this game's build id ("ssbu-recomp-ldn1-13.0.5[+m<hash>]") */
 const char *net_mods_text(void);            /* this game's mods ("none" or "name (hash), ...") */
+
+/* O2 (plan\phases\O2_matchmaking.md): "Find an opponent" (F1 > Online), net_relay.c. The lobby pairs two searching players
+ * of the same build id and lobby code and says who hosts; the host creates the Local Wireless room, the other finds it
+ * first in the game's Rooms List. */
+enum { MM_IDLE = 0, MM_SEARCHING, MM_MATCHED, MM_TIMEOUT, MM_PEER_LEFT, MM_TOGETHER, MM_EXPIRED,   /* (the lobby's states) */
+       MM_ASKING, MM_OLD_LOBBY, MM_OFFLINE };                               /* asked, no answer yet; an older lobby; online off / not joined */
+enum { MM_ROLE_HOST = 1, MM_ROLE_JOIN = 2 };
+typedef struct {
+    int state, role, room_open;             /* MM_*, MM_ROLE_* (MATCHED / TOGETHER), the host's room is open (listed) */
+    uint32_t peer;                          /* the opponent's virtual address */
+    char peer_name[33];
+    int waited_s;                           /* seconds searching, or since the match */
+    int players, searching, code_players;   /* lobby counts: players of this build and code, of them searching, players of
+                                               every build of this code; -1 = not known (an older lobby / not joined yet) */
+} NetMatch;
+void net_match_find(void);                  /* start searching (again) */
+void net_match_cancel(void);                /* stop searching, or leave the match (the other player is told) */
+void net_match_get(NetMatch *out);          /* never blocks */
 #ifdef __cplusplus
 }
 #endif
