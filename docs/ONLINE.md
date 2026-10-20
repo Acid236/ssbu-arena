@@ -78,6 +78,9 @@ python tools/net/ssbu_lobby.py --bind 0.0.0.0 --port 39500 [--verbose]
 - On a Linux server (for example an Oracle Cloud Always Free Ubuntu VM): copy `tools/net/ssbu_lobby.py` and
   `tools/net/deploy_lobby.sh` to it and run `sudo bash deploy_lobby.sh [port]`. It installs a systemd service and opens
   the VM's firewall; open the same UDP port in the cloud's own firewall (Oracle: VCN Security List ingress rule).
+- Update a running server: copy the new `tools/net/ssbu_lobby.py` next to `deploy_lobby.sh` and run
+  `sudo bash deploy_lobby.sh [port]` again (add `DOMAIN=...` if you used it), or just
+  `sudo install -m 644 ssbu_lobby.py /opt/ssbu-lobby/ && sudo systemctl restart ssbu-lobby`. Players reconnect by themselves.
 
 ### 4. Auto
 
@@ -96,10 +99,25 @@ python tools/net/ssbu_lobby.py --bind 0.0.0.0 --port 39500 [--verbose]
 
 ## Requirements
 
-- Both players need the same build and the same game update: a 13.0.4 player and a 13.0.5 player never see each
-  other's rooms (the game version is part of the build id, e.g. `ssbu-recomp-ldn1-13.0.5`, shown in the log line `[online] on`).
-- Both players need the same fighters and mods.
+- Both players need the same game update (13.0.4 or 13.0.5) and the same mods. The game version and a hash of the
+  loaded mods are part of the build id (e.g. `ssbu-recomp-ldn1-13.0.5`, or `ssbu-recomp-ldn1-13.0.5+m1a2b3c4d` with
+  mods), shown in the log lines `[online] on` and `[online] mods`.
+- Rooms of another version or another mod set are still listed (in the game's Rooms List and in F1 -> Online rooms),
+  but they cannot be joined: trying shows a box with the reason, for example
+  "Different version: this room is 13.0.4, you have 13.0.5" or "MISSING: <mod names>".
 - For lobby and LAN, the lobby code must match.
+
+## Online rooms (F1)
+
+F1 -> **Online rooms** lists every room of your lobby: host, game version, mods, players, and whether you can join.
+Select a row to see why a room cannot be joined. Joining itself is done in the game: Local Wireless -> Rooms List.
+
+Mods counted: the sub-folders of the characters folder (`SSBU_CHARACTERS`, a fighter's `fighter.json` name or the
+folder name) and the DLLs of `SSBU_MODS`. Two copies of a mod match when their files have the same names and sizes.
+`online_list_other = off` in `config\graphics.ini` keeps rooms of other builds out of the game's own list (they stay in F1).
+
+An older lobby server lists only rooms of your own build (F1 says so); an older game keeps working as before and only
+sees rooms of its own build.
 
 ## Status and limits
 

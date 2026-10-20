@@ -30,6 +30,8 @@ int menu_is_open(void) { return 0; }
 int menu_input_blocked(void) { return 0; }
 void menu_request_toggle(void) {}
 void menu_notice(const char *text) { (void)text; }      /* (the message is in the log only) */
+void menu_popup(const char *title, const char *text) { printf("menu: popup (no menu in this build): %s: %s
+", title ? title : "", text ? text : ""); fflush(stdout); }
 int menu_wndproc(void *hwnd, unsigned msg, uintptr_t w, intptr_t l) {
     (void)hwnd; (void)l;
     if (msg == WM_KEYDOWN && w == VK_F1) say_why("F1 was pressed");

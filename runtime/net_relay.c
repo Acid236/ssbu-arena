@@ -19,6 +19,16 @@
  *  13 DIRECT   player: secret u64, then a DATA body                             (the same)
  *  14 BCAST    client: count u8, count x address u32, then a DATA body          (a broadcast; the lobby leaves out the
  *                      players listed: this player reached them directly)
+ * O1 (2026-10-20, plan\phases\O1_room_browser.md): additions an older lobby or game simply ignores.
+ *   JOIN may end with 'M' 'S' + a mod-set block: count u8, count x (hash u32, length u8, name[length])  (this game's mods)
+ *   LIST may end with flags u8: 1 = also the rooms of OTHER builds of this lobby code; each LISTING then ends with the
+ *        room host's build[40] (the game shows those rooms too; joining one is refused here, net_room_refusal)
+ *  17 ROOMS     client: cookie u64, seq u32                                      (the room browser: every room of this code)
+ *  18 ROOM_INFO lobby:  seq u32, host address u32, players u8, most u8, flags u8 (1 open, 2 yours, 4 mods known),
+ *                       host name[32], build[40], mod-set block                  (up to 32, joinable first)
+ *  19 ROOMS_END lobby:  seq u32, count u8
+ * The build id is "ssbu-recomp-ldn1-<game version>" plus "+m<8 hex>" when mods are loaded (the hash of the mod set):
+ * the lobby keeps parting players by build and code, so different versions or mod sets never share a room.
  * The lobby gives every player its own virtual address and relays a Local Wireless room's datagrams between that room's
  * players only. nnldn.c's own messages (port 65511) always go through the lobby: it is the judge of who is in which room.
  *
@@ -52,6 +62,7 @@
 
 enum { T_JOIN = 1, T_WELCOME, T_REJECT, T_PING, T_PONG, T_DATA, T_LEAVE, T_LIST, T_LISTING, T_LIST_END,
        T_PEERS, T_PUNCH, T_DIRECT, T_BCAST };
+enum { T_ROOMS = 17, T_ROOM_INFO, T_ROOMS_END };      /* O1 room browser */
 #define PROTO 1
 #define NAME_LEN 32
 #define BUILD_LEN 40
@@ -113,6 +124,135 @@ static int ini_value(const char *key, char *out, size_t n) {     /* "key = value
 }
 static int is_off(const char *v) { return !*v || !strcmp(v, "0") || !_stricmp(v, "off") || !_stricmp(v, "no") || !_stricmp(v, "false"); }
 
+/* ---------------------------------------------------------------- O1: the mod set this game loads
+ * What the runtime loads (read, never changed; only while online play is on):
+ *   - the characters folder (SSBU_CHARACTERS; or <exe>\..\characters with SSBU_LOOSE_FILES=1, loose_files.c): every
+ *     sub-folder is one mod, a new fighter (fighter.json: its display_name, else name) or a plain file mod (folder name)
+ *   - SSBU_MODS (fighter_sdk\hook_host.c): every *.dll of that folder is one mod (file name). Left out when it is the
+ *     registry's own staging folder registry_bin (newmodule_host.c sets it with SSBU_CHARACTERS: the fighters' DLLs).
+ * Each mod's hash: the sum, over its files, of FNV-1a 64 of (relative path in lower case, size): the same copy of a mod
+ * gives the same hash on every PC whatever the order Windows lists the files in (dates are left out: a copy changes
+ * them). The set's hash (FNV-1a over the sorted names and hashes) goes into the build id as "+m<8 hex>". */
+#define MODS_MAX 32
+#define MOD_NAME 31
+typedef struct { char name[MOD_NAME + 1]; uint32_t hash; } ModEntry;
+static ModEntry g_mods[MODS_MAX];
+static int g_nmods;
+static uint32_t g_mods_hash;
+static uint8_t g_mods_wire[1 + MODS_MAX * (5 + MOD_NAME)];
+static int g_mods_wire_len = 1;                        /* (count 0) */
+static char g_mods_text[512] = "none";
+#define FNV0 0xcbf29ce484222325ull
+static uint64_t fnv64(uint64_t h, const void *p, size_t n) { const uint8_t *b = (const uint8_t *)p; while (n--) { h ^= *b++; h *= 0x100000001b3ull; } return h; }
+static uint64_t tree_hash(const char *dir, const char *rel, int depth, int *files) {
+    char pat[MAX_PATH * 2];
+    WIN32_FIND_DATAA fd;
+    uint64_t sum = 0;
+    snprintf(pat, sizeof pat, "%s\\*", dir);
+    HANDLE h = FindFirstFileA(pat, &fd);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    do {
+        if (fd.cFileName[0] == '.') continue;
+        char sub[MAX_PATH * 2], r[MAX_PATH * 2];
+        snprintf(sub, sizeof sub, "%s\\%s", dir, fd.cFileName);
+        snprintf(r, sizeof r, "%s%s%s", rel, *rel ? "/" : "", fd.cFileName);
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) { if (depth < 16) sum += tree_hash(sub, r, depth + 1, files); continue; }
+        for (char *s = r; *s; s++) *s = (char)tolower((unsigned char)*s);
+        uint64_t size = (uint64_t)fd.nFileSizeHigh << 32 | fd.nFileSizeLow, x = fnv64(FNV0, r, strlen(r));
+        sum += fnv64(x, &size, sizeof size);
+        (*files)++;
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+    return sum;
+}
+static int json_str(const char *js, const char *key, char *out, size_t n) {     /* "key": "value" (flat manifest) */
+    char pat[64];
+    snprintf(pat, sizeof pat, "\"%s\"", key);
+    const char *p = strstr(js, pat);
+    if (!p) return 0;
+    p += strlen(pat);
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n' || *p == ':') p++;
+    if (*p++ != '"') return 0;
+    size_t k = 0;
+    while (*p && *p != '"' && k + 1 < n) out[k++] = *p++;
+    out[k] = 0;
+    return k > 0;
+}
+static void mod_add(const char *name, uint64_t h64) {
+    if (g_nmods >= MODS_MAX) return;
+    ModEntry *m = &g_mods[g_nmods++];
+    size_t k = 0;
+    for (const char *s = name; *s && k < MOD_NAME; s++) m->name[k++] = (unsigned char)*s >= 0x20 && *s != ',' ? *s : ' ';
+    m->name[k] = 0;
+    m->hash = (uint32_t)(h64 ^ h64 >> 32);
+}
+static int mod_cmp(const void *a, const void *b) { return _stricmp(((const ModEntry *)a)->name, ((const ModEntry *)b)->name); }
+static void mods_scan(void) {
+    char root[MAX_PATH * 2] = "";
+    const char *ch = getenv("SSBU_CHARACTERS"), *lf = getenv("SSBU_LOOSE_FILES"), *md = getenv("SSBU_MODS");
+    if (ch && ch[0] && !(lf && lf[0] == '0')) snprintf(root, sizeof root, "%s", ch);
+    else if (lf && lf[0] == '1') {
+        DWORD n = GetModuleFileNameA(NULL, root, MAX_PATH);
+        while (n && root[n - 1] != '\\' && root[n - 1] != '/') n--;
+        snprintf(root + n, sizeof root - n, "..\\characters");
+    }
+    WIN32_FIND_DATAA fd;
+    char pat[MAX_PATH * 2];
+    if (root[0]) {
+        snprintf(pat, sizeof pat, "%s\\*", root);
+        HANDLE h = FindFirstFileA(pat, &fd);
+        if (h != INVALID_HANDLE_VALUE) {
+            do {
+                if (fd.cFileName[0] == '.' || !(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+                char sub[MAX_PATH * 2], mf[MAX_PATH * 2], js[4096] = "", name[64];
+                int files = 0;
+                snprintf(sub, sizeof sub, "%s\\%s", root, fd.cFileName);
+                snprintf(mf, sizeof mf, "%s\\fighter.json", sub);
+                FILE *f = fopen(mf, "rb");
+                if (f) { size_t n = fread(js, 1, sizeof js - 1, f); fclose(f); js[n] = 0; }
+                if (!json_str(js, "display_name", name, sizeof name) && !json_str(js, "name", name, sizeof name)) snprintf(name, sizeof name, "%s", fd.cFileName);
+                uint64_t h64 = tree_hash(sub, "", 0, &files);
+                if (files) mod_add(name, h64);
+            } while (FindNextFileA(h, &fd));
+            FindClose(h);
+        }
+    }
+    if (md && md[0] && strcmp(md, "0") && !(ch && ch[0] && !_stricmp(md, "registry_bin"))) {
+        snprintf(pat, sizeof pat, "%s\\*.dll", md);
+        HANDLE h = FindFirstFileA(pat, &fd);
+        if (h != INVALID_HANDLE_VALUE) {
+            do {
+                char name[MAX_PATH], low[MAX_PATH];
+                snprintf(name, sizeof name, "%s", fd.cFileName);
+                char *dot = strrchr(name, '.'); if (dot) *dot = 0;
+                snprintf(low, sizeof low, "%s", fd.cFileName);
+                for (char *s = low; *s; s++) *s = (char)tolower((unsigned char)*s);
+                uint64_t size = (uint64_t)fd.nFileSizeHigh << 32 | fd.nFileSizeLow;
+                mod_add(name, fnv64(fnv64(FNV0, low, strlen(low)), &size, sizeof size));
+            } while (FindNextFileA(h, &fd));
+            FindClose(h);
+        }
+    }
+    qsort(g_mods, (size_t)g_nmods, sizeof g_mods[0], mod_cmp);
+    uint64_t set = FNV0;
+    uint8_t *w = g_mods_wire;
+    *w++ = (uint8_t)g_nmods;
+    g_mods_text[0] = 0;
+    for (int i = 0; i < g_nmods; i++) {
+        size_t l = strlen(g_mods[i].name);
+        char hx[16];
+        set = fnv64(set, g_mods[i].name, l + 1);
+        set = fnv64(set, &g_mods[i].hash, 4);
+        s32(w, g_mods[i].hash); w[4] = (uint8_t)l; memcpy(w + 5, g_mods[i].name, l); w += 5 + l;
+        snprintf(hx, sizeof hx, " (%08x)", g_mods[i].hash);
+        size_t t = strlen(g_mods_text);
+        snprintf(g_mods_text + t, sizeof g_mods_text - t, "%s%s%s", i ? ", " : "", g_mods[i].name, hx);
+    }
+    g_mods_wire_len = (int)(w - g_mods_wire);
+    g_mods_hash = g_nmods ? (uint32_t)(set ^ set >> 32) : 0;
+    if (!g_nmods) snprintf(g_mods_text, sizeof g_mods_text, "none");
+}
+
 /* Modes (net_relay.h): LOBBY = our lobby server; LAN = no server: one game of the local network runs the lobby inside
  * itself and announces it with a beacon (multicast 239.255.13.13 + broadcast, UDP port 39501), the others find it;
  * HOST = no server, over the internet: this game runs the lobby inside itself and shows a room code (its public
@@ -120,7 +260,7 @@ static int is_off(const char *v) { return !*v || !strcmp(v, "0") || !_stricmp(v,
  *   SSBU_ONLINE = 0|off  1|on|auto  lan  host[:<port>]  join:<code or ip:port>  <host:port> (= lobby)
  *   graphics.ini: online_mode = off|auto|lobby|lan|host|join, online_server, online_join, online_peer, online_upnp,
  *   online_stun, online_port. auto: online_server given -> LOBBY (no answer for 5 s -> LAN), otherwise LAN. */
-static int g_mode, g_auto, g_upnp = 1;
+static int g_mode, g_auto, g_upnp = 1, g_list_other = 1;     /* g_list_other: online_list_other (O1) */
 static uint16_t g_host_port;                    /* HOST mode: the in-game lobby's UDP port (default 39500) */
 static char g_join[64], g_peer[256], g_stun[128] = "stun.l.google.com:19302";
 
@@ -175,15 +315,22 @@ static void configure(void) {
     else if (ini_value("online_direct", v, sizeof v)) g_direct = !is_off(v);
     if ((e = getenv("SSBU_ONLINE_PORT")) && atoi(e) > 0 && atoi(e) < 65536) g_local_port = (uint16_t)atoi(e);
     if ((e = getenv("SSBU_ONLINE_LOG"))) g_log = atoi(e);
+    mods_scan();                       /* O1: the mods this game loads (their names and hashes go to the lobby) */
     if ((e = getenv("SSBU_ONLINE_BUILD")) && *e) snprintf(g_build, sizeof g_build, "%s", e);
-    else if (g_game_build >= 0) {      /* players of 13.0.4 and 13.0.5 never meet: the lobby and the LAN beacons part rooms by build */
+    else {
         size_t l = strlen(g_build);
-        snprintf(g_build + l, sizeof g_build - l, "-%s", g_game_build == 1 ? "13.0.5" : "13.0.4");
+        if (g_game_build >= 0)         /* players of 13.0.4 and 13.0.5 never share a room: the lobby and the LAN lobby part rooms by build */
+            snprintf(g_build + l, sizeof g_build - l, "-%s", g_game_build == 1 ? "13.0.5" : "13.0.4");
+        l = strlen(g_build);
+        if (g_nmods) snprintf(g_build + l, sizeof g_build - l, "+m%08x", g_mods_hash);      /* nor do different mod sets */
     }
+    if ((e = getenv("SSBU_ONLINE_LIST_OTHER"))) g_list_other = !is_off(e);
+    else if (ini_value("online_list_other", v, sizeof v)) g_list_other = !is_off(v);
     g_cfg = 1;
     static const char *mode_names[] = {"lobby", "lan (no server)", "host (no server)", "join (no server)"};
     printf("[online] on: mode %s%s, lobby %s, code %s, name %s, direct paths %s, build %s\n", mode_names[g_mode], g_auto ? " (auto)" : "",
            g_mode == NET_MODE_LOBBY ? g_server : g_mode == NET_MODE_JOIN ? g_join : "inside this game", g_code, g_name, g_direct ? "allowed" : "off", g_build);
+    printf("[online] mods: %s; rooms of other builds %s\n", g_mods_text, g_list_other ? "shown in the game's list (joining them is refused, with the reason)" : "only in F1 > Online rooms");
     fflush(stdout);
 }
 int net_online(void) { configure(); return g_cfg; }
@@ -522,13 +669,182 @@ void net_send(uint32_t src, uint16_t sport, uint32_t dst, uint16_t dport, const 
     if (buf != stack) free(buf);
 }
 
+static volatile LONG64 g_rooms_wanted;                /* O1: when the room browser or the game's Rooms List last asked */
 void net_list_rooms(uint32_t seq) {
     if (!g_joined) return;
-    uint8_t p[16];
+    uint8_t p[17];
     hdr(p, T_LIST);
     s64(p + 4, g_cookie);
     s32(p + 12, seq);
+    p[16] = (uint8_t)(g_list_other ? 1 : 0);        /* O1: also the rooms of other builds (an older lobby ignores the byte) */
     tx(p, sizeof p, &g_lobby);
+    InterlockedExchange64(&g_rooms_wanted, (LONG64)ms_now());
+}
+
+/* ---------------------------------------------------------------- O1: the room browser (every room of this lobby code) */
+void menu_popup(const char *title, const char *text);   /* menu.cpp (menu_stub.c: the log only) */
+#define ROOMS_MAX 32
+static SRWLOCK g_rooms_lock = SRWLOCK_INIT;
+static NetRoom g_room_list[ROOMS_MAX], g_room_next[ROOMS_MAX];
+static int g_nroom_list, g_nroom_next, g_rooms_answered;
+static uint32_t g_rooms_seq;
+static uint64_t g_rooms_sent, g_rooms_at;
+static struct { uint32_t ip; char build[BUILD_LEN + 1]; } g_other[24];   /* the last game list's rooms of other builds */
+static int g_nother;
+
+static const char *build_version(const char *b, char *out, size_t n) {   /* "ssbu-recomp-ldn1-13.0.5+m..." -> "13.0.5" */
+    const char *plus = strchr(b, '+'), *end = plus ? plus : b + strlen(b), *dash = end;
+    while (dash > b && dash[-1] != '-') dash--;
+    snprintf(out, n, "%.*s", (int)(end - dash), dash);
+    return out;
+}
+static int build_base_len(const char *b) { const char *plus = strchr(b, '+'); return (int)(plus ? plus - b : (ptrdiff_t)strlen(b)); }
+/* a mod-set block (count u8, count x (hash u32, length u8, name)) into entries; -1 if it is not one */
+static int mods_read(const uint8_t *p, int n, ModEntry *out, int max) {
+    if (n < 1 || p[0] > MODS_MAX) return -1;
+    int count = p[0], k = 0, o = 1;
+    for (int i = 0; i < count; i++) {
+        if (o + 5 > n || p[o + 4] > MOD_NAME || o + 5 + p[o + 4] > n) return -1;
+        if (k < max) {
+            out[k].hash = g32(p + o);
+            int l = p[o + 4];
+            for (int c = 0; c < l; c++) out[k].name[c] = p[o + 5 + c] >= 0x20 && p[o + 5 + c] < 0x7f ? (char)p[o + 5 + c] : '?';
+            out[k].name[l] = 0;
+            k++;
+        }
+        o += 5 + p[o + 4];
+    }
+    return k;
+}
+static void list_join(char *out, size_t n, const char *what) {
+    size_t t = strlen(out);
+    snprintf(out + t, n - t, "%s%s", t ? ", " : "", what);
+}
+/* why this game cannot join a room of build b with mods m (known: the room's game named its mods); 0 = it can */
+static int room_why(const char *b, int known, const ModEntry *m, int nm, char *out, size_t n) {
+    out[0] = 0;
+    if (!strcmp(b, g_build)) return 0;
+    char theirs[24], mine[24];
+    if (build_base_len(b) != build_base_len(g_build) || strncmp(b, g_build, (size_t)build_base_len(b))) {
+        build_version(b, theirs, sizeof theirs); build_version(g_build, mine, sizeof mine);
+        if (theirs[0] && mine[0] && strcmp(theirs, mine) && !strncmp(b, g_build, (size_t)(build_base_len(b) - (int)strlen(theirs))))
+            snprintf(out, n, "Different version: this room is %s, you have %s", theirs, mine);
+        else snprintf(out, n, "Different game build: this room is %.*s, you have %.*s", build_base_len(b), b, build_base_len(g_build), g_build);
+        return 1;
+    }
+    if (!strchr(b, '+')) { known = 1; nm = 0; }      /* the room's game loads no mods */
+    if (known < 0) { snprintf(out, n, "Different mods: this room uses another set of mods (F1 > Online rooms names them)"); return 1; }
+    if (!known) { snprintf(out, n, "Different mods: this room's game uses other mods (it is an older version that does not name them)"); return 1; }
+    char missing[256] = "", other[256] = "", extra[256] = "";
+    for (int i = 0; i < nm; i++) {
+        int found = -1;
+        for (int k = 0; k < g_nmods && found < 0; k++) if (!_stricmp(m[i].name, g_mods[k].name)) found = k;
+        if (found < 0) list_join(missing, sizeof missing, m[i].name);
+        else if (g_mods[found].hash != m[i].hash) list_join(other, sizeof other, m[i].name);
+    }
+    for (int k = 0; k < g_nmods; k++) {
+        int found = 0;
+        for (int i = 0; i < nm && !found; i++) found = !_stricmp(m[i].name, g_mods[k].name);
+        if (!found) list_join(extra, sizeof extra, g_mods[k].name);
+    }
+    size_t t = 0;
+    if (missing[0]) t += (size_t)snprintf(out + t, n - t, "MISSING: %s", missing);
+    if (other[0] && t < n) t += (size_t)snprintf(out + t, n - t, "%sANOTHER COPY: %s (yours differs from the room's)", t ? "\n" : "", other);
+    if (extra[0] && t < n) t += (size_t)snprintf(out + t, n - t, "%sNOT IN THIS ROOM: %s (turn them off to join)", t ? "\n" : "", extra);
+    if (!t) snprintf(out, n, "Different mods (the same names, another set)");
+    return 1;
+}
+static void rooms_ask(uint64_t t) {                 /* (client thread) */
+    uint8_t p[16];
+    hdr(p, T_ROOMS);
+    s64(p + 4, g_cookie);
+    s32(p + 12, ++g_rooms_seq);
+    g_nroom_next = 0;
+    tx(p, sizeof p, &g_lobby);
+    g_rooms_sent = t;
+}
+static void rooms_info(const uint8_t *p, int n) {   /* (client thread) ROOM_INFO body */
+    if (n < 4 + 4 + 3 + NAME_LEN + BUILD_LEN + 1 || g32(p) != g_rooms_seq || g_nroom_next >= ROOMS_MAX) return;
+    NetRoom *r = &g_room_next[g_nroom_next];
+    ModEntry m[MODS_MAX];
+    memset(r, 0, sizeof *r);
+    r->host = g32(p + 4);
+    r->players = p[8]; r->most = p[9];
+    r->open = p[10] & 1; r->mine = (p[10] & 2) != 0;
+    int known = (p[10] & 4) != 0;
+    for (int k = 0; k < NAME_LEN; k++) r->name[k] = p[11 + k] && p[11 + k] < 0x20 ? '?' : (char)p[11 + k];
+    memcpy(r->build, p + 11 + NAME_LEN, BUILD_LEN);
+    build_version(r->build, r->version, sizeof r->version);
+    int nm = known ? mods_read(p + 11 + NAME_LEN + BUILD_LEN, n - (11 + NAME_LEN + BUILD_LEN), m, MODS_MAX) : 0;
+    if (nm < 0) { nm = 0; known = 0; }
+    r->mods_known = known;
+    r->nmods = nm;
+    for (int i = 0; i < nm; i++) list_join(r->mods, sizeof r->mods, m[i].name);
+    if (!known && strchr(r->build, '+')) snprintf(r->mods, sizeof r->mods, "(not named: an older game)");
+    r->joinable = !room_why(r->build, known, m, nm, r->why, sizeof r->why);
+    g_nroom_next++;
+}
+static void rooms_end(const uint8_t *p, int n) {    /* (client thread) ROOMS_END body */
+    if (n < 5 || g32(p) != g_rooms_seq) return;
+    AcquireSRWLockExclusive(&g_rooms_lock);
+    memcpy(g_room_list, g_room_next, sizeof g_room_list[0] * (size_t)g_nroom_next);
+    g_nroom_list = g_nroom_next;
+    g_rooms_answered = 1;
+    g_rooms_at = ms_now();
+    ReleaseSRWLockExclusive(&g_rooms_lock);
+    static int said = -1;
+    if (g_nroom_list != said && g_log >= 1) {
+        int other = 0;
+        for (int i = 0; i < g_nroom_list; i++) other += !g_room_list[i].joinable && !g_room_list[i].mine;
+        say("rooms of this lobby code: %d (%d of another version or mod set)", g_nroom_list, other);
+        said = g_nroom_list;
+    }
+}
+static void listing_build(uint32_t host, const char *b) {     /* (client thread) the build of a room of the game's list */
+    AcquireSRWLockExclusive(&g_rooms_lock);
+    int i = 0;
+    while (i < g_nother && g_other[i].ip != host) i++;
+    if (strcmp(b, g_build)) {
+        if (i == g_nother && g_nother < 24) g_nother++;
+        if (i < g_nother) { g_other[i].ip = host; snprintf(g_other[i].build, sizeof g_other[i].build, "%s", b); }
+    } else if (i < g_nother) g_other[i] = g_other[--g_nother];
+    ReleaseSRWLockExclusive(&g_rooms_lock);
+}
+int net_rooms_get(NetRoom *out, int max, int *state) {
+    InterlockedExchange64(&g_rooms_wanted, (LONG64)ms_now());
+    int n = 0;
+    if (state) *state = g_cfg <= 0 ? 0 : !g_joined ? 1 : g_rooms_answered ? 3 : g_rooms_sent && ms_now() - g_rooms_sent > 3000 ? 2 : 1;
+    if (g_cfg <= 0) return 0;
+    AcquireSRWLockShared(&g_rooms_lock);
+    n = g_nroom_list < max ? g_nroom_list : max;
+    memcpy(out, g_room_list, sizeof *out * (size_t)n);
+    ReleaseSRWLockShared(&g_rooms_lock);
+    return n;
+}
+const char *net_build_id(void) { configure(); return g_build; }
+const char *net_mods_text(void) { configure(); return g_mods_text; }
+/* nnldn.c join(): 1 = this game must not join the room of host (another build): why says the cause, the popup shows it */
+int net_room_refusal(uint32_t host, char *why, size_t n) {
+    char b[BUILD_LEN + 1] = "", name[NAME_LEN + 1] = "";
+    int found = 0;
+    if (!n || g_cfg <= 0) return 0;
+    why[0] = 0;
+    AcquireSRWLockShared(&g_rooms_lock);
+    for (int i = 0; i < g_nroom_list && !found; i++)
+        if (g_room_list[i].host == host && !g_room_list[i].mine) {
+            found = 1;
+            if (!g_room_list[i].joinable) { snprintf(why, n, "%s", g_room_list[i].why); snprintf(name, sizeof name, "%s", g_room_list[i].name); snprintf(b, sizeof b, "%s", g_room_list[i].build); }
+        }
+    for (int i = 0; i < g_nother && !found; i++) if (g_other[i].ip == host) snprintf(b, sizeof b, "%s", g_other[i].build);
+    ReleaseSRWLockShared(&g_rooms_lock);
+    if (!b[0]) return 0;
+    if (!found || !why[0]) room_why(b, -1, NULL, 0, why, n);
+    if (!why[0]) return 0;
+    char title[80];
+    snprintf(title, sizeof title, "Cannot join %s's room", name[0] ? name : "this");
+    say("refused to join the room of 10.13.%u.%u (build %s): %s", host >> 8 & 255, host & 255, b, why);
+    menu_popup(title, why);
+    return 1;
 }
 
 /* ---------------------------------------------------------------- the client thread */
@@ -741,7 +1057,9 @@ static int beacon_read(const uint8_t *p, int n, uint64_t *id, uint16_t *port) { 
     if (n < 4 + 8 + 2 + NAME_LEN + BUILD_LEN || p[0] != 'S' || p[1] != 'U' || p[2] != PROTO || p[3] != T_BEACON) return 0;
     char code[NAME_LEN + 1] = "", build[BUILD_LEN + 1] = "";
     memcpy(code, p + 14, NAME_LEN); memcpy(build, p + 14 + NAME_LEN, BUILD_LEN);
-    if (strcmp(code, g_code) || strcmp(build, g_build)) return 0;
+    if (strcmp(code, g_code)) return 0;     /* O1: any build (it used to be ours only): its lobby lists the rooms of every build, the
+                                               * joins stay within one build (the lobby parts players by build and code) */
+    (void)build;
     *id = g64(p + 4); *port = g16(p + 12);
     return *id != 0 && *port != 0;
 }
@@ -851,7 +1169,8 @@ static int setup(void) {                        /* (client thread) where the lob
 }
 
 static void send_join(void) {
-    uint8_t p[4 + 8 + 2 * NAME_LEN + BUILD_LEN + 4 + 2 + 1] = {0};
+    enum { BASE = 4 + 8 + 2 * NAME_LEN + BUILD_LEN + 4 + 2 + 1 };
+    uint8_t p[BASE + 2 + sizeof g_mods_wire] = {0};
     hdr(p, T_JOIN);
     s64(p + 4, g_nonce);
     memcpy(p + 12, g_code, strlen(g_code));
@@ -860,7 +1179,9 @@ static void send_join(void) {
     s32(p + 12 + 2 * NAME_LEN + BUILD_LEN, g_lan_ip);
     s16(p + 16 + 2 * NAME_LEN + BUILD_LEN, g_lan_port);
     p[18 + 2 * NAME_LEN + BUILD_LEN] = (uint8_t)g_direct;
-    tx(p, sizeof p, &g_lobby);
+    p[BASE] = 'M'; p[BASE + 1] = 'S';                  /* O1: this game's mod set (an older lobby reads only BASE bytes) */
+    memcpy(p + BASE + 2, g_mods_wire, (size_t)g_mods_wire_len);
+    tx(p, BASE + 2 + g_mods_wire_len, &g_lobby);
 }
 
 static DWORD WINAPI client_thread(LPVOID unused) {
@@ -906,6 +1227,7 @@ static DWORD WINAPI client_thread(LPVOID unused) {
             else say("lost the lobby %s: joining again", g_server);
         }
         if (g_joined && t - last_tick >= 50) { peers_tick(t); last_tick = t; }
+        if (g_joined && t - (uint64_t)g_rooms_wanted < 5000 && t - g_rooms_sent >= 2000) rooms_ask(t);     /* O1: while someone looks */
         struct sockaddr_in from;
         int flen = sizeof from;
         int n = recvfrom(g_sock, (char *)buf, sizeof buf, 0, (struct sockaddr *)&from, &flen);
@@ -943,7 +1265,20 @@ static DWORD WINAPI client_thread(LPVOID unused) {
             }
             break;
         case T_LISTING:
-            if (n >= 12 + NI_SIZE && g_joined) nnldn_listing(g32(buf + 4), g32(buf + 8), buf + 12);
+            if (n >= 12 + NI_SIZE && g_joined) {
+                if (n >= 12 + NI_SIZE + BUILD_LEN) {         /* O1: the room's build (a LIST with flag 1) */
+                    char b[BUILD_LEN + 1] = "";
+                    memcpy(b, buf + 12 + NI_SIZE, BUILD_LEN);
+                    listing_build(g32(buf + 8), b);
+                }
+                nnldn_listing(g32(buf + 4), g32(buf + 8), buf + 12);
+            }
+            break;
+        case T_ROOM_INFO:
+            if (g_joined) rooms_info(buf + 4, n - 4);
+            break;
+        case T_ROOMS_END:
+            if (g_joined) rooms_end(buf + 4, n - 4);
             break;
         case T_LIST_END:
             if (n >= 9 && g_joined) nnldn_list_end(g32(buf + 4));

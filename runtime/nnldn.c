@@ -423,6 +423,13 @@ static void join(Ctx *c, const uint8_t *session, uint64_t user, uint16_t version
     uint32_t host = 0;
     for (int i = 0; i < SEEN_MAX && !host; i++)
         if (L.seen[i].at && !memcmp(L.seen[i].info + NI_SESSION, session, 16)) host = u32at(L.seen[i].info + NODE(0));
+    char why[256];
+    if (host && net_room_refusal(host, why, sizeof why)) {     /* O1: a room of another version or mod set: listed, never joined */
+        ReleaseSRWLockExclusive(&L.lock);
+        if (LOGL(1)) printf("[online] ldn: cannot join (another build: %s)\n", why);
+        RET(R_LDN_NONET);
+        return;
+    }
     if (L.state != LS_STA || !host) {
         ReleaseSRWLockExclusive(&L.lock);
         if (LOGL(1)) printf("[online] ldn: cannot join (%s)\n", host ? "not a station" : "room not seen in a scan");

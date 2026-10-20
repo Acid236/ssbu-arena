@@ -17,6 +17,10 @@ uptime_s, up) and Access-Control-Allow-Origin: * so a web page (the project site
 returns addresses, names or codes. It listens on 127.0.0.1 by default, to sit behind a TLS reverse proxy (Caddy, see
 deploy_lobby.sh); --status-bind 0.0.0.0 serves it directly over plain HTTP.
 
+Room browser (O1, lobby 1.2): every room stays listed to every player of the same lobby code whatever its game version
+or mod set (ROOMS, and LIST with flag 1); joining stays within one build (the build id carries the game version and a
+hash of the mods). An older game keeps its own partition exactly as before.
+
 Python 3.8+, standard library only. No authentication or encryption yet: run it for people you know."""
 import argparse
 import json
@@ -31,10 +35,12 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PROTO = 1
-LOBBY_VERSION = "1.1"
+LOBBY_VERSION = "1.2"
 (JOIN, WELCOME, REJECT, PING, PONG, DATA, LEAVE, LIST, LISTING, LIST_END,
  PEERS, PUNCH, DIRECT, BCAST) = range(1, 15)
 RB = 16          # online rollback messages between two games (recomp-study/net_relay.c T_RB, rb_net.c)
+ROOMS, ROOM_INFO, ROOMS_END = 17, 18, 19     # O1 room browser (net_relay.c): every room of this lobby code, any build
+MODS_MAX, MOD_NAME, ROOMS_MAX = 32, 31, 32
 NAME_LEN, BUILD_LEN = 32, 40
 JOIN_LEN = 4 + 8 + 2 * NAME_LEN + BUILD_LEN + 4 + 2 + 1
 SUBNET, BROADCASTS = 0x0A0D0000, (0x0A0DFFFF, 0xFFFFFFFF)
@@ -61,6 +67,18 @@ def vip_text(ip):
 def node_name(info, i):
     o = NI_NODES + NODE_LEN * i + 0xC
     return text(info[o:o + NAME_LEN])
+
+
+def mods_block(raw):
+    """A game's mod-set block (count u8, count x (hash u32, length u8, name)) checked and cut to its own length, or None."""
+    if not raw or raw[0] > MODS_MAX:
+        return None
+    o = 1
+    for _ in range(raw[0]):
+        if o + 5 > len(raw) or raw[o + 4] > MOD_NAME or o + 5 + raw[o + 4] > len(raw):
+            return None
+        o += 5 + raw[o + 4]
+    return bytes(raw[:o])
 
 
 def room_nodes(info, owner):
@@ -92,6 +110,7 @@ class Client:
         self.claim = None         # the session id of the room it asked to join
         self.peers_version = 0
         self.peers_sent = None
+        self.mods = None          # its mod-set block (None: an older game that does not send it)
 
 
 class Room:
@@ -214,7 +233,9 @@ class Lobby:
         elif kind == LEAVE and len(p) >= 12 and struct.unpack_from(">Q", p, 4)[0] == c.cookie:
             self.drop(c, "left")
         elif kind == LIST and len(p) >= 16 and struct.unpack_from(">Q", p, 4)[0] == c.cookie:
-            self.on_list(c, p[12:16], now)
+            self.on_list(c, p[12:16], now, len(p) >= 17 and p[16] & 1)
+        elif kind == ROOMS and len(p) >= 16 and struct.unpack_from(">Q", p, 4)[0] == c.cookie:
+            self.on_rooms(c, p[12:16], now)
         elif kind == RB and 16 < len(p) <= 1500 and struct.unpack_from(">Q", p, 4)[0] == c.cookie:
             # online rollback message: to one player of the same lobby code (destination 0 = all others, only with a private code)
             dst = struct.unpack_from(">I", p, 12)[0]
@@ -263,16 +284,34 @@ class Lobby:
                 name, code, build.decode("ascii", "replace"), vip_text(ip), at[0], at[1], socket.inet_ntoa(struct.pack(">I", lan[0])), lan[1],
                 "yes" if direct else "no"))
         c.seen, c.lan, c.direct = now, lan, direct
+        if len(p) > JOIN_LEN + 2 and p[JOIN_LEN:JOIN_LEN + 2] == b"MS":      # O1: the game's mods (an older game sends none)
+            c.mods = mods_block(p[JOIN_LEN + 2:])
         self.send(hdr(WELCOME) + nonce + struct.pack(">IQ", c.ip, c.cookie), at)
 
-    def on_list(self, c, seq, now):
-        rooms = sorted((r for r in self.rooms.values() if r.owner.part == c.part and r.owner is not c and now - r.updated <= LISTED_FOR),
-                       key=lambda r: (not r.is_open(), -r.info[NI_NODE_COUNT], r.created))[:LIST_MAX]
+    def on_list(self, c, seq, now, other=False):
+        """The game's Rooms List. other (flag 1, a newer game): the rooms of every build of this code, each LISTING ending
+        with its host's build[40] (that game refuses to join a room of another build and says why)."""
+        def mine(r):
+            return r.owner.part == c.part if not other else r.owner.part[1] == c.part[1]
+        rooms = sorted((r for r in self.rooms.values() if mine(r) and r.owner is not c and now - r.updated <= LISTED_FOR),
+                       key=lambda r: (r.owner.part != c.part, not r.is_open(), -r.info[NI_NODE_COUNT], r.created))[:LIST_MAX]
         for r in rooms:
-            self.send(hdr(LISTING) + seq + struct.pack(">I", r.owner.ip) + r.info, c.at)
+            self.send(hdr(LISTING) + seq + struct.pack(">I", r.owner.ip) + r.info + (r.owner.part[0][:BUILD_LEN].ljust(BUILD_LEN, b"\0") if other else b""), c.at)
         self.send(hdr(LIST_END) + seq + bytes((len(rooms),)), c.at)
         if rooms:
             self.log("%s scanned: %d room(s)" % (c.name, len(rooms)))
+
+    def on_rooms(self, c, seq, now):
+        """The room browser (F1 > Online rooms): every room of this lobby code, any build, joinable ones first."""
+        rooms = sorted((r for r in self.rooms.values() if r.owner.part[1] == c.part[1] and now - r.updated <= LISTED_FOR),
+                       key=lambda r: (r.owner.part != c.part, not r.is_open(), -r.info[NI_NODE_COUNT], r.created))[:ROOMS_MAX]
+        for r in rooms:
+            o = r.owner
+            flags = (1 if r.is_open() else 0) | (2 if o is c else 0) | (4 if o.mods is not None else 0)
+            self.send(hdr(ROOM_INFO) + seq + struct.pack(">IBBB", o.ip, r.info[NI_NODE_COUNT], r.info[NI_NODE_MAX], flags)
+                      + o.name.encode("utf-8", "replace")[:NAME_LEN].ljust(NAME_LEN, b"\0") + o.part[0][:BUILD_LEN].ljust(BUILD_LEN, b"\0")
+                      + (o.mods or b"\0"), c.at)
+        self.send(hdr(ROOMS_END) + seq + bytes((len(rooms),)), c.at)
 
     def on_data(self, c, p, off, now, skip):
         if len(p) - off - 12 > MAX_DATA + NI_SIZE:

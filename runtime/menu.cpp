@@ -80,6 +80,20 @@ extern "C" void menu_notice(const char *text) {
     if (!g_notice[0]) InterlockedExchange(&g_notice_drawn, 0);
     ReleaseSRWLockExclusive(&g_notice_lock);
 }
+/* O1: a short message at the top of the picture ("Cannot join this room" + the cause), any thread, for 7 s */
+static SRWLOCK g_popup_lock = SRWLOCK_INIT;
+static char g_popup_title[96], g_popup_text[512];
+static volatile LONG64 g_popup_until;
+static volatile LONG g_popup_drawn;
+extern "C" void menu_popup(const char *title, const char *text) {
+    AcquireSRWLockExclusive(&g_popup_lock);
+    snprintf(g_popup_title, sizeof g_popup_title, "%s", title ? title : "");
+    snprintf(g_popup_text, sizeof g_popup_text, "%s", text ? text : "");
+    InterlockedExchange(&g_popup_drawn, 0);
+    InterlockedExchange64(&g_popup_until, (LONG64)GetTickCount64() + 7000);
+    ReleaseSRWLockExclusive(&g_popup_lock);
+}
+static int popup_on(void) { return (ULONGLONG)g_popup_until > GetTickCount64(); }
 /* net_stats.h: the default answer until the online code defines net_stats_get itself */
 extern "C" void net_stats_get_default(NetStats *o) { memset(o, 0, sizeof *o); o->state = NET_OFFLINE; o->ping_ms = -1; }
 #pragma comment(linker, "/alternatename:net_stats_get=net_stats_get_default")
@@ -268,8 +282,8 @@ static uint64_t g_pad_prev;
 static long long g_closed_at, g_frame;
 static char g_pads[1024];
 static ULONGLONG g_pads_at;
-enum { SEC_DISPLAY, SEC_GRAPHICS, SEC_AUDIO, SEC_CONTROLS, SEC_EXPERIMENTAL, SEC_DLC, SEC_LANG, SEC_LOG, SEC_ABOUT, SEC_N };
-static const char *const k_sections[SEC_N] = {"Display", "Graphics", "Audio", "Controls", "Experimental", "Add-on content", "Language", "Log", "About"};
+enum { SEC_DISPLAY, SEC_GRAPHICS, SEC_AUDIO, SEC_CONTROLS, SEC_EXPERIMENTAL, SEC_ROOMS, SEC_DLC, SEC_LANG, SEC_LOG, SEC_ABOUT, SEC_N };
+static const char *const k_sections[SEC_N] = {"Display", "Graphics", "Audio", "Controls", "Experimental", "Online rooms", "Add-on content", "Language", "Log", "About"};
 
 static ImGuiKey vk_key(int vk) {
     if (vk >= 'A' && vk <= 'Z') return (ImGuiKey)(ImGuiKey_A + (vk - 'A'));
@@ -998,6 +1012,72 @@ static void draw_stats(void) {
     ImGui::End();
 }
 
+/* ------------------------------------------------------------------ O1: Online rooms (net_relay.c net_rooms_get) */
+static void sec_rooms(void) {
+    static NetRoom rooms[32];
+    static int sel = -1;
+    static char pop_title[96], pop_text[512];
+    int state = 0, n = net_rooms_get(rooms, 32, &state);
+    if (!state) {
+        help("Online play is off: Experimental > Online play.");
+        return;
+    }
+    {   const char *b = net_build_id(), *plus = strchr(b, '+'), *end = plus ? plus : b + strlen(b), *d = end;
+        while (d > b && d[-1] != '-') d--;
+        ImGui::Text("This game: version"); ImGui::SameLine();
+        ImGui::TextColored(ImVec4(0.45f, 0.9f, 0.45f, 1), "%.*s", (int)(end - d), d); }
+    ImGui::SameLine(); ImGui::Text("  mods:"); ImGui::SameLine();
+    ImGui::PushTextWrapPos(0.0f); ImGui::TextUnformatted(net_mods_text()); ImGui::PopTextWrapPos();
+    help("Every room of your lobby, any version or mod set. Join a room from the game: Local Wireless > Rooms List. "
+         "Rooms of another version or mod set are listed there too, but joining one is refused and says why. Select a row for details.");
+    ImGui::Separator();
+    if (state == 1 && !n) { ImGui::TextDisabled("Asking the lobby..."); return; }
+    if (state == 2) { ImGui::TextColored(ImVec4(1, 0.8f, 0.2f, 1), "The lobby does not list rooms of other versions (an older lobby server): only the game's own list works."); return; }
+    if (!n) { ImGui::TextDisabled("No room is open in this lobby right now. Create one: Local Wireless > Create Room."); return; }
+    if (ImGui::BeginTable("rooms", 5, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingStretchProp)) {
+        ImGui::TableSetupColumn("Host", ImGuiTableColumnFlags_WidthStretch, 1.2f);
+        ImGui::TableSetupColumn("Version", ImGuiTableColumnFlags_WidthStretch, 0.6f);
+        ImGui::TableSetupColumn("Mods", ImGuiTableColumnFlags_WidthStretch, 1.6f);
+        ImGui::TableSetupColumn("Players", ImGuiTableColumnFlags_WidthStretch, 0.5f);
+        ImGui::TableSetupColumn("Status", ImGuiTableColumnFlags_WidthStretch, 1.1f);
+        ImGui::TableHeadersRow();
+        for (int i = 0; i < n; i++) {
+            const NetRoom &r = rooms[i];
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            char id[64];
+            snprintf(id, sizeof id, "%s##room%u", r.name[0] ? r.name : "?", r.host);
+            if (ImGui::Selectable(id, sel == i, ImGuiSelectableFlags_SpanAllColumns)) {
+                sel = i;
+                if (r.mine) { snprintf(pop_title, sizeof pop_title, "Your room"); snprintf(pop_text, sizeof pop_text, "This is the room you host."); }
+                else if (r.joinable) { snprintf(pop_title, sizeof pop_title, "%s's room", r.name); snprintf(pop_text, sizeof pop_text, "Same version and mods as yours: join it from the game, Local Wireless > Rooms List."); }
+                else { snprintf(pop_title, sizeof pop_title, "Cannot join %s's room", r.name); snprintf(pop_text, sizeof pop_text, "%s", r.why); }
+                ImGui::OpenPopup("##roomwhy");
+            }
+            ImGui::TableNextColumn(); ImGui::TextUnformatted(r.version[0] ? r.version : "?");
+            ImGui::TableNextColumn(); ImGui::PushTextWrapPos(0.0f); ImGui::TextUnformatted(r.mods[0] ? r.mods : "none"); ImGui::PopTextWrapPos();
+            ImGui::TableNextColumn(); ImGui::Text("%d / %d", r.players, r.most);
+            ImGui::TableNextColumn();
+            if (r.mine) ImGui::TextDisabled("yours");
+            else if (r.joinable) ImGui::TextColored(r.open ? ImVec4(0.45f, 0.9f, 0.45f, 1) : ImVec4(0.7f, 0.7f, 0.7f, 1), "%s", r.open ? "can join" : "full / closed");
+            else {
+                const char *nl = strchr(r.why, '\n'), *colon = strchr(r.why, ':');
+                int len = (int)((colon && (!nl || colon < nl)) ? colon - r.why : nl ? nl - r.why : (ptrdiff_t)strlen(r.why));
+                ImGui::TextColored(ImVec4(1, 0.45f, 0.4f, 1), "%.*s", len, r.why);
+            }
+        }
+        ImGui::EndTable();
+    }
+    if (ImGui::BeginPopupModal("##roomwhy", NULL, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar)) {
+        ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.35f, 1.0f), "%s", pop_title);
+        ImGui::Separator();
+        ImGui::TextUnformatted(pop_text);
+        if (ImGui::Button("OK", ImVec2(ImGui::GetFontSize() * 6, 0))) ImGui::CloseCurrentPopup();
+        ImGui::SetItemDefaultFocus();
+        ImGui::EndPopup();
+    }
+}
+
 static void sec_about(void) {
     ImGui::Text("SSBU native: Super Smash Bros. Ultimate, statically recompiled for Windows");
     ImGui::Text("Runtime built %s %s (study tree)", __DATE__, __TIME__);
@@ -1047,6 +1127,7 @@ static void draw_menu(int cw, int ch) {
     case SEC_AUDIO: sec_audio(); break;
     case SEC_CONTROLS: sec_controls(); break;
     case SEC_EXPERIMENTAL: sec_experimental(); break;
+    case SEC_ROOMS: sec_rooms(); break;
     case SEC_DLC: sec_dlc(); break;
     case SEC_LANG: sec_lang(); break;
     case SEC_LOG: sec_log(); break;
@@ -1166,6 +1247,29 @@ static void test_tick(void) {
     }
     fflush(stdout);
 }
+/* TEST SWITCH SSBU_MENU_ROOMS_TEST=popup (O1, default off): 1 s after the first online popup is drawn, a picture of it
+ * (SSBU_SHOT_DIR/menu_test_popup.bmp); then F1 opens on Online rooms, 3 s later its rooms go to the log ("menu: rooms
+ * test:") with a picture (menu_test_rooms.bmp), and the menu closes. */
+static void rooms_test_tick(void) {
+    static int on = -1, step;
+    static ULONGLONG t0;
+    if (on < 0) { const char *e = getenv("SSBU_MENU_ROOMS_TEST"); on = e && !_stricmp(e, "popup"); }
+    if (!on || step >= 5) return;
+    ULONGLONG t = GetTickCount64();
+    if (step == 0 && g_popup_drawn) { t0 = t; step = 1; }
+    else if (step == 1 && t - t0 >= 1000) { test_shot("popup"); printf("menu: rooms test: picture of the popup\n"); step = 2; t0 = t; }
+    else if (step == 2 && t - t0 >= 1500) { set_open(1); g_section = SEC_ROOMS; g_section_req = g_section; printf("menu: rooms test: Online rooms opened\n"); step = 3; t0 = t; }
+    else if (step == 3 && t - t0 >= 3000) {
+        NetRoom r[32];
+        int st = 0, n = net_rooms_get(r, 32, &st);
+        printf("menu: rooms test: state %d, this game %s, mods %s, %d room(s)\n", st, net_build_id(), net_mods_text(), n);
+        for (int i = 0; i < n; i++)
+            printf("menu: rooms test: room %d: host %s, version %s, mods [%s], players %d/%d, %s%s%s\n", i, r[i].name, r[i].version, r[i].mods,
+                   r[i].players, r[i].most, r[i].mine ? "yours" : r[i].joinable ? "can join" : "CANNOT JOIN: ", r[i].mine || r[i].joinable ? "" : r[i].why, "");
+        test_shot("rooms"); step = 4; t0 = t;
+    } else if (step == 4 && t - t0 >= 1500) { set_open(0); printf("menu: rooms test: over\n"); step = 5; }
+    fflush(stdout);
+}
 extern "C" int menu_shot_wanted(char *path, int n) {
     if (!g_shot_req) return 0;
     g_shot_req = 0;
@@ -1190,6 +1294,7 @@ extern "C" int menu_frame(int width, int height, MenuDraw *out) {
         if (fresh) g_last_t = now; }
     if (!g_sections_inited) { settings_init(width, height); g_sections_inited = 1; CreateThread(NULL, 0, redraw_thread, NULL, 0, NULL); }
     test_tick();
+    rooms_test_tick();
     uint64_t b = nnhid_menu_buttons(), down = b & ~g_pad_prev;
     g_pad_prev = b;
     if (g_open && capturing()) { if (g_pcap < 0 && (down & (BIT(B_HOME) | BIT(B_CAPTURE)))) capture_cancel("Home / Capture"); }      /* Home cancels a rebinding instead of closing */
@@ -1201,7 +1306,7 @@ extern "C" int menu_frame(int width, int height, MenuDraw *out) {
     for (LONG t = InterlockedExchange(&g_toggle_req, 0); t > 0; t--) set_open(!g_open);
     if (!g_open && g_guard && b == 0 && g_frame - g_closed_at >= 6) InterlockedExchange(&g_guard, 0);      /* closed and every pad button released */
     for (LONG t = InterlockedExchange(&g_stats_req, 0); t > 0; t--) apply_stats(!S.stats);
-    if (!g_open && !S.overlay && !S.stats && !g_notice_on) { Ev drop[8]; while (q_take(drop, 8) == 8) continue; return 0; }
+    if (!g_open && !S.overlay && !S.stats && !g_notice_on && !popup_on()) { Ev drop[8]; while (q_take(drop, 8) == 8) continue; return 0; }
     if (!g_im_ready) im_init(height);
     ImGuiIO &io = ImGui::GetIO();
     io.DisplaySize = ImVec2((float)width, (float)height);
@@ -1252,6 +1357,24 @@ extern "C" int menu_frame(int width, int height, MenuDraw *out) {
         ImGui::TextUnformatted(text);
         ImGui::End();
         if (!InterlockedExchange(&g_notice_drawn, 1)) { printf("menu: online notice drawn (presented frame %lld): %s\n", g_frame, text); fflush(stdout); }
+    }
+    if (popup_on()) {                                    /* O1: "Cannot join this room" and why, at the top, taking no input */
+        char title[96], text[512];
+        AcquireSRWLockShared(&g_popup_lock); snprintf(title, sizeof title, "%s", g_popup_title); snprintf(text, sizeof text, "%s", g_popup_text); ReleaseSRWLockShared(&g_popup_lock);
+        ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.06f + (g_open ? ImGui::GetFrameHeight() : 0.0f)), ImGuiCond_Always, ImVec2(0.5f, 0.0f));
+        ImGui::SetNextWindowBgAlpha(0.88f);
+        ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(1.0f, 0.45f, 0.3f, 1.0f));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 2.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(ImGui::GetFontSize() * 1.2f, ImGui::GetFontSize() * 0.8f));
+        ImGui::Begin("##popup", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
+                     ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoSavedSettings);
+        ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.35f, 1.0f), "%s", title);
+        ImGui::Separator();
+        ImGui::TextUnformatted(text);
+        ImGui::End();
+        ImGui::PopStyleVar(2);
+        ImGui::PopStyleColor();
+        if (!InterlockedExchange(&g_popup_drawn, 1)) { printf("menu: online popup drawn (presented frame %lld): %s: %s\n", g_frame, title, text); fflush(stdout); }
     }
     if (g_open && !osk_active()) draw_menu(width, height);
     ImGui::Render();

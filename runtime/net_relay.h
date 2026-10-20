@@ -37,6 +37,8 @@ void net_send(uint32_t src, uint16_t sport, uint32_t dst, uint16_t dport, const 
 void net_status(char *out, size_t n);   /* one line for logs */
 const char *net_lan_code(void);         /* HOST mode: the code for players on the same network ("" until known) */
 const char *net_upnp_result(void);      /* HOST mode: what UPnP did, one line ("" until tried) */
+/* O1: nnldn.c join(): 1 = the room of host is of another build (version or mod set): why = the cause; the popup is shown */
+int net_room_refusal(uint32_t host, char *why, size_t n);
 
 /* nnldn.c, called by the client thread */
 void nnldn_deliver(uint32_t src, uint16_t sport, uint32_t dst, uint16_t dport, const void *data, uint32_t len);
