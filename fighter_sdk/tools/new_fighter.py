@@ -103,7 +103,7 @@ def clone_files(name, donor, out_root, dry=False):
 
     # the fighter's pictures (portrait, stock icon, select-screen images): a file of the package keeps its own bytes,
     # a missing one is the donor's; either way it gets a row, which is what lets the loose-file layer serve it (2026-10-21:
-    # without these rows Waluigi's own HUD portrait was "not in the archive and no donor file: NOT served")
+    # without these rows a new fighter's own HUD portrait was "not in the archive and no donor file: NOT served")
     for n in range(8):
         tpl = 'ui/replace/chara/chara_%d/chara_%d_' % (n, n) + '%s_00.bntx'
         new, old = tpl % name, tpl % donor

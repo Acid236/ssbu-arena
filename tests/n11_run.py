@@ -73,6 +73,7 @@ def run(tag, extra):
         env.update(SSBU_AUDIO_MUTE='1', SSBU_SPEED='0', SSBU_FIXED_SEED='1', SSBU_DETERMINISTIC='1', SSBU_FIGHT_HASH=hashf)
     secs = int(extra.pop('N5_SECS', os.environ.get('N5_SECS', '240')))
     exe = extra.pop('N5_EXE', os.environ.get('N5_EXE', 'ssbu_n11.exe'))
+    game_ver = extra.pop('N5_GAME', os.environ.get('N5_GAME', '13.0.4'))      # 2026-10-19: N5_GAME=13.0.5 runs ..inaries.0.5\main.elf
     show = extra.pop('N5_SHOW', os.environ.get('N5_SHOW', SHOW))
     maxlines = int(extra.pop('N5_MAXLINES', os.environ.get('N5_MAXLINES', '60')))
     stop_on = extra.pop('N5_STOP_ON', '')       # a regular expression: when the log matches, the run is over (own process stopped)
@@ -85,7 +86,7 @@ def run(tag, extra):
         os.makedirs(os.path.join(STUDY, env['SSBU_SHOT_DIR']), exist_ok=True)
     t0 = time.time()
     with open(log, 'w') as out:
-        p = subprocess.Popen([os.path.join(STUDY, exe), os.path.join(STUDY, '..', 'binaries', '13.0.4', 'main.elf'), str(secs + 60)],
+        p = subprocess.Popen([os.path.join(STUDY, exe), os.path.join(STUDY, '..', 'binaries', game_ver, 'main.elf'), str(secs + 60)],
                              cwd=STUDY, env=env, stdout=out, stderr=subprocess.STDOUT)
         verdict = 'TIMEOUT'
         while time.time() - t0 < secs:

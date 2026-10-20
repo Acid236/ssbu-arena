@@ -20,7 +20,7 @@ DBG = os.environ.get('S15_DBG', 'tests\\s15_dbg.txt')
 
 def game(tag, f, src, extra):
     dummy = 'luigi' if f == 'mario' else 'mario'
-    args = [sys.executable, os.path.join(STUDY, 'tests', 's11_run.py'), tag, 'fighters_bin_s15', SEQ, '0',
+    args = [sys.executable, os.path.join(STUDY, 'tests', 's11_run.py'), tag, os.environ.get('S15_BIN', 'fighters_bin_s15'), SEQ, '0',
             'SSBU_DEBUG_MATCH=p1=%s,p2=%s,p2=human,stage=end' % (f, dummy), 'SSBU_DETERMINISTIC=1', 'SSBU_VK_PREP=0',
             'SSBU_DEBUG_END=' + FRAMES, 'SSBU_FIGHTER_DEBUG=' + DBG]
     if f not in DLC:

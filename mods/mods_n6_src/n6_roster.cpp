@@ -25,6 +25,7 @@
 #include <string.h>
 #include <windows.h>
 #include "hook.h"
+#include "mod_ga.h"            // 13.0.5: game addresses through MOD_GA
 #include "registry.h"
 
 // N5: with the fighter registry (SSBU_CHARACTERS) row k is the registry's fighter k and its id is ui_chara_<name>;
@@ -87,7 +88,7 @@ static uint64_t field_entry(uint64_t st, uint64_t hashes, uint64_t refs, uint64_
 
 static void try_patch(void) {
     if (patched || g_rows <= 0) return;
-    uint64_t g = r64(0x710532e730ull);
+    uint64_t g = r64(MOD_GA(0x710532e730ull));
     if (!readable(g, 16)) return;
     uint64_t mgr = r64(g + 8);
     if (!readable(mgr + 0x168, 8)) return;
@@ -330,9 +331,9 @@ extern "C" __declspec(dllexport) void mod_init(const HookApi *a) {
     g_unlock_log = (e = getenv("N4_UNLOCK_LOG")) && atoi(e);
     if ((e = getenv("N4_UNLOCK_MODES")) && *e) g_unlock_modes = (uint32_t)strtoul(e, nullptr, 0);
     if ((e = getenv("N4_UNLOCK_ELSE")) && *e) g_unlock_else = atoi(e);
-    if (!api->install(0x710326f0f0ull, my_roster, nullptr, &orig_roster)) logf("[n3] roster hook failed: %s", api->error());
-    if (!api->install(0x71019eb840ull, my_grid, nullptr, &orig_grid)) logf("[n3] grid hook failed: %s", api->error());
-    if (!api->install(0x7103269fd0ull, my_index, nullptr, &orig_index)) logf("[n3] index hook failed: %s", api->error());
-    if (!api->install(0x7101797640ull, my_unlock, nullptr, &orig_unlock)) logf("[n3] unlock hook failed: %s", api->error());
+    if (!api->install(MOD_GA(0x710326f0f0ull), my_roster, nullptr, &orig_roster)) logf("[n3] roster hook failed: %s", api->error());
+    if (!api->install(MOD_GA(0x71019eb840ull), my_grid, nullptr, &orig_grid)) logf("[n3] grid hook failed: %s", api->error());
+    if (!api->install(MOD_GA(0x7103269fd0ull), my_index, nullptr, &orig_index)) logf("[n3] index hook failed: %s", api->error());
+    if (!api->install(MOD_GA(0x7101797640ull), my_unlock, nullptr, &orig_unlock)) logf("[n3] unlock hook failed: %s", api->error());
     logf("[n3] roster mod loaded: %d extra ui_chara_db rows (copies of ui_chara_%s)", g_rows, g_donor);
 }

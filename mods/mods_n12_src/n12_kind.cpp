@@ -23,6 +23,7 @@
 #define PSAPI_VERSION 2
 #include <psapi.h>                 // N13: K32EnumProcessModules (kernel32): the fighter DLL's private copy
 #include "hook.h"
+#include "mod_ga.h"            // 13.0.5: game addresses through MOD_GA
 #include "registry.h"
 
 // N5 (plan\phases\N5_own_module.md): this is n4_kind.cpp as a COMPONENT OF THE FIGHTER REGISTRY. With
@@ -43,11 +44,11 @@ static const uint64_t MASK40 = 0xffffffffffull;
 // ssbu_tutto.exe, ssbu_n13.exe) reads B / A / container 2 outside the singleton: garbage rows, no parameter objects,
 // abort() in the fighter init (run both3).
 static const int FIRST = 0x5E, MAXNEW = 8;
-static const uint64_t NAME_TABLE = 0x7104f80e20ull;
+static const uint64_t NAME_TABLE = MOD_GA(0x7104f80e20ull);
 static int g_donor[MAXNEW] = { -1, -1, -1, -1, -1, -1, -1, -1 };
 static char g_donor_name[MAXNEW][32];
 static const uint64_t NEW_B = 0x19a8;              // array B of the patched singleton (patches\kinds.txt)
-static const uint64_t OWNER_TABLE = 0x710455d7e4ull;   // int32 per weapon kind (617 rows)
+static const uint64_t OWNER_TABLE = MOD_GA(0x710455d7e4ull);   // int32 per weapon kind (617 rows)
 static const int WEAPON_KINDS = 617;
 static int g_nnew;
 static uint64_t g_hash[MAXNEW];
@@ -139,7 +140,7 @@ static int dk(uint32_t kind) {                     // donor kind of a new kind
 }
 static void ensure_data(void) {
     if (InterlockedCompareExchange(&g_data_done, 1, 0)) return;
-    static const uint64_t tab[4] = { 0x7104f80e20ull, 0x7104f811d0ull, 0x7104f80a70ull, 0x710453b1c0ull };
+    static const uint64_t tab[4] = { MOD_GA(0x7104f80e20ull), MOD_GA(0x7104f811d0ull), MOD_GA(0x7104f80a70ull), MOD_GA(0x710453b1c0ull) };
     static const char *what[4] = { "names", "sound names", "upper-case names", "kind hashes" };
     resolve_donors();
     for (int n = 0; n < g_nnew; n++) {
@@ -178,7 +179,7 @@ static __declspec(thread) int t_init_kind = -1;        // kind of the fighter in
 static int trace_kind(void) { return t_init_kind; }
 static int entry_kind(int slot) {                     // FighterManager -> entry[slot] + 0x88 (tests\DEBUG_MODE.md)
     if (slot < 0 || slot > 7) return -1;
-    uint64_t mgr = *(uint64_t *)(uintptr_t)0x71052b84f8ull;
+    uint64_t mgr = *(uint64_t *)(uintptr_t)MOD_GA(0x71052b84f8ull);
     if (!readable(mgr, 8)) return -2;
     uint64_t impl = *(uint64_t *)(uintptr_t)mgr;
     if (!readable(impl + 0x20 + 8 * slot, 8)) return -3;
@@ -232,7 +233,7 @@ static NewArticle g_art[MAXNEW][8]; static int g_nart[MAXNEW];
 static uint8_t *g_own_record[MAXNEW]; static int g_articles_on = -1;
 static int weapon_kind_of(const char *owner, const char *weapon) {
     for (int wk = 0; wk < 615; wk++) {
-        uint64_t o = ((uint64_t *)(uintptr_t)0x7105188240ull)[wk], w = ((uint64_t *)(uintptr_t)0x7105185bd0ull)[wk];
+        uint64_t o = ((uint64_t *)(uintptr_t)MOD_GA(0x7105188240ull))[wk], w = ((uint64_t *)(uintptr_t)MOD_GA(0x7105185bd0ull))[wk];
         if (readable(o, 1) && readable(w, 1) && !strcmp((const char *)(uintptr_t)o, owner) && !strcmp((const char *)(uintptr_t)w, weapon)) return wk;
     }
     return -1;
@@ -316,7 +317,7 @@ static void h_record(Ctx *c, void *) {
             int wk = a->tmpl_wk, ok_ = a->owner_kind;
             if (ok_ < 0) continue;
             uint64_t keep[31]; memcpy(keep, c->x, sizeof keep);
-            uint64_t trec = game_call2(c, 0x710064b730ull, (uint64_t)ok_, 0);
+            uint64_t trec = game_call2(c, MOD_GA(0x710064b730ull), (uint64_t)ok_, 0);
             memcpy(c->x, keep, sizeof keep);
             uint64_t th = readable(trec + 8, 8) ? *(uint64_t *)(uintptr_t)(trec + 8) : 0;
             uint64_t trows = readable(th, 16) ? *(uint64_t *)(uintptr_t)th : 0; int tc = readable(th, 16) ? (int)*(uint64_t *)(uintptr_t)(th + 8) : 0;
@@ -539,7 +540,7 @@ static struct { uint64_t *slot; uint64_t was; } g_lent[2]; static int g_nlent;
 static long g_n_own;
 static int64_t arc_file_index(const char *path) {
     uint64_t h = hash40(path);
-    uint64_t fsinfo = *(uint64_t *)(uintptr_t)0x7105331f20ull;
+    uint64_t fsinfo = *(uint64_t *)(uintptr_t)MOD_GA(0x7105331f20ull);
     if (!readable(fsinfo + 0x78, 8)) return -1;
     uint64_t holder = *(uint64_t *)(uintptr_t)(fsinfo + 0x78);
     if (!readable(holder, 8)) return -1;
@@ -576,7 +577,7 @@ static void own_param_begin(uint32_t kind) {
         if (!g_own[n][k].data) continue;
         char donor[200]; snprintf(donor, sizeof donor, "fighter/%s/param/%s", f->donor, OWN_PARAM[k]);
         int64_t fi = arc_file_index(donor);
-        uint64_t fsinfo = *(uint64_t *)(uintptr_t)0x7105331f20ull;
+        uint64_t fsinfo = *(uint64_t *)(uintptr_t)MOD_GA(0x7105331f20ull);
         if (fi < 0 || !readable(fsinfo + 8, 16)) continue;
         uint64_t lfp = *(uint64_t *)(uintptr_t)(fsinfo + 8), ld = *(uint64_t *)(uintptr_t)(fsinfo + 0x10);
         if (!readable(lfp + 8ull * fi, 8)) continue;
@@ -631,7 +632,7 @@ static void h_group(Ctx *c, void *) {
 static void install_group_hook(int n) {
     const char *e = getenv("N12_ARTGROUP");
     if (!(e && e[0] == '1') || !articles_on()) return;
-    uint8_t *P = *(uint8_t **)(uintptr_t)0x71052bb3b0ull;
+    uint8_t *P = *(uint8_t **)(uintptr_t)MOD_GA(0x71052bb3b0ull);
     if (!P) return;
     resolve_articles(n);
     g_objN[n] = *(uint64_t *)(P + 0x60 + 0x38 * (FIRST + n) + 0x10);
@@ -644,7 +645,7 @@ static void install_group_hook(int n) {
         g_hashT[n][t][0] = hash40(s1); g_hashT[n][t][1] = hash40(s2);
         if (g_group_slot < 0 && readable(g_objT[n][t], 8)) {           // the slot of Mario's getter in his class table
             uint64_t vt = *(uint64_t *)(uintptr_t)g_objT[n][t];
-            for (int s = 0; s < 32 && readable(vt + 8ull * s, 8); s++) if (*(uint64_t *)(uintptr_t)(vt + 8ull * s) == 0x7100cbf1c0ull) g_group_slot = s;
+            for (int s = 0; s < 32 && readable(vt + 8ull * s, 8); s++) if (*(uint64_t *)(uintptr_t)(vt + 8ull * s) == MOD_GA(0x7100cbf1c0ull)) g_group_slot = s;
         }
     }
     if (g_group_slot < 0 || !readable(g_objN[n], 8)) { logf("[n12] parameter group hook: slot %d, object %llx: not installed", g_group_slot, (unsigned long long)g_objN[n]); return; }
@@ -794,12 +795,12 @@ static int add_rows(Ctx *c, uint8_t *P, int holder_off, size_t row, int32_t *idx
     int donor_row[MAXNEW];
     for (int k = 0; k < g_nnew; k++) {                  // N6: the donor's row of EACH new kind
         int donor = -1;
-        uint64_t dh = ((uint64_t *)(uintptr_t)0x710453bc58ull)[dk(FIRST + k)] & MASK40;       // the loader's own list of kind hashes
+        uint64_t dh = ((uint64_t *)(uintptr_t)MOD_GA(0x710453bc58ull))[dk(FIRST + k)] & MASK40;       // the loader's own list of kind hashes
         for (size_t i = 0; i < n; i++) if ((*(uint64_t *)(b + i * row) & MASK40) == dh) { donor = (int)i; break; }
         if (donor < 0) { logf("[n6] kind: row vector of 0x%x-byte rows: no row with the kind hash %llx of the donor %s: no rows added", (unsigned)row, (unsigned long long)dh, g_donor_name[k]); return 0; }
         donor_row[k] = donor;
     }
-    uint8_t *nb = (uint8_t *)(uintptr_t)game_call2(c, 0x710392dce0ull, 0x10, (n + g_nnew) * row);
+    uint8_t *nb = (uint8_t *)(uintptr_t)game_call2(c, MOD_GA(0x710392dce0ull), 0x10, (n + g_nnew) * row);
     if (!nb) return 0;
     memcpy(nb, b, n * row);
     for (int k = 0; k < g_nnew; k++) {
@@ -853,7 +854,7 @@ static void h_loader(Ctx *c, void *) {             // loads fighter_param: write
 }
 // read-back of the edited value through the game's own index: singleton -> row vector -> row B[kind]
 static void row_readback(int kind, const char *when) {
-    uint8_t *P = *(uint8_t **)(uintptr_t)0x71052bb3b0ull;
+    uint8_t *P = *(uint8_t **)(uintptr_t)MOD_GA(0x71052bb3b0ull);
     if (!P || !g_row_noff) return;
     int32_t idx = ((int32_t *)(P + NEW_B))[3 * kind];
     uint64_t holder = *(uint64_t *)P, beg = *(uint64_t *)(uintptr_t)(holder + 8), end = *(uint64_t *)(uintptr_t)(holder + 0x10);
@@ -865,7 +866,7 @@ static void row_readback(int kind, const char *when) {
 }
 static void h_setup(Ctx *c, void *) {              // second per-kind container: rows 0x5E.. become empty lists
     o_setup(c);
-    uint64_t *p = *(uint64_t **)(uintptr_t)0x71052bb3a8ull;
+    uint64_t *p = *(uint64_t **)(uintptr_t)MOD_GA(0x71052bb3a8ull);
     if (!p) return;
     int done = 0;
     for (int k = 0x5e; k < 0x72; k++) {
@@ -1026,7 +1027,7 @@ static void h_winit(Ctx *c, void *) {              // weapon init (weapon object
     }
     if (g_n_winit++ < g_weapon_log) {
         // 0x71033babd0 stores the owner's first parameter object (shared pointer) at weapon + 0x38d0 + 8
-        uint8_t *P = *(uint8_t **)(uintptr_t)0x71052bb3b0ull;
+        uint8_t *P = *(uint8_t **)(uintptr_t)MOD_GA(0x71052bb3b0ull);
         unsigned long long got = *(unsigned long long *)(uintptr_t)(w + 0x38d8);
         unsigned long long a_stat = (P && stat >= 0) ? *(unsigned long long *)(P + 0x60 + 0x38 * stat + 0x10) : 0;
         unsigned long long a_live = (P && live >= 0) ? *(unsigned long long *)(P + 0x60 + 0x38 * live + 0x10) : 0;
@@ -1181,7 +1182,7 @@ static void h_wpath(Ctx *c, void *) {
         if (fi < MAXNEW) resolve_articles(fi);
         int t = fi < MAXNEW && ai < g_nart[fi] ? g_art[fi][ai].tmpl_wk : -1;
         if (t >= 0) {
-            uint64_t *on = (uint64_t *)(uintptr_t)0x7105188240ull, *wn = (uint64_t *)(uintptr_t)0x7105185bd0ull;
+            uint64_t *on = (uint64_t *)(uintptr_t)MOD_GA(0x7105188240ull), *wn = (uint64_t *)(uintptr_t)MOD_GA(0x7105185bd0ull);
             static int prot; DWORD old;
             if (!prot) { prot = 1; VirtualProtect(on, 8 * 615, PAGE_READWRITE, &old); VirtualProtect(wn, 8 * 615, PAGE_READWRITE, &old); }
             EnterCriticalSection(&g_lock);
@@ -1431,7 +1432,7 @@ static void h_fireball(Ctx *c, void *) {           // (article, owner's module a
     }
     if (n == 1 && kind < 0x72 && getenv("N4_PARAM_DUMP")) {
         // read-back for the loose-file proof: the kind's first parameter object (A[kind] + 0x10; the donor's class, 0x1c8 bytes)
-        uint8_t *P = *(uint8_t **)(uintptr_t)0x71052bb3b0ull;
+        uint8_t *P = *(uint8_t **)(uintptr_t)MOD_GA(0x71052bb3b0ull);
         uint64_t obj = P ? *(uint64_t *)(P + 0x60 + 0x38 * kind + 0x10) : 0;
         for (int off = 0; obj && readable(obj, 0x1c8) && off < 0x1c8; off += 0x40) {
             char line[400]; int k = 0;
@@ -1456,7 +1457,7 @@ static void h_fireball(Ctx *c, void *) {           // (article, owner's module a
     // sees the owner's kind field as the TEMPLATE OWNER's for the call only (the callback-wrap idea, scoped to it)
     if (articles_on() && is_new((uint32_t)kind) && !(getenv("N12_ARTWRAP") && getenv("N12_ARTWRAP")[0] == '0')) {
         int n = kind - FIRST, tk = -1;
-        for (int t = 0; t < g_nart[n]; t++) if (g_art[n][t].fn[0] == 0x7100cb9de0ull) tk = g_art[n][t].owner_kind;
+        for (int t = 0; t < g_nart[n]; t++) if (g_art[n][t].fn[0] == MOD_GA(0x7100cb9de0ull)) tk = g_art[n][t].owner_kind;
         uint64_t obj = 0;
         for (int i = 0; i < g_nfighter; i++) if (*(uint32_t *)(uintptr_t)(g_fighter[i].obj + 8) == id) obj = g_fighter[i].obj;
         if (tk >= 0 && obj && readable(obj + 0xc, 4)) {
@@ -1524,36 +1525,36 @@ extern "C" __declspec(dllexport) void mod_init(const HookApi *a) {
     if ((e = getenv("N4_ROW_FIND"))) g_row_find = (uint32_t)strtoul(e, nullptr, 16);
     if ((e = getenv("N4_ROW_SET"))) g_row_set = (uint32_t)strtoul(e, nullptr, 16);
     if ((e = getenv("N4_WEAPON_LOG"))) g_weapon_log = atoi(e);
-    static const uint64_t disp[9] = { 0x710064bbd0ull, 0x710064c310ull, 0x710064c930ull, 0x710064cf50ull, 0x710064d570ull, 0x710064db90ull, 0x710064e2a0ull, 0x710064e8b0ull, 0x710064eec0ull };
-    static const uint64_t wdisp[4] = { 0x71033abee0ull, 0x71033acde0ull, 0x71033add40ull, 0x71033aeca0ull };
+    static const uint64_t disp[9] = { MOD_GA(0x710064bbd0ull), MOD_GA(0x710064c310ull), MOD_GA(0x710064c930ull), MOD_GA(0x710064cf50ull), MOD_GA(0x710064d570ull), MOD_GA(0x710064db90ull), MOD_GA(0x710064e2a0ull), MOD_GA(0x710064e8b0ull), MOD_GA(0x710064eec0ull) };
+    static const uint64_t wdisp[4] = { MOD_GA(0x71033abee0ull), MOD_GA(0x71033acde0ull), MOD_GA(0x71033add40ull), MOD_GA(0x71033aeca0ull) };
     int ok = 0, all = 0;
-    all++; ok += !!api->install(0x710066cd40ull, h_hash, nullptr, &o_hash);
-    all++; ok += !!api->install(0x710064b730ull, h_record, nullptr, &o_record);
-    all++; ok += !!api->install(0x710068d530ull, h_callbacks, nullptr, &o_callbacks);
+    all++; ok += !!api->install(MOD_GA(0x710066cd40ull), h_hash, nullptr, &o_hash);
+    all++; ok += !!api->install(MOD_GA(0x710064b730ull), h_record, nullptr, &o_record);
+    all++; ok += !!api->install(MOD_GA(0x710068d530ull), h_callbacks, nullptr, &o_callbacks);
     for (int i = 0; i < 9; i++) { all++; ok += !!api->install(disp[i], h_disp, (void *)(intptr_t)i, &o_disp[i]); }
-    all++; ok += !!api->install(0x710070c580ull, h_build, (void *)0, &o_build[0]);
-    all++; ok += !!api->install(0x7100721ca0ull, h_build, (void *)1, &o_build[1]);
-    all++; ok += !!api->install(0x710033ba50ull, h_get, (void *)0, &o_get[0]);
-    all++; ok += !!api->install(0x710033c510ull, h_get, (void *)1, &o_get[1]);
-    all++; ok += !!api->install(0x7100709d60ull, h_loader, nullptr, &o_loader);
-    all++; ok += !!api->install(0x71006867e0ull, h_init, nullptr, &o_init);
-    all++; ok += !!api->install(0x710066ee40ull, h_setup, nullptr, &o_setup);
-    all++; ok += !!api->install(0x71033b5640ull, h_winit, nullptr, &o_winit);
+    all++; ok += !!api->install(MOD_GA(0x710070c580ull), h_build, (void *)0, &o_build[0]);
+    all++; ok += !!api->install(MOD_GA(0x7100721ca0ull), h_build, (void *)1, &o_build[1]);
+    all++; ok += !!api->install(MOD_GA(0x710033ba50ull), h_get, (void *)0, &o_get[0]);
+    all++; ok += !!api->install(MOD_GA(0x710033c510ull), h_get, (void *)1, &o_get[1]);
+    all++; ok += !!api->install(MOD_GA(0x7100709d60ull), h_loader, nullptr, &o_loader);
+    all++; ok += !!api->install(MOD_GA(0x71006867e0ull), h_init, nullptr, &o_init);
+    all++; ok += !!api->install(MOD_GA(0x710066ee40ull), h_setup, nullptr, &o_setup);
+    all++; ok += !!api->install(MOD_GA(0x71033b5640ull), h_winit, nullptr, &o_winit);
     for (int i = 0; i < 4; i++) { all++; ok += !!api->install(wdisp[i], h_wdisp, (void *)(intptr_t)i, &o_wdisp[i]); }
-    all++; ok += !!api->install(0x7100cb9de0ull, h_fireball, nullptr, &o_fireball);
-    all++; ok += !!api->install(0x71017e88d0ull, h_path, nullptr, &o_path);
-    if (!((e = getenv("N12_COLOUR0")) && e[0] == '0')) { all++; ok += !!api->install(0x7101788260ull, h_precord, nullptr, &o_precord); }      // U1: colour of a new fighter
+    all++; ok += !!api->install(MOD_GA(0x7100cb9de0ull), h_fireball, nullptr, &o_fireball);
+    all++; ok += !!api->install(MOD_GA(0x71017e88d0ull), h_path, nullptr, &o_path);
+    if (!((e = getenv("N12_COLOUR0")) && e[0] == '0')) { all++; ok += !!api->install(MOD_GA(0x7101788260ull), h_precord, nullptr, &o_precord); }      // U1: colour of a new fighter
     if (!((e = getenv("N13_WKLOOK")) && e[0] == '0'))       // N13: the two bounded per-weapon-kind lookups (phase file N13 section 2)
-        for (int i = 0; i < 2; i++) { all++; ok += !!api->install(i ? 0x71033aa1e0ull : 0x71033be790ull, h_wklook, (void *)(intptr_t)i, &o_wklook[i]); }
+        for (int i = 0; i < 2; i++) { all++; ok += !!api->install(i ? MOD_GA(0x71033aa1e0ull) : MOD_GA(0x71033be790ull), h_wklook, (void *)(intptr_t)i, &o_wklook[i]); }
     if (!((e = getenv("N13_OWNFILES")) && e[0] == '0')) {
-        all++; ok += !!api->install(0x71017e0840ull, h_wpath, nullptr, &o_wpath);
-        all++; ok += !!api->install(0x710339fee0ull, h_wstart, nullptr, &o_wstart);
+        all++; ok += !!api->install(MOD_GA(0x71017e0840ull), h_wpath, nullptr, &o_wpath);
+        all++; ok += !!api->install(MOD_GA(0x710339fee0ull), h_wstart, nullptr, &o_wstart);
     }
-    if (!((e = getenv("N13_OWNPARAM")) && e[0] == '0') && readable(0x7104f89490ull + 616, 8)) {      // N13: work-module parameter getters (int, int, float)
+    if (!((e = getenv("N13_OWNPARAM")) && e[0] == '0') && readable(MOD_GA(0x7104f89490ull) + 616, 8)) {      // N13: work-module parameter getters (int, int, float)
         static const int slot[3] = { 584, 592, 616 };
-        for (int i = 0; i < 3; i++) { all++; ok += !!api->install(*(uint64_t *)(uintptr_t)(0x7104f89490ull + slot[i]), h_wparam, (void *)(intptr_t)i, &o_wparam[i]); }
-        logf("[n13] own article parameters: work-module getters %llx %llx %llx hooked", *(unsigned long long *)(uintptr_t)(0x7104f89490ull + 584),
-             *(unsigned long long *)(uintptr_t)(0x7104f89490ull + 592), *(unsigned long long *)(uintptr_t)(0x7104f89490ull + 616));
+        for (int i = 0; i < 3; i++) { all++; ok += !!api->install(*(uint64_t *)(uintptr_t)(MOD_GA(0x7104f89490ull) + slot[i]), h_wparam, (void *)(intptr_t)i, &o_wparam[i]); }
+        logf("[n13] own article parameters: work-module getters %llx %llx %llx hooked", *(unsigned long long *)(uintptr_t)(MOD_GA(0x7104f89490ull) + 584),
+             *(unsigned long long *)(uintptr_t)(MOD_GA(0x7104f89490ull) + 592), *(unsigned long long *)(uintptr_t)(MOD_GA(0x7104f89490ull) + 616));
     } else logf("[n13] own article parameters: work-module class table not readable at start: NOT hooked");
     {
         e = getenv("N6_KINDFIELD");
@@ -1581,10 +1582,10 @@ extern "C" __declspec(dllexport) void mod_init(const HookApi *a) {
             if (!api->install(g_trace_addr[nt], h_trace, (void *)(intptr_t)nt, &o_trace[nt])) logf("[n6trace] hook on %llx failed", (unsigned long long)g_trace_addr[nt]);
         }
     }
-    if (!((e = getenv("N6_SETUP2")) && e[0] == '0')) { all++; ok += !!api->install(0x71006cdd20ull, h_setup2, nullptr, &o_setup2); }
-    static const uint64_t ai[8] = { 0x71002c5cf0ull, 0x71002c9900ull, 0x710034b310ull, 0x7100351630ull, 0x710035fc50ull, 0x7100362df0ull, 0x710036c1c0ull, 0x71003719c0ull };
+    if (!((e = getenv("N6_SETUP2")) && e[0] == '0')) { all++; ok += !!api->install(MOD_GA(0x71006cdd20ull), h_setup2, nullptr, &o_setup2); }
+    static const uint64_t ai[8] = { MOD_GA(0x71002c5cf0ull), MOD_GA(0x71002c9900ull), MOD_GA(0x710034b310ull), MOD_GA(0x7100351630ull), MOD_GA(0x710035fc50ull), MOD_GA(0x7100362df0ull), MOD_GA(0x710036c1c0ull), MOD_GA(0x71003719c0ull) };
     g_kirby = !((e = getenv("N5_KIRBY")) && e[0] == '0');
-    if (g_kirby) { all++; ok += !!api->install(0x71017f0bd0ull, h_kirby, nullptr, &o_kirby); }
+    if (g_kirby) { all++; ok += !!api->install(MOD_GA(0x71017f0bd0ull), h_kirby, nullptr, &o_kirby); }
     g_ai = !((e = getenv("N5_AI")) && e[0] == '0');
     if (g_ai) for (int i = 0; i < 8; i++) { all++; ok += !!api->install(ai[i], h_ai, (void *)(intptr_t)i, &o_ai[i]); }
     char donors[200]; int dn = 0; donors[0] = 0;

@@ -47,6 +47,8 @@ def main():
                SSBU_DETERMINISTIC='1', SSBU_FIGHT_HASH=hashf)
     secs = int(extra.pop('N5_SECS', os.environ.get('N5_SECS', '240')))
     exe = extra.pop('N5_EXE', os.environ.get('N5_EXE', 'ssbu_n5.exe'))
+    global N5_VERSION
+    N5_VERSION = extra.pop('N5_VERSION', os.environ.get('N5_VERSION', '13.0.4'))     # 13.0.5: also SSBU_ROMFS=<its romfs> and a 1305x exe
     show = extra.pop('N5_SHOW', os.environ.get('N5_SHOW', SHOW))
     maxlines = int(extra.pop('N5_MAXLINES', os.environ.get('N5_MAXLINES', '60')))
     for k, v in extra.items():
@@ -56,7 +58,7 @@ def main():
             env[k] = v
     t0 = time.time()
     with open(log, 'w') as out:
-        p = subprocess.Popen([os.path.join(STUDY, exe), os.path.join(STUDY, '..', 'binaries', '13.0.4', 'main.elf'), str(secs + 60)],
+        p = subprocess.Popen([os.path.join(STUDY, exe), os.path.join(STUDY, '..', 'binaries', N5_VERSION, 'main.elf'), str(secs + 60)],
                              cwd=STUDY, env=env, stdout=out, stderr=subprocess.STDOUT)
         verdict = 'TIMEOUT'
         while time.time() - t0 < secs:
