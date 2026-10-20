@@ -29,6 +29,7 @@ int menu_enabled(void) {
 int menu_is_open(void) { return 0; }
 int menu_input_blocked(void) { return 0; }
 void menu_request_toggle(void) {}
+void menu_notice(const char *text) { (void)text; }      /* (the message is in the log only) */
 int menu_wndproc(void *hwnd, unsigned msg, uintptr_t w, intptr_t l) {
     (void)hwnd; (void)l;
     if (msg == WM_KEYDOWN && w == VK_F1) say_why("F1 was pressed");

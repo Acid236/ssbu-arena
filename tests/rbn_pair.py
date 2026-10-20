@@ -32,6 +32,7 @@ def main():
                 N5_STOP_ON='fight.off', SSBU_DEBUG_MATCH='p1=mario,p2=donkey,p2=human,stage=end')
     base.update(both)
     port = base.pop('RBN_PORT', '39520')
+    stagger = float(base.pop('RBN_STAGGER', '3'))      # hs12: seconds between the two starts (two boots at once sometimes miss the title screen)
     procs = []
     for side in ('h', 'j'):
         t = tag + side
@@ -42,7 +43,7 @@ def main():
         out = open(os.path.join(LOGS, 'rbn_pair_%s.out' % t), 'w')
         procs.append((t, subprocess.Popen([sys.executable, os.path.join(HERE, 'n11_run.py'), t] + ['%s=%s' % kv for kv in env.items()],
                                           cwd=STUDY, stdout=out, stderr=subprocess.STDOUT), out))
-        time.sleep(3)
+        time.sleep(stagger)
     for t, p, out in procs:
         p.wait()
         out.close()
@@ -51,19 +52,12 @@ def main():
     for t, _, _ in procs:
         print('==', t)
         lines = open(os.path.join(LOGS, 'r1_%s.txt' % t), errors='replace').read().splitlines()
-        keep = [l for l in lines if 'start barrier' in l or 'RB NET report' in l or 'RB NET TIMING' in l or '[rbnet] report' in l or 'DESYNC' in l]
-        seen, last = set(), []
-        for l in reversed(keep):                      # the last copy of each kind of line (the report is printed more than once)
-            k = l.split(':')[1][:40] if ':' in l else l
-            k = l[:60]
-            if k in seen:
-                continue
-            seen.add(k)
-            last.append(l)
-        for l in reversed(last):
+        keep = [l for l in lines if 'start barrier' in l or 'RB NET report' in l or ('RB NET TIMING' in l and 'with rollback' in l) or '[rbnet] report' in l or 'DESYNC' in l
+                or 'RING rebase' in l or 'match start, base' in l or 'not agreed' in l or 'RB NET: match' in l]
+        for l in keep:                                # (hs12: one report per match now)
             print('  ' + l[:330])
         for l in open(os.path.join(LOGS, 'n11_%s.log' % t), errors='replace'):      # rbn9: the match handshake and the match block check
-            if 'handshake' in l and ('agreed' in l or 'FAILED' in l or 'the match:' in l) or 'match block check' in l:
+            if 'handshake' in l and ('agreed' in l or 'FAILED' in l or 'the match:' in l or 'no panel' in l) or 'match block check' in l or 'notice drawn' in l                     or '[rbnet] match' in l or 'debug panels' in l:
                 print('  ' + l.rstrip()[:330])
 
 

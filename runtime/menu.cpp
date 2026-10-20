@@ -69,6 +69,17 @@ extern "C" int menu_enabled(void) {
 extern "C" int menu_is_open(void) { return g_enabled > 0 && g_open; }
 extern "C" int menu_input_blocked(void) { return g_enabled > 0 && (g_open || g_guard); }
 extern "C" void menu_request_toggle(void) { InterlockedIncrement(&g_toggle_req); }
+/* R3: the online match's message (any thread; copied under a lock, read by the render thread) */
+static SRWLOCK g_notice_lock = SRWLOCK_INIT;
+static char g_notice[512];
+static volatile LONG g_notice_on, g_notice_drawn;
+extern "C" void menu_notice(const char *text) {
+    AcquireSRWLockExclusive(&g_notice_lock);
+    snprintf(g_notice, sizeof g_notice, "%s", text ? text : "");
+    InterlockedExchange(&g_notice_on, g_notice[0] != 0);
+    if (!g_notice[0]) InterlockedExchange(&g_notice_drawn, 0);
+    ReleaseSRWLockExclusive(&g_notice_lock);
+}
 /* net_stats.h: the default answer until the online code defines net_stats_get itself */
 extern "C" void net_stats_get_default(NetStats *o) { memset(o, 0, sizeof *o); o->state = NET_OFFLINE; o->ping_ms = -1; }
 #pragma comment(linker, "/alternatename:net_stats_get=net_stats_get_default")
@@ -1137,7 +1148,7 @@ extern "C" int menu_frame(int width, int height, MenuDraw *out) {
     for (LONG t = InterlockedExchange(&g_toggle_req, 0); t > 0; t--) set_open(!g_open);
     if (!g_open && g_guard && b == 0 && g_frame - g_closed_at >= 6) InterlockedExchange(&g_guard, 0);      /* closed and every pad button released */
     for (LONG t = InterlockedExchange(&g_stats_req, 0); t > 0; t--) apply_stats(!S.stats);
-    if (!g_open && !S.overlay && !S.stats) { Ev drop[8]; while (q_take(drop, 8) == 8) continue; return 0; }
+    if (!g_open && !S.overlay && !S.stats && !g_notice_on) { Ev drop[8]; while (q_take(drop, 8) == 8) continue; return 0; }
     if (!g_im_ready) im_init(height);
     ImGuiIO &io = ImGui::GetIO();
     io.DisplaySize = ImVec2((float)width, (float)height);
@@ -1176,6 +1187,19 @@ extern "C" int menu_frame(int width, int height, MenuDraw *out) {
     ImGui::NewFrame();
     if (S.overlay) draw_overlay();
     if (S.stats) draw_stats();
+    if (g_notice_on) {                                   /* R3: the online match's message, in the middle */
+        char text[512];
+        AcquireSRWLockShared(&g_notice_lock); snprintf(text, sizeof text, "%s", g_notice); ReleaseSRWLockShared(&g_notice_lock);
+        ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+        ImGui::SetNextWindowBgAlpha(0.8f);
+        ImGui::Begin("##notice", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
+                     ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoSavedSettings);
+        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1.0f), "Online match");
+        ImGui::Separator();
+        ImGui::TextUnformatted(text);
+        ImGui::End();
+        if (!InterlockedExchange(&g_notice_drawn, 1)) { printf("menu: online notice drawn (presented frame %lld): %s\n", g_frame, text); fflush(stdout); }
+    }
     if (g_open && !osk_active()) draw_menu(width, height);
     ImGui::Render();
     ImDrawData *dd = ImGui::GetDrawData();

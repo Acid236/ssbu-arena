@@ -15,6 +15,13 @@ typedef struct {
     uint8_t hazards, rule_kind, stock, pad0;
     uint32_t items;                /* match block + 0x54 (item appear) */
     uint64_t seed;                 /* the agreed seed (never 0) */
+    /* (hs12) the host's state that the game's stage set-up 0x710177a980 reads (run tw5: a stage whose variation, stage
+     * block + 0x91 / + 0x92, the two games chose differently from their own history: desync from frame 7): the seed word
+     * at 0x710530d380, the set-up's own history 0x71050c5ad0 .. + 0x60 (no-repeat bags), the match block's stage block
+     * (+ 0x420 .. + 0x4d0) as it was before the set-up. Both games write the host's values before the set-up runs. */
+    uint32_t ctx_seed;
+    uint8_t ctx_hist[0x60];
+    uint8_t ctx_stage[0xb0];
 } RbhMatch;
 #pragma pack(pop)
 int rbn_handshake_wanted(void);                         /* SSBU_RB_NET=net (not loop) and SSBU_RB_NET_HANDSHAKE not 0: env only */

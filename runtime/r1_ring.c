@@ -282,7 +282,7 @@ int r1_ring_capture(long long frame, Ctx *c) {
     RgSlot *s = rg_slot(g_rg_count);
     s->frame = frame; s->nent = 0; s->pages = 0; s->xpages = 0;
     g_rg_cur = s; g_rg_fail_now = 0;
-    static uint8_t *xdiff; if (!xdiff) xdiff = calloc(g_rg_nx + 1, 1);
+    static uint8_t *xdiff; static size_t xdn; if (xdn < g_rg_nx + 1) { free(xdiff); xdn = g_rg_nx + 1; xdiff = calloc(xdn, 1); }   /* (hs12: the extras can change at a rebase) */
     for (size_t e = 0; e < g_rg_nx; e++) cp_add(g_rg_xa[e], rg_src((uint32_t)(g_rg_n1 + g_rg_n2 + e)));      /* (round 3) extras compared by main + the copy threads */
     g_cp_cmp = xdiff; cp_run(); g_cp_cmp = NULL;
     if (g_rgpg_on < 0) g_rgpg_on = getenv("SSBU_RB_SIM_PAGES") != NULL;
@@ -312,6 +312,95 @@ int r1_ring_capture(long long frame, Ctx *c) {
     }
     g_rg_last[0] = t5 - t0; g_rgp_seg = seg_was;
     if (g_rgc_n < RG_NST) { int i = g_rgc_n++; g_rgc[0][i] = t5 - t0; g_rgc[1][i] = t1 - t0; g_rgc[2][i] = t2 - t1; g_rgc[3][i] = t3 - t2; g_rgc[4][i] = (t4 - t3) + (t5 - t4); g_rgc_pg[i] = s->pages; g_rgc_xp[i] = s->xpages; }
+    return 1;
+}
+/* (R3 hs12) a NEW BASE for the next match of the same process (two online matches in one session). Between two matches
+ * the game loaded and freed a lot through host code that marks nothing (file loads, module loads, the loader threads), so
+ * the ring's newest values (g_rg_idx, the flat shadow) are stale: every slot is dropped and, with every guest thread held,
+ * the base is made again the way the first full save made it, in place: every committed read-write page of both windows
+ * is copied into the shadow (its value = the shadow again, pool buffers freed), the shadow of a page not committed now is
+ * decommitted (= a zero page, as for a page the first save never saw), the marks are cleared, the extras (pages outside
+ * the windows: main's guest stack, TLS blocks, fighter DLL data, catch table, malloc arena) are listed again from scratch
+ * (their count may change), host stacks made since are left out, modules loaded since get the mark maps. Then slot 0 = this
+ * frame (threads, fibers, command buffers as a capture). 1 = done; 0 = not now (a thread not at a wait: next pass). */
+static void rg_noop(uint32_t id, int w, size_t j) { (void)id; (void)w; (void)j; }
+int r1_ring_rebase(long long frame, Ctx *c) {
+    if (!g_rg_ready) return r1_ring_capture(frame, c);
+    double t0 = now_ms();
+    r1_ring_let_go();
+    r1_ring_release();
+    if (!ra_hold_quiet(200)) { LOG("r1: RING rebase (frame %lld): no quiet moment within 200 ms: next pass\n", frame); return 0; }
+    double t1 = now_ms();
+    hs_exclude_all();
+    int nmod = 0;
+    {   HANDLE sn = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, GetCurrentProcessId());
+        MODULEENTRY32 me; me.dwSize = sizeof me;
+        for (BOOL ok = sn != INVALID_HANDLE_VALUE && Module32First(sn, &me); ok; ok = Module32Next(sn, &me)) {
+            uint8_t **a1 = (uint8_t **)GetProcAddress(me.hModule, "r1_m1"), **a2 = (uint8_t **)GetProcAddress(me.hModule, "r1_m2");
+            uint64_t *l1 = (uint64_t *)GetProcAddress(me.hModule, "r1_lo1"), *n1 = (uint64_t *)GetProcAddress(me.hModule, "r1_n1"), *n2 = (uint64_t *)GetProcAddress(me.hModule, "r1_n2");
+            if (!a1 || !a2 || !l1 || !n1 || !n2) continue;
+            if (*a1 != *pm1) { *a1 = *pm1; *a2 = *pm2; *l1 = (uint64_t)(uintptr_t)g_win1; MemoryBarrier(); *n2 = WN2; *n1 = g_wn1; nmod++; LOG("r1: RING rebase: mark maps set in %s (loaded after the first save)\n", me.szModule); }
+        }
+        if (sn != INVALID_HANDLE_VALUE) CloseHandle(sn); }
+    rg_sweep(rg_noop);                                    /* marks since the last capture: the copy below takes everything */
+    g_rg_ntl = 0;
+    collect(c);
+    size_t nwin = g_rg_n1 + g_rg_n2, copied = 0, dropped = 0, freed = 0;
+    uint8_t *in = calloc(nwin, 1);
+    static Extra nx[8192]; int nnx = 0;
+    for (int i = 0; i < g_nr; i++) {
+        Rng *r = &g_r[i];
+        for (size_t p = 0; p < r->n / PG; p++) {
+            uint8_t *a = r->a + p * PG, *cm; size_t pi;
+            uint8_t *sh = in_shadow(a, &cm, &pi);
+            if (sh) {
+                int w2 = cm == g_sh2c;
+                if (w2 ? g_ns2[pi] : g_ns1[pi]) continue;                    /* not simulation (a host stack) */
+                in[w2 ? g_rg_n1 + pi : pi] = 1;
+                sh_commit(sh, cm, pi); memcpy(sh, a, PG); copied++;
+                if (!w2) g_dc[pi] = 0;
+            } else if (nnx < 8192) {
+                if (nnx && nx[nnx - 1].a + nx[nnx - 1].n == a) nx[nnx - 1].n += PG;
+                else { nx[nnx].a = a; nx[nnx].n = PG; nx[nnx].b = NULL; nnx++; }
+            }
+        }
+    }
+    for (size_t id = 0; id < nwin; id++) {
+        if (g_rg_idx[id] != RG_FLAT) { if (g_rg_idx[id] >= 2) freed++; rg_pool_put(g_rg_idx[id]); g_rg_idx[id] = RG_FLAT; }
+        if (in[id]) continue;
+        int w2 = id >= g_rg_n1; size_t pi = w2 ? id - g_rg_n1 : id; uint8_t *cm = w2 ? g_sh2c : g_sh1c;
+        if (cm[pi]) { VirtualFree((w2 ? g_sh2 : g_sh1) + pi * PG, PG, MEM_DECOMMIT); cm[pi] = 0; dropped++; }
+    }
+    free(in);
+    {   /* the extras again */
+        size_t npg = 0; for (int i = 0; i < nnx; i++) npg += nx[i].n / PG;
+        size_t tot = nwin + npg;
+        for (size_t e = 0; e < g_rg_nx; e++) rg_pool_put(g_rg_idx[nwin + e]);
+        uint32_t *nidx = VirtualAlloc(NULL, tot * 4, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+        uint8_t *ntouch = VirtualAlloc(NULL, tot, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+        uint8_t **nxa = malloc((npg + 1) * sizeof *nxa), **nxb = malloc((npg + 1) * sizeof *nxb);
+        if (!nidx || !ntouch || !nxa || !nxb) { LOG("r1: RING rebase: allocation FAILED: the ring is OFF\n"); g_ra_off = 1; unpark(); return 0; }
+        memcpy(nidx, g_rg_idx, nwin * 4);
+        VirtualFree(g_rg_idx, 0, MEM_RELEASE); VirtualFree(g_rg_touch, 0, MEM_RELEASE); free(g_rg_xa); free(g_rg_xb);
+        for (int i = 0; i < g_nx; i++) free(g_x[i].b);
+        g_rg_idx = nidx; g_rg_touch = ntouch; g_rg_xa = nxa; g_rg_xb = nxb;
+        g_nx = nnx; g_xbytes = 0; size_t e = 0;
+        for (int i = 0; i < nnx; i++) {
+            g_x[i] = nx[i]; g_x[i].b = malloc(g_x[i].n); memcpy(g_x[i].b, g_x[i].a, g_x[i].n); g_xbytes += g_x[i].n;
+            for (size_t o = 0; o < g_x[i].n; o += PG) { g_rg_xa[e] = g_x[i].a + o; g_rg_xb[e] = g_x[i].b + o; e++; }
+        }
+        g_rg_nx = npg;
+    }
+    double t2 = now_ms();
+    RgSlot *s = &g_rg[0]; g_rg_head = 0; g_rg_count = 1;
+    s->frame = frame; s->nent = 0; s->pages = 0; s->xpages = 0;
+    fibers_save();
+    nvn_r1_cb_save();
+    rg_meta_capture(s, c);
+    unpark();
+    g_rg_caps++;
+    LOG("r1: RING rebase: base state (frame %lld) made again in %.1f ms (hold %.1f, copy %.1f): %zu window pages copied into the shadow (%.1f MB), %zu pool buffers freed, %zu shadow pages of pages not committed now dropped; extras %d ranges %.1f MB (%zu pages); %d modules got the mark maps\n",
+        frame, now_ms() - t0, t1 - t0, t2 - t1, copied, copied * (double)PG / 1048576.0, freed, dropped, g_nx, g_xbytes / 1048576.0, g_rg_nx, nmod);
     return 1;
 }
 int r1_ring_load(long long frame, Ctx *c) {
@@ -390,7 +479,7 @@ static PadRec g_rgs_pad[256]; static long long g_rgs_padf[256]; static int g_rgs
 static double g_rgs_pass_t0, g_rgs_pass[2]; static long long g_rgs_npass[2];
 static double g_rgs_pl[2], g_rgs_plv[2][RG_NST / 4]; static long long g_rgs_npl[2]; static int g_rgs_nplv[2];      /* (round 3) re-run passes: 0 = skipped ones (not the last), 1 = the last one */
 static double g_rgs_pass_v[2][RG_NST / 4]; static int g_rgs_pass_nv[2];
-static int rbg_on(void); static void rbg_step(Ctx *c); static void rbg_pad(int id, uint64_t *b, int *lx, int *ly, int *rx, int *ry); static void rbg_report(void);   /* R3: rb_rollback.c */
+static int rbg_on(void); static void rbg_step(Ctx *c); static void rbg_pad(int id, uint64_t *b, int *lx, int *ly, int *rx, int *ry); static void rbg_report(void); static void rbg_fight_off(void);   /* R3: rb_rollback.c */
 static int rgs_wanted(void) {
     if (g_rgs_on < 0 && rbg_on()) { g_rgs_on = 1; g_rgs_n = 1 << 30; return 1; }      /* R3 online rollback (SSBU_RB_NET): the ring driven by the input queues */
     if (g_rgs_on < 0) { const char *e = getenv("SSBU_RB_SIM"); g_rgs_on = e && e[0] && e[0] != '0'; if (g_rgs_on) sscanf(e, "%d,%d,%d", &g_rgs_n, &g_rgs_k, &g_rgs_warm); if (g_rgs_k < 1) g_rgs_k = 1; if (g_rgs_k > RG_MAXSLOT - 1) g_rgs_k = RG_MAXSLOT - 1; if (g_rgs_n < 1) g_rgs_n = 1; }
@@ -408,7 +497,7 @@ static void rgs_step(Ctx *c) {
     }
     if (g_rgs_polls_cur > 1) g_rgs_multi++;
     g_rgs_polls_cur = 0;
-    if (g_ra_off || !ra_fight_on()) { if (g_ra_phase) g_ra_after_quiet = 1; g_ra_phase = 0; g_rgs_left = 0; g_rgs_pass_t0 = 0; if (rbg_on() && g_rg_ready) { static int said; if (!said++) rbg_report(); } return; }   /* (R3: the report once, at the end of the match) */
+    if (g_ra_off || !ra_fight_on()) { if (g_ra_phase) g_ra_after_quiet = 1; g_ra_phase = 0; g_rgs_left = 0; g_rgs_pass_t0 = 0; if (rbg_on()) rbg_fight_off(); return; }   /* (R3: the report once at the end of each match; hs12: the session reset for the next match) */
     if (rbg_on()) { rbg_step(c); g_rgs_pass_t0 = now_ms(); g_ra_t_mark = g_rgs_pass_t0; return; }      /* R3: online rollback */
     long long i = g_rgs_next;                             /* the pass that ended here */
     if (g_rg_keep_on < 0) { const char *e = getenv("SSBU_RB_KEEP"); g_rg_keep_on = !e || atoi(e) != 0; }

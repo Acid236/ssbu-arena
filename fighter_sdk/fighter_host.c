@@ -1281,10 +1281,22 @@ static void fh_frame_end(Ctx *c, void *user) {
  * fighter since the last poll, so that the sequence position is a function of the fight frame alone (measured S11:
  * the fighters' frame line ran 510 times in one run and 605 times in another during the same 462 polls after the
  * first battle frame). SSBU_DET_OFF=2 keeps poll counting. Nothing after the fight (no fight frames, no steps). */
+uint64_t hook_address(const char *name);
 int fight_seq_ticks(void) {
     static long long last;
     if (!g_fh_det || (g_fh_detoff & 2) || !g_fh_n) return 1;
     long long f = g_fh_f[0].frame, n = f - last;
+    {   /* (R3 hs12, test sequences of two matches) after a fight has ended (the game's ready-go cleared) the sequence counts
+         * polls again until the next fight's ready-go; a new fight's frame count starting lower than the last one is a
+         * new start, not "no step" (before: nothing after the fight, so a sequence could not reach a second match) */
+        static uint64_t inst; static int was_on, ended;
+        if (!inst) inst = hook_address("_ZN3lib9SingletonIN3app14FighterManagerEE9instance_E");
+        uint64_t mgr = inst ? rd64(inst) : 0, impl = mgr ? rd64(mgr) : 0;
+        int on = impl && rd8(impl + 0xd2);
+        if (on) { was_on = 1; ended = 0; } else if (was_on) ended = 1;
+        if (n < 0 && was_on) { last = f; return ended ? 1 : 0; }
+        if (ended) { last = f; return 1; }
+    }
     last = f;
     g_fh_poll_hist[n < 0 ? 0 : n > 3 ? 3 : n]++; g_fh_poll_tid = GetCurrentThreadId();
     return n < 0 ? 0 : n > 100000 ? 100000 : (int)n;
