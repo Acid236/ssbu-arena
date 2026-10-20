@@ -204,11 +204,37 @@ $fontUi = New-Object System.Drawing.Font('Segoe UI', 9)
 $fontBold = New-Object System.Drawing.Font('Segoe UI', 9, [System.Drawing.FontStyle]::Bold)
 $fontTitle = New-Object System.Drawing.Font('Segoe UI', 13, [System.Drawing.FontStyle]::Bold)
 $fontMono = New-Object System.Drawing.Font('Consolas', 9)
-$cOk = [System.Drawing.Color]::FromArgb(0, 128, 0)
-$cWarn = [System.Drawing.Color]::FromArgb(176, 96, 0)
-$cFail = [System.Drawing.Color]::FromArgb(200, 30, 30)
-$cInfo = [System.Drawing.Color]::FromArgb(0, 90, 180)
-$cDim = [System.Drawing.Color]::DimGray
+# dark mode: follows Windows (Settings > Personalisation > Colours > app mode); SSBU_INSTALLER_THEME=dark / light forces one
+$script:dark = $false
+try {
+    $tm = [string]$env:SSBU_INSTALLER_THEME
+    if ($tm -eq 'dark') { $script:dark = $true }
+    elseif ($tm -ne 'light') {
+        $v = Get-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize' -Name AppsUseLightTheme -ErrorAction Stop
+        $script:dark = ($v.AppsUseLightTheme -eq 0)
+    }
+} catch {}
+if ($script:dark) {
+    $cOk = [System.Drawing.Color]::FromArgb(110, 210, 110)
+    $cWarn = [System.Drawing.Color]::FromArgb(240, 175, 70)
+    $cFail = [System.Drawing.Color]::FromArgb(255, 110, 105)
+    $cInfo = [System.Drawing.Color]::FromArgb(110, 175, 255)
+    $cDim = [System.Drawing.Color]::FromArgb(160, 160, 160)
+    $cFg = [System.Drawing.Color]::FromArgb(232, 232, 232)
+    $cBg = [System.Drawing.Color]::FromArgb(32, 32, 32)
+    $cBgField = [System.Drawing.Color]::FromArgb(45, 45, 48)
+    $cBgButton = [System.Drawing.Color]::FromArgb(58, 58, 62)
+} else {
+    $cOk = [System.Drawing.Color]::FromArgb(0, 128, 0)
+    $cWarn = [System.Drawing.Color]::FromArgb(176, 96, 0)
+    $cFail = [System.Drawing.Color]::FromArgb(200, 30, 30)
+    $cInfo = [System.Drawing.Color]::FromArgb(0, 90, 180)
+    $cDim = [System.Drawing.Color]::DimGray
+    $cFg = [System.Drawing.SystemColors]::ControlText
+    $cBg = [System.Drawing.SystemColors]::Control
+    $cBgField = [System.Drawing.Color]::White
+    $cBgButton = [System.Drawing.SystemColors]::Control
+}
 
 $scale = 1.0
 try { $gx = [System.Drawing.Graphics]::FromHwnd([IntPtr]::Zero); $scale = [Math]::Max(1.0, $gx.DpiX / 96.0); $gx.Dispose() } catch {}
@@ -469,7 +495,7 @@ $page.Controls.Add($script:lblErr, 0, 5)
 # row 6: log
 $script:logBox = New-Object System.Windows.Forms.TextBox
 $script:logBox.Multiline = $true; $script:logBox.ReadOnly = $true; $script:logBox.ScrollBars = 'Both'; $script:logBox.WordWrap = $false
-$script:logBox.MinimumSize = New-Object System.Drawing.Size(0, (S 130)); $script:logBox.Font = $fontMono; $script:logBox.Dock = 'Fill'; $script:logBox.BackColor = [System.Drawing.Color]::White
+$script:logBox.MinimumSize = New-Object System.Drawing.Size(0, (S 130)); $script:logBox.Font = $fontMono; $script:logBox.Dock = 'Fill'; $script:logBox.BackColor = $cBgField; $script:logBox.ForeColor = $cFg
 $script:logBox.MaxLength = 0
 $page.Controls.Add($script:logBox, 0, 6)
 
@@ -758,8 +784,8 @@ function Show-Step($s) {
         'fail' { $it.ForeColor = $cFail }
         'skip' { $it.ForeColor = $cDim }
         'wait' { $it.ForeColor = $cDim }
-        'run'  { $it.ForeColor = [System.Drawing.SystemColors]::ControlText }
-        default { $it.ForeColor = [System.Drawing.SystemColors]::ControlText }
+        'run'  { $it.ForeColor = $cFg }
+        default { $it.ForeColor = $cFg }
     }
 }
 function Get-StepById([string]$id) {
@@ -1377,6 +1403,41 @@ if (-not $testMode) {
 $script:btnPlay.Enabled = $false
 Update-FieldStatus
 [System.Windows.Forms.Application]::add_ThreadException({ param($s, $e) Log-Add ('window error: ' + $e.Exception.Message) })
+function Set-DarkTheme($c) {
+    # every control once, before the window shows: fields and lists a shade lighter than the background, flat buttons;
+    # a label keeps a colour of its own (status lines: green / orange / red / dim)
+    $t = $c.GetType().Name
+    if ($t -in 'TextBox', 'ListView', 'ListBox', 'RichTextBox', 'NumericUpDown', 'ComboBox') {
+        $c.BackColor = $cBgField; $c.ForeColor = $cFg
+        if ($t -eq 'ListView') {    # the column headers are drawn by Windows in light colours: drawn here instead
+            $c.OwnerDraw = $true
+            $c.Add_DrawColumnHeader({ param($s, $e)
+                $e.Graphics.FillRectangle((New-Object System.Drawing.SolidBrush($cBgButton)), $e.Bounds)
+                [System.Windows.Forms.TextRenderer]::DrawText($e.Graphics, $e.Header.Text, $s.Font, $e.Bounds, $cFg, [System.Windows.Forms.TextFormatFlags]::VerticalCenter -bor [System.Windows.Forms.TextFormatFlags]::Left) })
+            $c.Add_DrawItem({ param($s, $e) $e.DrawDefault = $true })
+            $c.Add_DrawSubItem({ param($s, $e) $e.DrawDefault = $true })
+        }
+    }
+    elseif ($t -eq 'GroupBox') { $c.BackColor = $cBg; $c.ForeColor = $cFg }
+    elseif ($t -eq 'Button') { $c.FlatStyle = 'Flat'; $c.BackColor = $cBgButton; $c.ForeColor = $cFg; $c.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(90, 90, 96) }
+    else {
+        $c.BackColor = $cBg
+        if ($c.ForeColor.ToArgb() -eq [System.Drawing.SystemColors]::ControlText.ToArgb() -or $c.ForeColor.ToArgb() -eq [System.Drawing.SystemColors]::WindowText.ToArgb()) { $c.ForeColor = $cFg }
+    }
+    foreach ($k in $c.Controls) { Set-DarkTheme $k }
+}
+if ($script:dark) {
+    Set-DarkTheme $form
+    try {    # the title bar too (Windows 10 2004+ / 11: DWMWA_USE_IMMERSIVE_DARK_MODE)
+        Add-Type -Namespace SsbuInst -Name Dwm -MemberDefinition '[DllImport("dwmapi.dll")] public static extern int DwmSetWindowAttribute(IntPtr h, int a, ref int v, int s);' -ErrorAction Stop
+        $form.Add_HandleCreated({ $one = 1; [void][SsbuInst.Dwm]::DwmSetWindowAttribute($form.Handle, 20, [ref]$one, 4) })
+    } catch {}
+}
+if ($env:SSBU_INSTALLER_SNAPSHOT) {      # test only: a picture of the window 3 s after it shows (theme checks)
+    $snapT = New-Object System.Windows.Forms.Timer; $snapT.Interval = 3000
+    $snapT.Add_Tick({ $snapT.Stop(); try { $bm = New-Object System.Drawing.Bitmap($form.Width, $form.Height); $form.DrawToBitmap($bm, (New-Object System.Drawing.Rectangle(0, 0, $form.Width, $form.Height))); $bm.Save($env:SSBU_INSTALLER_SNAPSHOT) } catch {} })
+    $form.Add_Shown({ $snapT.Start() })
+}
 [System.Windows.Forms.Application]::Run($form)
 Flush-Log
 
