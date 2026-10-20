@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Protocol test and fuzz test of ldn_room_server.py (the fixture: a server on 127.0.0.1, started by this test).
 
-    python test_room_server.py [--fuzz N]          default N = 20000 random frames and datagrams
+    python test_room_server.py [--fuzz N] [--server ./ldn_relay]    default N = 20000 random frames and datagrams
 
 Checks: join and the WELCOME fields; rooms isolated by password; LDN broadcast and unicast relay; UDP relay with the
 source address the server saw; a member with another build fingerprint refused; malformed hellos refused; leave tells
@@ -67,8 +67,9 @@ def check(cond, text):
 def main():
     fuzz = int(sys.argv[sys.argv.index('--fuzz') + 1]) if '--fuzz' in sys.argv else 20000
     port = random.randint(40000, 50000)
-    srv = subprocess.Popen([sys.executable, os.path.join(HERE, 'ldn_room_server.py'), '--port', str(port), '--bind', '127.0.0.1'],
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # --server <program>: test another build of the server (the C relay, ldn_relay.c), same command line
+    cmd = [sys.argv[sys.argv.index('--server') + 1]] if '--server' in sys.argv else [sys.executable, os.path.join(HERE, 'ldn_room_server.py')]
+    srv = subprocess.Popen(cmd + ['--port', str(port), '--bind', '127.0.0.1'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         time.sleep(1.0)
         sa, a, _ = join(port, 'pw1', 'A')

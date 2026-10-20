@@ -2,7 +2,7 @@
 """Room server for local wireless over the internet (runtime/ldn_online.inc is the client). Self-hosted: no default server
 exists; players type the host of the one they use.
 
-    python3 ldn_room_server.py [--port 39010] [--bind 0.0.0.0]
+    python3 ldn_room_server.py [--port 39010] [--bind 0.0.0.0]        (ldn_relay.c: the same server in C, for Linux)
 
 Players who give the same room password are put in the same room. Each one gets a virtual address 169.254.1.N; the
 server relays two things between the members of a room and never looks inside them:
