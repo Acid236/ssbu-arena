@@ -349,10 +349,24 @@ def cmd_main(jobs):
     _jobs[0] = jobs
     limit_memory(jobs)
     t0 = time.time()
+    # objects compiled with the other RECOMP_INLINE setting are compiled again (the compile skips an object newer than its
+    # source, whatever flags made it): a build from before inlining existed gets the faster code on its next update
+    stamp, want = os.path.join(build.OBJ, '_inline.txt'), '1' if INLINE_FLAG in EXTRA else '0'
+    try:
+        have = open(stamp).read().strip()
+    except OSError:
+        have = None                          # no stamp: objects from before the stamp existed were compiled without inlining
+    old = [n for n in os.listdir(build.OBJ) if n.endswith('.obj')] if os.path.isdir(build.OBJ) else []
+    if old and have != want and (have is not None or want == '1'):
+        print('the game objects were compiled %s the inlined helpers: all %d are compiled again (once)' % ('with' if have == '1' else 'without', len(old)), flush=True)
+        for n in old:
+            os.remove(os.path.join(build.OBJ, n))
     rc = build.cmd_compile(jobs, False)
     report(build.OBJ)
     if rc:
         return rc
+    with open(stamp, 'w') as f:
+        f.write(want + chr(10))
     rc = build.build_game_dll()
     print('main: compile + link %.0fs' % (time.time() - t0))
     return rc
