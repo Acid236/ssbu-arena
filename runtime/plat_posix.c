@@ -258,7 +258,11 @@ typedef struct PlatObj {
 
 static pthread_condattr_t g_cv_mono;
 static pthread_once_t g_cv_once = PTHREAD_ONCE_INIT;
+#ifdef __APPLE__                                  /* macOS: no clock choice; the timed waits use CLOCK_REALTIME (abs_deadline) */
+static void cv_attr_init(void) { pthread_condattr_init(&g_cv_mono); }
+#else
 static void cv_attr_init(void) { pthread_condattr_init(&g_cv_mono); pthread_condattr_setclock(&g_cv_mono, CLOCK_MONOTONIC); }
+#endif
 static PlatObj *obj_new(int kind) {
     pthread_once(&g_cv_once, cv_attr_init);
     PlatObj *o = calloc(1, sizeof *o);
@@ -446,7 +450,12 @@ static int ready_locked(PlatObj *o, int take) {
     }
 }
 static void abs_deadline(struct timespec *ts, int64_t ns_from_now) {
+#ifdef __APPLE__
+    struct timespec now; clock_gettime(CLOCK_REALTIME, &now);
+    int64_t t = (int64_t)now.tv_sec * 1000000000LL + now.tv_nsec + ns_from_now;
+#else
     int64_t t = mono_ns() + ns_from_now;
+#endif
     ts->tv_sec = t / 1000000000LL; ts->tv_nsec = t % 1000000000LL;
 }
 DWORD WaitForSingleObject(HANDLE h, DWORD ms) {
@@ -1139,7 +1148,11 @@ HANDLE CreateFileA(LPCSTR path, DWORD access, DWORD share, SECURITY_ATTRIBUTES *
     int fd = open(P(path, b), of | O_CLOEXEC, 0666);
     if (fd < 0 && errno == EISDIR && !(access & GENERIC_WRITE)) fd = open(b, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     if (fd < 0) { fail_errno(); return INVALID_HANDLE_VALUE; }
+#ifdef __APPLE__
+    if (flags & FILE_FLAG_SEQUENTIAL_SCAN) fcntl(fd, F_RDAHEAD, 1);
+#else
     if (flags & FILE_FLAG_SEQUENTIAL_SCAN) posix_fadvise(fd, 0, 0, POSIX_FADV_SEQUENTIAL);
+#endif
     PlatObj *o = obj_new(PO_FILE);
     o->fd = fd;
     t_lasterr = 0;
@@ -1566,13 +1579,14 @@ BOOL QueryThreadCycleTime(HANDLE h, ULONG64 *cycles) {
     *cycles = ((ULONG64)bi.user_time.seconds + (ULONG64)bi.system_time.seconds) * 1000000000ULL
             + ((ULONG64)bi.user_time.microseconds + (ULONG64)bi.system_time.microseconds) * 1000ULL;
     return TRUE;
-#endif
+#else
     clockid_t id = CLOCK_THREAD_CPUTIME_ID;
     if (is_obj(h) && ((PlatObj *)h)->kind == PO_THREAD && pthread_getcpuclockid(((PlatObj *)h)->th, &id)) return FALSE;
     struct timespec ts;
     if (clock_gettime(id, &ts)) return FALSE;
     *cycles = (ULONG64)ts.tv_sec * 1000000000ULL + (ULONG64)ts.tv_nsec;
     return TRUE;
+#endif
 }
 HANDLE OpenProcess(DWORD access, BOOL inherit, DWORD pid) {
     (void)access; (void)inherit;

@@ -15,8 +15,10 @@
 #define glCompressedTexImage3D plat_sys_glCompressedTexImage3D
 #define glSampleCoverage plat_sys_glSampleCoverage
 #define GL_GLEXT_LEGACY
-#ifdef __APPLE__                 /* macOS: the OpenGL framework's header (GL 2.1 legacy profile) */
+#ifdef __APPLE__                 /* macOS: the OpenGL framework's header (GL 2.1 legacy profile); its GL 1.2+ functions as
+                                    pointer types only, the runtime loads them itself under the same names */
 #define GL_SILENCE_DEPRECATION
+#define GL_GLEXT_FUNCTION_POINTERS 1
 #include <OpenGL/gl.h>
 #else
 #include_next <GL/gl.h>

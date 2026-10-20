@@ -508,6 +508,8 @@ static void mtx_trylock(Ctx *c) { RET(TryEnterCriticalSection(&obj(A0)->cs) ? 1 
 /* hitch.c (SSBU_HITCH): host thread id that owns the guest mutex `key` now, 0 = nobody. Diagnostics only. */
 #ifdef _WIN32
 DWORD os_mutex_owner(uint64_t key) { return key ? (DWORD)(uintptr_t)obj(key)->cs.OwningThread : 0; }
+#elif defined(__APPLE__)
+DWORD os_mutex_owner(uint64_t key) { (void)key; return 0; }       /* macOS: a pthread mutex does not show its owner */
 #else
 DWORD os_mutex_owner(uint64_t key) { return key ? (DWORD)obj(key)->cs.__data.__owner : 0; }     /* glibc: the owner's tid */
 #endif
