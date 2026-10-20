@@ -395,18 +395,24 @@ function New-Check([string]$text, [bool]$on) {
 }
 $script:cbShort = New-Check 'Create desktop and Start menu shortcuts' $true
 $script:cbUpd = New-Check 'Check for updates first' $true
-$script:cbRuntime = New-Check 'Use the prebuilt runtime (recommended: no Visual Studio, about 3 GB less disk and some minutes less; the same game)' $true
+$script:cbRuntime = New-Check 'Use the prebuilt runtime (recommended)' $true
+$script:tips = New-Object System.Windows.Forms.ToolTip
+$script:tips.AutoPopDelay = 20000
+$script:tips.SetToolTip($script:cbRuntime, 'No Visual Studio needed (about 3 GB less disk), some minutes shorter. The game you get is the same.')
 $script:cbRb = New-Check 'Rollback netcode for online play (experimental; the first build takes about twice as long)' $false
 $script:cbDry = New-Check 'Dry run (show what would happen, change nothing)' $false
 $fJobs = New-Object System.Windows.Forms.FlowLayoutPanel
 $fJobs.AutoSize = $true; $fJobs.WrapContents = $false
-[void]$fJobs.Controls.Add((New-Label 'Compiler jobs (compilers running at once; each takes a CPU thread and about 1.5 GB of RAM):'))
+$lblJ = New-Label 'Compiler jobs:'
+[void]$fJobs.Controls.Add($lblJ)
 $script:numJobs = New-Object System.Windows.Forms.NumericUpDown
 $script:numJobs.Minimum = 1; $script:numJobs.Maximum = 64; $script:numJobs.Width = (S 56)
 $script:numJobs.Value = [Math]::Max(1, [Math]::Min(24, [Environment]::ProcessorCount - 2))
 [void]$fJobs.Controls.Add($script:numJobs)
-$script:lblJobs = New-Label '(fewer = slower, but the PC stays usable while it builds)' $cDim
+$script:lblJobs = New-Label '(fewer = slower, PC stays usable)' $cDim
 [void]$fJobs.Controls.Add($script:lblJobs)
+$tJ = 'Compilers running at once. Each takes a CPU thread and about 1.5 GB of RAM: more than the safe number can run the PC out of memory. Fewer = slower, but the PC stays usable.'
+foreach ($c in @($lblJ, $script:numJobs, $script:lblJobs)) { $script:tips.SetToolTip($c, $tJ) }
 [void]$fOpt.Controls.Add($fJobs)
 $gOpt.Controls.Add($fOpt)
 $p2.Controls.Add($gOpt, 1, 0)
@@ -1168,7 +1174,7 @@ function Apply-Precheck {
         }
         if ($c.what -eq 'Memory' -and ([string]$c.msg) -match '--jobs (\d+)') {
             $j = [int]$Matches[1]; if ($j -ge 1 -and $j -le 64) { $script:numJobs.Value = $j
-                $script:lblJobs.Text = ('safe on this PC: 1 to {0} (more can run it out of memory); fewer = slower, the PC stays usable' -f $j) }
+                $script:lblJobs.Text = ('(safe here: 1 to {0})' -f $j) }
         }
     }
 }

@@ -110,8 +110,7 @@ def check_ram():
     jobs = suggested_jobs(gb)
     # a compiler job = one compiler program running; each takes a CPU thread and up to about GB_PER_JOB of RAM, so the
     # safe maximum is the smaller of the two counts (more can run the PC out of memory and make compiles fail)
-    hint = 'compiler jobs safe on this PC: 1 to %d (%d CPU threads, about %g GB of RAM each); suggested: --jobs %d' % (
-        jobs, os.cpu_count() or 2, GB_PER_JOB, jobs)
+    hint = 'safe: 1 to %d compiler jobs; suggested: --jobs %d' % (jobs, jobs)
     if gb < RAM_FAIL_GB - 0.85:     # an "8 GB" PC reports 7.2-7.9 GB (memory kept by the firmware / integrated GPU): issue #55
         return _r('fail', 'Memory', '%.1f GB of RAM is too little; at least %d GB are needed (16 GB or more is comfortable)' % (gb, RAM_FAIL_GB))
     if gb < RAM_WARN_GB:
