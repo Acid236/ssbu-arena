@@ -63,7 +63,9 @@ def main():
     if '--exefs-only' not in sys.argv:
         rx.extract(base, update, os.path.join(out, 'romfs'))
     if firmware:
-        subprocess.run([sys.executable, os.path.join(HERE, 'fw_fonts.py'), firmware, os.path.join(out, 'sysdata', 'fonts')], check=True)
+        r = subprocess.run([sys.executable, os.path.join(HERE, 'fw_fonts.py'), firmware, os.path.join(out, 'sysdata', 'fonts')])
+        if r.returncode:                      # the fonts are optional (open-source fonts are used without them): never stop the dump
+            print('note: the system fonts could not be read from %s (code %d): the open-source fonts are used' % (firmware, r.returncode))
     print('dump folder ready: python scripts/setup.py --dump "%s"' % os.path.abspath(out))
     return 0
 

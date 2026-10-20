@@ -512,8 +512,8 @@ def ensure_fonts(cx, dump):
         else:
             say('   system fonts: extracting from the firmware %s' % fw)
             rc, _ = stream([sys.executable, os.path.join(REPO, 'tools', 'extract', 'fw_fonts.py'), fw, out], prefix='   ')
-            if rc:
-                raise Stop('the system fonts could not be extracted from %s (code %d)' % (fw, rc), 'Check that prod.keys is the one of the same console.')
+            if rc:                            # optional: the open-source fonts below are used instead (never a stop)
+                say('   note: the system fonts could not be extracted from %s (code %d): the open-source fonts are used' % (fw, rc))
         if has_fonts(mine):
             return ['--sysdata', mine]
     # no firmware fonts: the open-source replacements the repository ships (runtime\fonts_open, README.md there: Open Sans,
@@ -573,7 +573,8 @@ def step_dump(cx):
         cmd += ['--firmware', cx.firmware]
     rc, tail = stream(cmd, env=env, hb=lambda: ('dump', time.time() - PROG.t0.get('dump', time.time()), EST['dump']), prefix='   ')
     if rc:
-        raise Stop('the game files could not be unpacked (code %d): %s' % (rc, (tail or [''])[-1]),
+        why = [l.strip() for l in (tail or []) if l.strip()][-3:]      # the extractor's own last lines: the real reason
+        raise Stop('the game files could not be unpacked (code %d): %s' % (rc, ' | '.join(why)),
                    'Check that prod.keys belongs to the same console as the game files, and that base and update are the same game.')
     if os.path.isdir(out) and not dump_ok(out):
         os.replace(out, out + '.old_%d' % int(time.time()))      # an unfinished dump of an older run: kept aside, not deleted

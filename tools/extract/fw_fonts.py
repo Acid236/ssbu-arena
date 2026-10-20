@@ -82,7 +82,17 @@ def main():
     for name in sorted(os.listdir(fw)):
         if not name.endswith('.nca') or name.endswith('.cnmt.nca'):
             continue
-        nca = LooseNca(os.path.join(fw, name))
+        path = os.path.join(fw, name)
+        if os.path.isdir(path):              # Ryujinx (bis\system\Contents\registered): each .nca is a folder; a small
+            parts = sorted(os.listdir(path))  # one holds a single part "00", a big one 00, 01, ... (not a font: skipped)
+            if parts != ['00']:
+                continue
+            path = os.path.join(path, '00')
+        try:
+            nca = LooseNca(path)
+        except (OSError, ValueError, struct.error) as e:
+            print('%s: skipped (%s)' % (name, e))
+            continue
         if not nca.ok or nca.title_id not in FONT_TITLES or nca.key is None:
             continue
         sec = next((s for s in nca.sections if s['type'] == 0), None)
