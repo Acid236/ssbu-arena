@@ -9,7 +9,7 @@ One-click installer, Vulkan renderer, in-game settings, fighters as readable C++
 
 [![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/RyZpx3u2t4)
 [![Website](https://img.shields.io/badge/website-denkishi.github.io-informational)](https://denkishi.github.io/opensmash-site/)
-[![Release](https://img.shields.io/badge/release-runtime--0b004ee-brightgreen)](https://github.com/Denkishi/ssbu-recomp/releases/tag/runtime-0b004ee)
+[![Release](https://img.shields.io/github/v/release/Denkishi/ssbu-recomp?label=prebuilt%20runtime&color=brightgreen)](https://github.com/Denkishi/ssbu-recomp/releases/latest)
 [![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blue)](LICENSE)
 ![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11%20x64-lightgrey)
 ![Game versions](https://img.shields.io/badge/game-13.0.4%20%7C%2013.0.5-green)
@@ -59,7 +59,7 @@ You need **your own game dump and keys**. That is all: the installer fetches eve
 2. **Double-click `Install SSBU.bat`.** It sets up a private Python inside the folder (nothing is installed on your
    system), checks your PC, and **finds your keys and games by itself** in the folders of yuzu, Ryujinx, suyu, sudachi
    and eden. Check what it found and press **Install**: it applies the update and DLC, uses the **prebuilt runtime** from
-   the [GitHub Release](https://github.com/Denkishi/ssbu-recomp/releases/tag/runtime-0b004ee) (so **no Visual Studio**),
+   the [GitHub Release](https://github.com/Denkishi/ssbu-recomp/releases/latest) (so **no Visual Studio**),
    and builds the game files on your PC. **No firmware is needed**: open-source fonts are included. It makes
    shortcuts, updates itself, and if it stops, double-click it again and it resumes.
 3. **Double-click `Play SSBU.bat`** (or the desktop shortcut). Your saves go to `build\saves`.
