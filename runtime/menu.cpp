@@ -626,7 +626,7 @@ static void online_init(void) {
         else if (!_strnicmp(v, "join", 4)) { O.mode = 3; if (v[4] == ':') snprintf(O.join, sizeof O.join, "%s", v + 5); }
         else if (!_stricmp(v, "1") || !_stricmp(v, "on") || !_stricmp(v, "auto")) O.mode = ini_read("online_server", v, sizeof v) && !off_word(v) ? 4 : 1;
         else O.mode = 4;
-    } else if (ini_read("online_server", v, sizeof v) && !off_word(v)) O.mode = 4;
+    } else if (!ini_read("online_server", v, sizeof v) || !off_word(v)) O.mode = 4;   /* nothing in the file: ON with the public lobby (2026-10-20) */
     if (!O.join[0]) ini_read("online_join", O.join, sizeof O.join);
     if (!ini_read("online_server", O.server, sizeof O.server) || off_word(O.server)) snprintf(O.server, sizeof O.server, "%s", ONLINE_DEFAULT_LOBBY);
     if (ini_read("online_upnp", v, sizeof v)) O.upnp = !off_word(v);
@@ -653,6 +653,17 @@ static DWORD WINAPI osk_code_thread(LPVOID) {             /* the on-screen keybo
     int r = osk_run(L"Room code", L"The code the host's game shows (like 1A2B3-C4D5E)", init, 32, 0, 0, out);
     if (r == 1) WideCharToMultiByte(CP_UTF8, 0, out, -1, g_osk_text, sizeof g_osk_text, NULL, NULL);
     InterlockedExchange(&g_osk_done, r == 1 ? 1 : 2);
+    InterlockedExchange(&g_osk_busy, 0);
+    return 0;
+}
+static char g_osk_name[64];
+static volatile LONG g_osk_name_done;
+static DWORD WINAPI osk_name_thread(LPVOID arg) {          /* the on-screen keyboard for the player's name */
+    wchar_t init[64], out[64] = L"";
+    MultiByteToWideChar(CP_UTF8, 0, (const char *)arg, -1, init, 64);
+    int r = osk_run(L"Your name", L"The name other players see", init, 32, 0, 0, out);
+    if (r == 1) WideCharToMultiByte(CP_UTF8, 0, out, -1, g_osk_name, sizeof g_osk_name, NULL, NULL);
+    InterlockedExchange(&g_osk_name_done, r == 1 ? 1 : 2);
     InterlockedExchange(&g_osk_busy, 0);
     return 0;
 }
@@ -713,14 +724,29 @@ static void sec_experimental(void) {
     if (ra_build()) ImGui::TextDisabled("one frame less input delay in fights; costs a second pass of each frame on the CPU");
     else ImGui::TextDisabled("needs the run-ahead build (the game DLL with write marks); this build cannot run it");
     ImGui::Separator();
-    /* (2) online play (net_relay.c / nnldn.c) */
+    /* (2) your name: the console user's nickname (nnfs.c) and the name the lobby shows (net_relay.c); graphics.ini player_name */
+    static char pname[33], pname0[33];
+    static int pname_read;
+    if (!pname_read) { pname_read = 1; ini_read("player_name", pname, sizeof pname); memcpy(pname0, pname, sizeof pname); }
+    if (InterlockedExchange(&g_osk_name_done, 0) == 1) { snprintf(pname, sizeof pname, "%s", g_osk_name); ini("player_name", pname); }
+    ImGui::SetNextItemWidth(260);
+    ImGui::InputTextWithHint("Your name", "the name other players see", pname, sizeof pname);
+    if (ImGui::IsItemDeactivatedAfterEdit()) ini("player_name", pname);
+    tag(1, strcmp(pname, pname0) != 0);
+    ImGui::SameLine();
+    if (g_osk_busy) ImGui::BeginDisabled();
+    if (ImGui::Button("Type with the controller##name")) { InterlockedExchange(&g_osk_busy, 1); CreateThread(NULL, 0, osk_name_thread, pname, 0, NULL); }
+    if (g_osk_busy) ImGui::EndDisabled();
+    if (!pname[0]) ImGui::TextDisabled("Empty: the Windows user name is used.");
+    ImGui::Separator();
+    /* (3) online play (net_relay.c / nnldn.c) */
     bool on = O.mode != 0;
     if (onoff("net", on, true)) { O.mode = on ? 0 : (O.last_mode ? O.last_mode : 4); online_save(); }
     ImGui::SameLine(); ImGui::Text("Online play");
     tag(1, (O.mode != 0) != (O0.mode != 0));
     ImGui::SameLine(); ImGui::TextDisabled("play with others through the game's Local Wireless menu");
     if (O.mode) sec_online();
-    if (online_differs() || S.runahead != S0.runahead) {
+    if (online_differs() || S.runahead != S0.runahead || strcmp(pname, pname0)) {
         ImGui::Separator();
         ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1.0f), "Saved. These changes are used when the game starts again.");
         if (ImGui::Button("Restart the game now")) restart_game();

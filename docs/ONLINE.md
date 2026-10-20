@@ -9,11 +9,17 @@ This is the game's own Local Wireless mode, played over a network. You only open
 4. Both players vote on a stage and pick their fighters.
 5. The host starts the match with L+R.
 
-Online play is experimental and OFF by default.
+Online play is experimental and ON by default: the game joins the project's public lobby
+(`opensmash-lobby.duckdns.org:39500`) when it starts. To turn it off: F1 -> Experimental -> Online play: OFF
+(or `online_mode = off` in `config\graphics.ini`).
+
+**Your name:** F1 -> Experimental -> **Your name** (keyboard, or "Type with the controller"). It is the name the
+game and the other players see (`player_name` in `config\graphics.ini`); empty = your Windows user name.
+Used from the next start.
 
 ## The easy way: the F1 menu
 
-Press **F1** (or the controller's Home button) -> **Experimental** -> **Online play: ON**, then pick a mode:
+Press **F1** (or the controller's Home button) -> **Experimental**. Online play is already ON; you can pick another mode:
 **Lobby server** (recommended: the project's public lobby, `opensmash-lobby.duckdns.org:39500`, already filled in),
 **Same network (LAN)**, **Host a room** (shows a ROOM CODE with a Copy button) or **Join with a code**.
 Press **Restart the game now**, then use the game's own Local Wireless: Create Room / Rooms List.

@@ -766,8 +766,30 @@ static volatile LONG g_acc_user_open;                    /* the one local user {
 int account_user_is_open(uint64_t lo, uint64_t hi) { return g_acc_user_open && lo == 1 && hi == 0; }
 static void acc_TryOpenPreselectedUser(Ctx *c) { wr64(A0, 1); wr64(A0 + 8, 0); wr64(A0 + 16, 0); InterlockedExchange(&g_acc_user_open, 1); RET(1); }
 static void acc_GetUserId(Ctx *c) { wr64(A0, 1); wr64(A0 + 8, 0); RET(0); }
-/* The nickname of the console user is the name of the Windows user (SSBU_NICKNAME overrides): UTF-8, at most 32
- * bytes, NUL-terminated, in the 33-byte Nickname. */
+#include "gfx_options.h"
+static int ini_player_name(char *out, size_t n) {          /* `player_name = <name>` in graphics.ini (the menu writes it) */
+    const GfxOptions *o = gfx_options();
+    FILE *f = o && o->path[0] ? fopen(o->path, "r") : NULL;
+    char line[512];
+    int found = 0;
+    if (!f) return 0;
+    while (!found && fgets(line, sizeof line, f)) {
+        char *s = line;
+        while (*s == ' ' || *s == '\t') s++;
+        if (_strnicmp(s, "player_name", 11) || (s[11] != ' ' && s[11] != '\t' && s[11] != '=')) continue;
+        s += 11;
+        while (*s == ' ' || *s == '\t') s++;
+        if (*s++ != '=') continue;
+        while (*s == ' ' || *s == '\t') s++;
+        size_t l = strcspn(s, "\r\n#;");
+        while (l && (s[l - 1] == ' ' || s[l - 1] == '\t')) l--;
+        if (l && l < n) { memcpy(out, s, l); out[l] = 0; found = 1; }
+    }
+    fclose(f);
+    return found;
+}
+/* The nickname of the console user: SSBU_NICKNAME, else the name chosen in the settings menu (graphics.ini player_name),
+ * else the name of the Windows user: UTF-8, at most 32 bytes, NUL-terminated, in the 33-byte Nickname. */
 static void acc_GetNickname(Ctx *c) {
     static char name[33];
     static volatile LONG ready;
@@ -775,6 +797,7 @@ static void acc_GetNickname(Ctx *c) {
         const char *env = getenv("SSBU_NICKNAME");
         char utf8[512] = "";
         if (env && env[0]) snprintf(utf8, sizeof utf8, "%s", env);
+        else if (ini_player_name(utf8, sizeof utf8)) {}                  /* F1 > Experimental > Your name (graphics.ini player_name) */
         else {
             wchar_t wname[257] = L"";
             DWORD n = 257;

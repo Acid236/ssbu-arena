@@ -63,6 +63,7 @@ enum { T_JOIN = 1, T_WELCOME, T_REJECT, T_PING, T_PONG, T_DATA, T_LEAVE, T_LIST,
 #define PUNCH_FOR_MS 5000          /* hellos every 200 ms this long; no answer -> relayed (hello every 5 s in case it opens) */
 #define FRESH_MS 1200              /* a direct path is used while its last answer is younger than this */
 #define NET_BUILD_DEFAULT "ssbu-recomp-ldn1"
+#define NET_PUBLIC_LOBBY "opensmash-lobby.duckdns.org:39500"     /* the project's public lobby (menu.cpp ONLINE_DEFAULT_LOBBY): the default without online_mode / online_server */
 
 static uint16_t g16(const uint8_t *p) { return (uint16_t)(p[0] << 8 | p[1]); }
 static uint32_t g32(const uint8_t *p) { return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]; }
@@ -133,8 +134,13 @@ static void configure(void) {
     } else if (ini_value("online_mode", v, sizeof v)) {
         if (is_off(v)) return;
         snprintf(mode, sizeof mode, "%s", v);
-    } else {                                        /* (older key alone: a lobby address turns online play on) */
-        if (!ini_value("online_server", v, sizeof v) || is_off(v)) return;
+    } else {                                        /* no online_mode: ON through a lobby, the file's or the public one (2026-10-20) */
+        if (ini_value("online_server", v, sizeof v)) { if (is_off(v)) return; }
+        else {
+            /* scripted test runs (key script, debug match, deterministic mode) stay offline unless they ask */
+            if (getenv("SSBU_SEQ") || getenv("SSBU_DEBUG_MATCH") || getenv("SSBU_DETERMINISTIC")) return;
+            snprintf(g_server, sizeof g_server, "%s", NET_PUBLIC_LOBBY);
+        }
         snprintf(mode, sizeof mode, "lobby");
     }
     if (!_stricmp(mode, "1") || !_stricmp(mode, "on") || !_stricmp(mode, "auto")) g_auto = 1;
@@ -159,6 +165,7 @@ static void configure(void) {
     if (g_mode == NET_MODE_JOIN && !g_join[0]) { printf("[online] join mode without a room code (SSBU_ONLINE=join:<code> or online_join): online play off\n"); fflush(stdout); return; }
     if ((e = getenv("SSBU_ONLINE_NAME")) && *e) snprintf(g_name, sizeof g_name, "%s", e);
     else if (ini_value("online_name", v, sizeof v) && *v) snprintf(g_name, sizeof g_name, "%s", v);
+    else if (ini_value("player_name", v, sizeof v) && *v) snprintf(g_name, sizeof g_name, "%s", v);    /* F1 > Experimental > Your name */
     else snprintf(g_name, sizeof g_name, "Player-%04x", (unsigned)(rnd64() & 0xffff));
     if ((e = getenv("SSBU_ONLINE_CODE")) && *e) snprintf(g_code, sizeof g_code, "%s", e);
     else if (ini_value("online_code", v, sizeof v) && *v) snprintf(g_code, sizeof g_code, "%s", v);
@@ -547,7 +554,12 @@ static int lookup(const char *text, uint16_t default_port, struct sockaddr_in *o
     freeaddrinfo(res);
     return 1;
 }
+static int test_loopback(void) {                /* SSBU_ONLINE_LOOPBACK=1 (test runs): every socket on 127.0.0.1 only, so the many
+                                                 * test exes of one PC do not each raise the Windows firewall prompt */
+    static int v = -1; if (v < 0) { const char *e = getenv("SSBU_ONLINE_LOOPBACK"); v = e && e[0] == '1'; } return v;
+}
 static void bind_client(int loopback_only) {    /* (client thread) binds g_sock; loopback_only: the lobby is on this PC */
+    if (test_loopback()) loopback_only = 1;
     g_loopback = loopback_only;
     struct sockaddr_in a = {0};
     a.sin_family = AF_INET;
@@ -652,11 +664,11 @@ static int start_host(void) {                   /* HOST mode: the lobby in this 
     uint32_t lan = outbound_ip(), pub = 0;
     uint16_t pub_port = 0;
     char a[16], b[16], why[128] = "", ext[32] = "";
-    SOCKET probe = udp_socket(0, port, 300);                  /* STUN from the lobby's own port, before the lobby takes it */
+    SOCKET probe = udp_socket(test_loopback() ? INADDR_LOOPBACK : 0, port, 300);                  /* STUN from the lobby's own port, before the lobby takes it */
     if (probe == INVALID_SOCKET) { say("host: UDP port %u is in use: set another with online_port", port); return 0; }
     int stun_ok = stun_query(probe, &pub, &pub_port);
     closesocket(probe);
-    if (!minilobby_start(0, port, 1)) { say("host: cannot start the lobby on UDP port %u", port); return 0; }
+    if (!minilobby_start(test_loopback() ? INADDR_LOOPBACK : 0, port, 1)) { say("host: cannot start the lobby on UDP port %u", port); return 0; }
     int mapped = 0;
     if (g_upnp && lan) {
         mapped = upnp_map_udp(port, lan, "SSBU online room", ext, sizeof ext, why, sizeof why);
@@ -709,7 +721,7 @@ static SOCKET beacon_socket(void) {
     setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char *)&to, sizeof to);
     WSAIoctl(s, SIO_UDP_CONNRESET, &off, sizeof off, NULL, 0, &bytes, NULL, NULL);
     struct sockaddr_in a = {0};
-    a.sin_family = AF_INET; a.sin_port = htons(VNET_BEACON_PORT); a.sin_addr.s_addr = INADDR_ANY;
+    a.sin_family = AF_INET; a.sin_port = htons(VNET_BEACON_PORT); a.sin_addr.s_addr = test_loopback() ? htonl(INADDR_LOOPBACK) : INADDR_ANY;
     if (bind(s, (struct sockaddr *)&a, sizeof a)) { closesocket(s); return INVALID_SOCKET; }
     struct ip_mreq m = {0};
     inet_pton(AF_INET, BEACON_GROUP, &m.imr_multiaddr);
@@ -759,7 +771,7 @@ static DWORD WINAPI beacon_thread(LPVOID unused) {    /* sends our lobby's beaco
     }
 }
 static int lan_become_lobby(void) {             /* (client thread) this game runs the network's lobby and announces it */
-    uint16_t port = minilobby_start(0, 0, 1);
+    uint16_t port = minilobby_start(test_loopback() ? INADDR_LOOPBACK : 0, 0, 1);
     if (!port) { say("lan: cannot start a lobby"); return 0; }
     g_lan_lobby_port = port;
     InterlockedExchange64(&g_lan_lobby_id, (LONG64)(rnd64() >> 1 | 1));
