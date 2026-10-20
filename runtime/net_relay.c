@@ -83,6 +83,7 @@ static uint64_t rnd64(void) {
 
 /* ---------------------------------------------------------------- configuration */
 static int g_cfg = -1, g_log = 1, g_direct = 1;
+extern int g_game_build;             /* hostrt.c: 0 = 13.0.4, 1 = 13.0.5 (hostrt.h GAME_13_0_*), -1 before main.elf is read */
 static char g_server[256], g_name[NAME_LEN + 1], g_code[NAME_LEN + 1] = "public", g_build[BUILD_LEN + 1] = NET_BUILD_DEFAULT;
 static uint16_t g_local_port;
 
@@ -175,6 +176,10 @@ static void configure(void) {
     if ((e = getenv("SSBU_ONLINE_PORT")) && atoi(e) > 0 && atoi(e) < 65536) g_local_port = (uint16_t)atoi(e);
     if ((e = getenv("SSBU_ONLINE_LOG"))) g_log = atoi(e);
     if ((e = getenv("SSBU_ONLINE_BUILD")) && *e) snprintf(g_build, sizeof g_build, "%s", e);
+    else if (g_game_build >= 0) {      /* players of 13.0.4 and 13.0.5 never meet: the lobby and the LAN beacons part rooms by build */
+        size_t l = strlen(g_build);
+        snprintf(g_build + l, sizeof g_build - l, "-%s", g_game_build == 1 ? "13.0.5" : "13.0.4");
+    }
     g_cfg = 1;
     static const char *mode_names[] = {"lobby", "lan (no server)", "host (no server)", "join (no server)"};
     printf("[online] on: mode %s%s, lobby %s, code %s, name %s, direct paths %s, build %s\n", mode_names[g_mode], g_auto ? " (auto)" : "",

@@ -96,7 +96,8 @@ python tools/net/ssbu_lobby.py --bind 0.0.0.0 --port 39500 [--verbose]
 
 ## Requirements
 
-- Both players need the same build. Players on different builds never meet.
+- Both players need the same build and the same game update: a 13.0.4 player and a 13.0.5 player never see each
+  other's rooms (the game version is part of the build id, e.g. `ssbu-recomp-ldn1-13.0.5`, shown in the log line `[online] on`).
 - Both players need the same fighters and mods.
 - For lobby and LAN, the lobby code must match.
 
