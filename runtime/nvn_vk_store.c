@@ -201,6 +201,7 @@ static DWORD WINAPI vks_thread(void *arg) {
 /* Builds the store in `dir`. Returns the number of containers written (0: no archive, or nothing found). Blocks the
  * caller (the preparation thread) until done; the helpers run at normal priority: it is the first thing a first start
  * needs and it is seconds. */
+void display_title_note(const char *note);      /* display.c */
 static int vks_build(const char *dir) {
     char arc[400], mark[400];
     const char *rom = getenv("SSBU_ROMFS");
@@ -235,6 +236,7 @@ static int vks_build(const char *dir) {
         DWORD w = WaitForMultipleObjects((DWORD)VKS.nthread, th, TRUE, 500);
         if (w != WAIT_TIMEOUT) break;
         g_store_pct = (int)(100 * (uint64_t)VKS.scanned / (VKS.total ? VKS.total : 1));
+        { char n[160]; snprintf(n, sizeof n, "first start: preparing the game data, %d %% (once; a few minutes on a slow disk)", g_store_pct); display_title_note(n); }
         if (tk() - last > 5 * fq.QuadPart) {
             last = tk();
             printf("nvn_vk_store: %d %% of data.arc read, %lld zstd frames, %lld files that can hold containers, %d containers (%.1f s, frame %lld)\n", g_store_pct, (long long)VKS.frames, (long long)VKS.wanted, (int)VKS.ncont, (double)(last - t0) / (double)fq.QuadPart, (long long)nvn_front_frame_next());
@@ -243,6 +245,7 @@ static int vks_build(const char *dir) {
     }
     for (int i = 0; i < VKS.nthread; i++) CloseHandle(th[i]);
     CloseHandle(VKS.map); CloseHandle(fh);
+    display_title_note(NULL);
     {   /* the containers built into the game's EXECUTABLE ("TextureShader", "IconShader", "ui2d_BuildinShader_Nvn_Binary",
          * "font_BuildinShader_Nvn_Binary": 4 in 13.0.4, two of them in its data segment, where the game changes them in place
          * when it starts): read from the file the runtime was started with, not from memory */

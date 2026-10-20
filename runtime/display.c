@@ -1128,3 +1128,16 @@ void display_refresh_info(double *hz, int *lock_k) {
     *hz = g_vb_period > 0 && g_freq.QuadPart ? (double)g_freq.QuadPart / g_vb_period : 0;
     *lock_k = (int)g_lock_k;
 }
+
+/* nvn_vk_store.c: a note in the window's title while the first start reads the game data (minutes on a slow disk, before
+ * the game shows any frame: issue #57 looked like a black screen); NULL puts the normal title back */
+void display_title_note(const char *note) {
+#ifdef _WIN32
+    if (!g_hwnd) return;
+    char t[400];
+    if (note && note[0]) snprintf(t, sizeof t, "%s - %s", g_title, note); else snprintf(t, sizeof t, "%s", g_title);
+    SetWindowTextA(g_hwnd, t);
+#else
+    (void)note;
+#endif
+}
