@@ -142,6 +142,9 @@ game back a few frames and replays them, instead of slowing both players down.
 4. Play as usual through **Local Wireless**: each player picks only their own fighter; the two games agree on the stage,
    rules and a shared random seed before the match starts (a box "Online match" shows while they wait).
 
+**Known issue (being fixed):** with the build the installer makes, a match can still crash after about a second of
+play (a C++ exception after a rollback, seen on 13.0.5). Use the normal netcode for real matches until the next update.
+
 Limits today: rollbacks of 3 or more frames take a little longer than one frame (a short hitch at very high ping);
 Windows only; tested between two games on one PC with simulated 150 ms ping and loss (0 desyncs), not yet much between
 real players over the internet. Please report how it feels.
