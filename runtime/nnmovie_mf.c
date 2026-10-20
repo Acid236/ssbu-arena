@@ -546,7 +546,18 @@ static int ext_open_bytes(Ext *e, unsigned char *data, size_t size) {
         IMFAttributes_Release(ba);
     }
     hr = MFCreateSourceReaderFromByteStream(e->bs, NULL, &e->rd);
-    if (FAILED(hr)) { printf("movie: MFCreateSourceReaderFromByteStream %08lx\n", hr); return 0; }
+    if (FAILED(hr)) {
+        printf("movie: MFCreateSourceReaderFromByteStream %08lx\n", hr);
+        if (hr == (HRESULT)0xc00d36c4) {      /* MF_E_UNSUPPORTED_BYTESTREAM_TYPE: Windows cannot open WebM at all -> the game waits on a black movie screen */
+            void menu_notice(const char *text);
+            printf("movie: Windows has no WebM support: install 'Web Media Extensions' and 'VP9 Video Extensions' from the Microsoft Store "
+                   "(Windows N editions: also the Media Feature Pack), then start the game again\n");
+            menu_notice("The game's movies cannot play on this PC, so it stays on a black screen.\n\n"
+                        "Install from the Microsoft Store (free): Web Media Extensions and VP9 Video Extensions\n"
+                        "(Windows 'N' editions also need the Media Feature Pack), then start the game again.");
+        }
+        return 0;
+    }
 
     PROPVARIANT var; PropVariantInit(&var);
     if (SUCCEEDED(IMFSourceReader_GetPresentationAttribute(e->rd, (DWORD)MF_SOURCE_READER_MEDIASOURCE, &MF_PD_DURATION, &var)) && var.vt == VT_UI8)
