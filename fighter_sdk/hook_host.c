@@ -214,6 +214,11 @@ static HkSite **hk_site_slot(uint64_t addr) {
 
 /* first hook on this function: trampoline, site, and the 5-byte entry jump */
 static HkSite *hk_site_make(uint64_t addr, uint8_t *target) {
+#if defined(__aarch64__)                               /* macOS on Apple Silicon: the entry jump and the moved bytes are x86-64; an arm64 form and the code-signing question are plan MAC5 */
+    snprintf(g_hk_error, sizeof g_hk_error, "function at %llx: the hook table patches x86-64 code only (arm64: not yet)", (unsigned long long)addr);
+    (void)target;
+    return NULL;
+#endif
     const char *why = "";
     uint8_t dry[64], *data = NULL;
     int w = 0, n = hk_move(target, dry, &w, &why, 1);

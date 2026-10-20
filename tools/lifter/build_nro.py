@@ -22,7 +22,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 RO = os.path.join(HERE, 'ro_study')
 CLANG = os.environ.get('RECOMP_CLANG', r'C:\llvm-8.0.0\bin\clang.exe')
 TARGET_LINUX = os.environ.get('RECOMP_TARGET') == 'linux'      # see build.py
-PLAT_FLAGS = ['-fPIC', '-fvisibility=hidden', '-include', os.path.join(HERE, 'plat', 'plat_pre.h')] if TARGET_LINUX else []
+TARGET_MACOS = os.environ.get('RECOMP_TARGET') == 'macos'
+PLAT_FLAGS = (['-fPIC', '-fvisibility=hidden', '-include', os.path.join(HERE, 'plat', 'plat_pre.h')] + (['-mmacosx-version-min=14.4'] if TARGET_MACOS else ['-mcx16'])
+              if TARGET_LINUX or TARGET_MACOS else [])
+LIB_EXT = '.dylib' if TARGET_MACOS else '.so' if TARGET_LINUX else '.dll'     # nnro.c asks for <name>.dll; plat_posix.c maps it
 GEN_HEADERS = ['runtime.h', 'neon.h', 'fpexact.h']
 LIFTER = os.path.join(RO, 'recomp_nro.py')
 
@@ -128,7 +131,7 @@ def build_module(e, jobs, relift, opt):
 
     # 3. link the DLL
     t0 = time.time()
-    dll = os.path.join(bindir, name + ('.so' if TARGET_LINUX else '.dll'))       # nnro.c asks for <name>.dll; plat_posix.c maps it to .so
+    dll = os.path.join(bindir, name + LIB_EXT)
     objs = sorted(os.path.join(obj, n) for n in os.listdir(obj) if n.endswith('.obj'))
     linked = False
     if not os.path.exists(dll) or os.path.getmtime(dll) < max(os.path.getmtime(o) for o in objs):
@@ -138,7 +141,7 @@ def build_module(e, jobs, relift, opt):
             print('could not link %s (is a game exe still running and holding it open?)' % dll)
             return 1
         linked = True
-        for ext in ('.lib', '.exp'):                        # nothing links against a module DLL
+        for ext in ('.lib', '.exp') if LIB_EXT == '.dll' else ():      # nothing links against a module DLL
             p = dll[:-4] + ext
             if os.path.exists(p):
                 os.remove(p)

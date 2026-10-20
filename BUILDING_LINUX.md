@@ -19,7 +19,7 @@ Tested on one PC: CachyOS (Arch-based, kernel 7.2), 24 threads, 31 GB RAM, NVIDI
 
 | | |
 |---|---|
-| Build from the dump | works: game library, 98 script modules, executable; `check` step passes (SDK self-test, pad self-test 56/56, C++ runtime self-test 145/145, differential test 32,043 / 32,043) |
+| Build from the dump | works: game library, 98 script modules, executable; `check` step passes (SDK self-test, pad self-test 56/56, C++ runtime self-test 145/145, differential test 32,043 / 32,043; it runs only with `--full-check`) |
 | Opening movie, title, menus, character and stage select | work |
 | F1 settings menu, on-screen keyboard | not on Linux yet (both draw with Windows APIs). Text input, for example naming a Mii, opens a zenity or kdialog dialog instead |
 | A whole Smash match (scripted input, 1v1 vs CPU) | works: steady 60 fps, sound, no audio underruns |
@@ -92,7 +92,8 @@ Use the venv's Python, as shown. The build goes into `build-linux/`, in eleven s
 
 The build can be stopped at any time (Ctrl+C, or a crash). Run the same command again and it continues where it
 stopped; finished steps are skipped. Every invocation needs `--dump`. Other options: `--status`, `--redo <step>`,
-`--from <step>`, `--jobs N`, `--help`.
+`--from <step>`, `--jobs N`, `--full-check` (the check step also runs the translator's long differential test), `--help`.
+Files that fail to compile (often for lack of memory) are compiled again with fewer jobs before the build stops.
 
 When something is missing, step `deps` stops at once with what to install. It compiles and runs a small test program
 against every library, so a broken package shows there and not an hour later.
@@ -154,7 +155,9 @@ the same `--dump` (add `--redo convert` if you built before).
 - **The game exits at once with code 7:** a font file is missing (see "Fonts"). The log line starts with `nn::pl:`.
 - **A black window that never changes:** look at the output for `nvn_vk:` lines. `vulkaninfo --summary` must list your GPU.
 - **No sound:** the game plays through SDL3, so PipeWire / PulseAudio must be running. The log says which audio device was opened.
-- **To report a problem**, include `~/.local/share/ssbu-recomp/last_run.log` (written by every `./play.sh`). It lists the
+- **To report a problem**, run `scripts/linux/collect_logs_linux.sh`: it makes `~/ssbu_linux_report_<date>.zip` with the
+  build logs, the last game logs and facts about your PC (distribution, GPU and driver, Vulkan, library versions), never
+  your dump or a game file. Send that file, or at least `~/.local/share/ssbu-recomp/last_run.log` (written by every `./play.sh`). It lists the
   libraries, the GPU and driver, the controllers found, and the error. If no frame was shown for 5 s,
   `build-linux/work/ssbu_native_freeze.txt` has a report of every thread.
 
@@ -175,3 +178,14 @@ executable that finds its libraries next to itself (`rpath $ORIGIN`). `tests/pla
 layer by itself:
 `clang -I runtime/plat -include runtime/plat/plat_pre.h tests/plat_selftest.c runtime/plat_posix.c $(pkg-config --cflags --libs sdl3 openssl) -lm -o plat_selftest`
 (55 checks, 0 failures on the PC above).
+
+## What to report (testers)
+
+Please answer these, even if the answer is "no", and attach the file of `scripts/linux/collect_logs_linux.sh`:
+
+1. Your distribution and version, GPU and driver, X11 or Wayland.
+2. Did `install_deps.sh` and `setup.py` finish? If not, which step failed (the line starting with `FAILED at step`)?
+3. Did the `check` step pass (the line `SSBU_SDK_SELFTEST:` and the differential test line)?
+4. Did the game window open? Did the opening movie play, with sound?
+5. Did the title screen appear? Did a fight start, and how did the speed feel?
+6. Which controller did you use (keyboard, which pad)?

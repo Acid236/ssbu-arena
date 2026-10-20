@@ -1,5 +1,9 @@
-/* Linux build: the Win32 functions of plat/windows.h on POSIX. Compiled into the exe only off Windows. */
+/* Linux and macOS builds: the Win32 functions of plat/windows.h on POSIX. Compiled into the exe only off Windows. On macOS
+ * (plan/phases/MAC1_port.md) the Linux interfaces used here come from Mach, dyld and libSystem (the block after the includes). */
 #define _GNU_SOURCE
+#ifdef __APPLE__
+#define _DARWIN_C_SOURCE
+#endif
 #include "plat/windows.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -7,26 +11,97 @@
 #include <dirent.h>
 #include <fnmatch.h>
 #include <dlfcn.h>
+#ifndef __APPLE__
 #include <link.h>
+#endif
 #include <limits.h>
+#if !(defined(__APPLE__) && defined(__aarch64__))
 #include <ucontext.h>
+#endif
 #include <sys/uio.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <sys/time.h>
 #include <sys/resource.h>
+#ifndef __APPLE__
 #include <sys/syscall.h>
 #include <sys/sysinfo.h>
 #include <linux/futex.h>
 #include <linux/userfaultfd.h>
 #include <linux/fs.h>
+#endif
 #include <sys/ioctl.h>
 #include <SDL3/SDL.h>
 #include <sys/random.h>
 #include <signal.h>
 #include <pwd.h>
 #include <unwind.h>
+#ifdef __APPLE__
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+#include <mach-o/dyld.h>
+#include <mach-o/loader.h>
+#include <sys/sysctl.h>
+#include <libkern/OSCacheControl.h>
+#include <os/os_sync_wait_on_address.h>
+#define PLAT_SO_EXT ".dylib"
+#ifndef MAP_STACK
+#define MAP_STACK 0
+#endif
+#define MAP_FIXED_NOREPLACE 0          /* the address is a hint: VirtualAlloc checks where the mapping landed */
+#define st_atim st_atimespec
+#define st_mtim st_mtimespec
+#define st_ctim st_ctimespec
+static int get_nprocs(void) { long n = sysconf(_SC_NPROCESSORS_ONLN); return n > 0 ? (int)n : 1; }
+static int sched_getcpu(void) { return -1; }          /* macOS cannot say: GetCurrentProcessorNumber answers 0 */
+static ssize_t getrandom(void *b, size_t n, unsigned flags) { (void)flags; if (n > 256) n = 256; return getentropy(b, n) ? -1 : (ssize_t)n; }
+/* The futex of the condition variables: os_sync_wait_on_address (macOS 14.4+), the public form of the same wait on a word.
+ * As with the futex a timeout fails with ETIMEDOUT; a wake with no waiter fails with ENOENT, which no caller looks at. */
+#define FUTEX_WAIT_PRIVATE 0
+#define FUTEX_WAKE_PRIVATE 1
+static long futex(volatile uint32_t *a, int op, uint32_t v, const struct timespec *ts) {
+    if (op == FUTEX_WAKE_PRIVATE)
+        return v == 1 ? os_sync_wake_by_address_any((void *)a, 4, OS_SYNC_WAKE_BY_ADDRESS_NONE) : os_sync_wake_by_address_all((void *)a, 4, OS_SYNC_WAKE_BY_ADDRESS_NONE);
+    if (!ts) return os_sync_wait_on_address((void *)a, v, 4, OS_SYNC_WAIT_ON_ADDRESS_NONE);
+    return os_sync_wait_on_address_with_timeout((void *)a, v, 4, OS_SYNC_WAIT_ON_ADDRESS_NONE, OS_CLOCK_MACH_ABSOLUTE_TIME,
+                                                (uint64_t)ts->tv_sec * 1000000000ULL + (uint64_t)ts->tv_nsec);
+}
+/* The image a handle of LoadLibraryA belongs to (macOS has no dlinfo): every loaded image asked again with the same flags,
+ * which gives the same handle. */
+static int dyld_image_of(void *m, const char **path, uintptr_t *base) {
+    for (uint32_t i = 0, n = _dyld_image_count(); i < n; i++) {
+        const char *name = _dyld_get_image_name(i);
+        void *h = name ? dlopen(name, RTLD_NOW | RTLD_LOCAL | RTLD_NOLOAD) : NULL;
+        if (!h) continue;
+        dlclose(h);
+        if (h == m) { *path = name; *base = (uintptr_t)_dyld_get_image_header(i); return 1; }
+    }
+    return 0;
+}
+#else
+#define PLAT_SO_EXT ".so"
+#endif
+static pid_t os_tid(void) {                    /* the kernel's id of the calling thread */
+#ifdef __APPLE__
+    uint64_t t = 0;
+    pthread_threadid_np(NULL, &t);
+    return (pid_t)t;
+#else
+    return (pid_t)(long)syscall(SYS_gettid);
+#endif
+}
+static ssize_t self_exe_path(char *b, size_t n) {          /* the exe's path, as readlink of /proc/self/exe gives it (b: PATH_MAX) */
+#ifdef __APPLE__
+    char raw[PATH_MAX];
+    uint32_t sz = sizeof raw;
+    (void)n;
+    if (_NSGetExecutablePath(raw, &sz) || !realpath(raw, b)) return -1;
+    return (ssize_t)strlen(b);
+#else
+    return readlink("/proc/self/exe", b, n);
+#endif
+}
 
 #undef fopen
 #undef remove
@@ -72,12 +147,20 @@ void GetSystemTime(SYSTEMTIME *st) { struct timespec ts; struct tm tm; clock_get
 void GetLocalTime(SYSTEMTIME *st) { struct timespec ts; struct tm tm; clock_gettime(CLOCK_REALTIME, &ts); localtime_r(&ts.tv_sec, &tm); tm_to_st(&tm, ts.tv_nsec, st); }
 BOOL GetSystemTimes(FILETIME *idle, FILETIME *kernel, FILETIME *user) {
     /* /proc/stat, USER_HZ ticks; kernel includes idle, as on Windows */
+#ifdef __APPLE__                                  /* macOS: Mach's load counters, in the same 1/100 s ticks */
+    host_cpu_load_info_data_t li;
+    mach_msg_type_number_t cnt = HOST_CPU_LOAD_INFO_COUNT;
+    if (host_statistics(mach_host_self(), HOST_CPU_LOAD_INFO, (host_info_t)&li, &cnt) != KERN_SUCCESS) return FALSE;
+    unsigned long long u = li.cpu_ticks[CPU_STATE_USER], n = li.cpu_ticks[CPU_STATE_NICE], s = li.cpu_ticks[CPU_STATE_SYSTEM],
+                       i = li.cpu_ticks[CPU_STATE_IDLE], w = 0, q = 0, sq = 0;
+#else
     unsigned long long u = 0, n = 0, s = 0, i = 0, w = 0, q = 0, sq = 0;
     FILE *f = fopen("/proc/stat", "r");
     if (!f) return FALSE;
     int got = fscanf(f, "cpu %llu %llu %llu %llu %llu %llu %llu", &u, &n, &s, &i, &w, &q, &sq);
     fclose(f);
     if (got < 4) return FALSE;
+#endif
     long hz = sysconf(_SC_CLK_TCK);
     uint64_t k = 10000000ULL / (uint64_t)(hz > 0 ? hz : 100);
     if (idle) ft_set(idle, (i + w) * k);
@@ -105,7 +188,9 @@ void Sleep(DWORD ms) {
 /* ================================================================ condition variables, init-once */
 /* CONDITION_VARIABLE: a futex on a wake counter. As on Windows a waiter can return without a Wake (callers loop on their
  * condition), and a timeout returns FALSE with ERROR_TIMEOUT. */
+#ifndef __APPLE__                                 /* (macOS: above) */
 static long futex(volatile uint32_t *a, int op, uint32_t v, const struct timespec *ts) { return syscall(SYS_futex, a, op, v, ts, NULL, 0); }
+#endif
 static BOOL cv_wait(CONDITION_VARIABLE *cv, DWORD ms, void (*unlock)(void *), void (*lock)(void *), void *l) {
     uint32_t seq = __atomic_load_n(&cv->seq, __ATOMIC_SEQ_CST);
     unlock(l);
@@ -173,7 +258,11 @@ typedef struct PlatObj {
 
 static pthread_condattr_t g_cv_mono;
 static pthread_once_t g_cv_once = PTHREAD_ONCE_INIT;
+#ifdef __APPLE__                                  /* macOS: no clock choice; the timed waits use CLOCK_REALTIME (abs_deadline) */
+static void cv_attr_init(void) { pthread_condattr_init(&g_cv_mono); }
+#else
 static void cv_attr_init(void) { pthread_condattr_init(&g_cv_mono); pthread_condattr_setclock(&g_cv_mono, CLOCK_MONOTONIC); }
+#endif
 static PlatObj *obj_new(int kind) {
     pthread_once(&g_cv_once, cv_attr_init);
     PlatObj *o = calloc(1, sizeof *o);
@@ -200,7 +289,7 @@ static __thread PlatObj *t_self;
 static void *thread_tramp(void *p) {
     PlatObj *o = p;
     t_self = o;
-    o->tid = (pid_t)syscall(SYS_gettid);
+    o->tid = os_tid();
     pthread_mutex_lock(&o->m);
     while (!o->started) pthread_cond_wait(&o->cv, &o->m);     /* CREATE_SUSPENDED: held until ResumeThread */
     pthread_mutex_unlock(&o->m);
@@ -239,7 +328,7 @@ DWORD ResumeThread(HANDLE h) {
 DWORD SuspendThread(HANDLE h) { (void)h; return (DWORD)-1; }      /* pthreads cannot stop another thread: failure, which every caller (diagnostics) handles */
 HANDLE GetCurrentThread(void) { return PSEUDO_THREAD; }
 HANDLE GetCurrentProcess(void) { return PSEUDO_PROCESS; }
-DWORD GetCurrentThreadId(void) { static __thread DWORD id; if (!id) id = (DWORD)syscall(SYS_gettid); return id; }
+DWORD GetCurrentThreadId(void) { static __thread DWORD id; if (!id) id = (DWORD)os_tid(); return id; }
 DWORD GetCurrentProcessId(void) { return (DWORD)getpid(); }
 DWORD GetThreadId(HANDLE h) { if (h == PSEUDO_THREAD) return GetCurrentThreadId(); return is_obj(h) && ((PlatObj *)h)->kind == PO_THREAD ? (DWORD)((PlatObj *)h)->tid : 0; }
 BOOL GetExitCodeThread(HANDLE h, DWORD *code) { if (!is_obj(h)) return FALSE; *code = ((PlatObj *)h)->exit_code; return TRUE; }
@@ -248,9 +337,11 @@ int GetThreadPriority(HANDLE h) { (void)h; return THREAD_PRIORITY_NORMAL; }
 DWORD_PTR SetThreadAffinityMask(HANDLE h, DWORD_PTR mask) {
     pthread_t th = h == PSEUDO_THREAD ? pthread_self() : is_obj(h) ? ((PlatObj *)h)->th : 0;
     if (!th || !mask) return 0;
+#ifndef __APPLE__                                 /* macOS has no thread affinity: the mask is accepted, not applied */
     cpu_set_t set; CPU_ZERO(&set);
     for (int i = 0; i < 64; i++) if (mask >> i & 1) CPU_SET(i, &set);
     if (pthread_setaffinity_np(th, sizeof set, &set)) return 0;
+#endif
     return ~(DWORD_PTR)0 >> (64 - (get_nprocs() < 64 ? get_nprocs() : 64));
 }
 /* The kernel's thread name: at most 15 characters (Windows keeps the whole description); non-ASCII becomes '?'. */
@@ -261,7 +352,12 @@ HRESULT SetThreadDescription(HANDLE h, LPCWSTR name) {
     if (!th || !name) return E_FAIL;
     for (; i < 15 && name[i]; i++) s[i] = name[i] < 128 ? (char)name[i] : '?';
     s[i] = 0;
+#ifdef __APPLE__                                  /* macOS names the calling thread only */
+    if (!pthread_equal(th, pthread_self())) return E_FAIL;
+    return pthread_setname_np(s) ? E_FAIL : S_OK;
+#else
     return pthread_setname_np(th, s) ? E_FAIL : S_OK;
+#endif
 }
 BOOL GetProcessAffinityMask(HANDLE p, DWORD_PTR *proc, DWORD_PTR *sys) {
     (void)p;
@@ -277,7 +373,7 @@ BOOL DuplicateHandle(HANDLE sp, HANDLE src, HANDLE tp, HANDLE *dst, DWORD access
         PlatObj *o = t_self;
         if (o) { __atomic_add_fetch(&o->refs, 1, __ATOMIC_ACQ_REL); *dst = o; return TRUE; }
         o = obj_new(PO_THREAD);
-        o->th = pthread_self(); o->tid = (pid_t)syscall(SYS_gettid); o->started = 1; o->exit_code = STILL_ACTIVE;
+        o->th = pthread_self(); o->tid = os_tid(); o->started = 1; o->exit_code = STILL_ACTIVE;
         o->refs = 2; t_self = o;                   /* the thread's own reference is never dropped: it was not made by CreateThread */
         *dst = o;
         return TRUE;
@@ -354,7 +450,12 @@ static int ready_locked(PlatObj *o, int take) {
     }
 }
 static void abs_deadline(struct timespec *ts, int64_t ns_from_now) {
+#ifdef __APPLE__
+    struct timespec now; clock_gettime(CLOCK_REALTIME, &now);
+    int64_t t = (int64_t)now.tv_sec * 1000000000LL + now.tv_nsec + ns_from_now;
+#else
     int64_t t = mono_ns() + ns_from_now;
+#endif
     ts->tv_sec = t / 1000000000LL; ts->tv_nsec = t % 1000000000LL;
 }
 DWORD WaitForSingleObject(HANDLE h, DWORD ms) {
@@ -432,7 +533,25 @@ BOOL FlsSetValue(DWORD i, PVOID v) { return pthread_setspecific((pthread_key_t)i
  * On ucontext. As on Windows a fiber can be resumed on another thread than the one it last ran on (the running fiber is
  * per thread: t_fiber); swapcontext also saves and restores the signal mask, one system call per switch. The stack is
  * reserved whole at creation (MAP_NORESERVE: pages are used as touched), not grown from a commit size. */
+#if defined(__APPLE__) && defined(__aarch64__)
+/* macOS on Apple Silicon has no working ucontext: a switch of the callee-saved registers instead (x19-x28, fp, lr, sp,
+ * d8-d15; everything else is the caller's to keep across a call). A new fiber's first switch "returns" into fiber_entry
+ * on its own stack. The signal mask is not switched (ucontext did that with one system call per switch). */
+typedef struct { uint64_t r[13]; uint64_t d[8]; } FiberRegs;        /* r: x19..x28, fp, lr, sp */
+void plat_fiber_switch(FiberRegs *from, FiberRegs *to);
+__asm__(".text\n.globl _plat_fiber_switch\n.p2align 2\n_plat_fiber_switch:\n"
+        "  mov x9, sp\n"
+        "  stp x19, x20, [x0, #0]\n  stp x21, x22, [x0, #16]\n  stp x23, x24, [x0, #32]\n  stp x25, x26, [x0, #48]\n"
+        "  stp x27, x28, [x0, #64]\n  stp x29, x30, [x0, #80]\n  str x9, [x0, #96]\n"
+        "  stp d8, d9, [x0, #104]\n  stp d10, d11, [x0, #120]\n  stp d12, d13, [x0, #136]\n  stp d14, d15, [x0, #152]\n"
+        "  ldp x19, x20, [x1, #0]\n  ldp x21, x22, [x1, #16]\n  ldp x23, x24, [x1, #32]\n  ldp x25, x26, [x1, #48]\n"
+        "  ldp x27, x28, [x1, #64]\n  ldp x29, x30, [x1, #80]\n  ldr x9, [x1, #96]\n  mov sp, x9\n"
+        "  ldp d8, d9, [x1, #104]\n  ldp d10, d11, [x1, #120]\n  ldp d12, d13, [x1, #136]\n  ldp d14, d15, [x1, #152]\n"
+        "  ret\n");
+typedef struct { FiberRegs uc; LPFIBER_START_ROUTINE fn; LPVOID param; void *stack; size_t stack_size; int is_thread; } Fiber;
+#else
 typedef struct { ucontext_t uc; LPFIBER_START_ROUTINE fn; LPVOID param; void *stack; size_t stack_size; int is_thread; } Fiber;
+#endif
 static __thread Fiber *t_fiber;
 LPVOID ConvertThreadToFiber(LPVOID param) {
     if (t_fiber) return t_fiber;
@@ -450,16 +569,26 @@ LPVOID CreateFiberEx(SIZE_T commit, SIZE_T reserve, DWORD flags, LPFIBER_START_R
     f->stack_size = reserve ? reserve : (SIZE_T)1 << 20;
     f->stack = mmap(NULL, f->stack_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_STACK, -1, 0);
     if (f->stack == MAP_FAILED) { free(f); return NULL; }
+#if defined(__APPLE__) && defined(__aarch64__)
+    memset(&f->uc, 0, sizeof f->uc);
+    f->uc.r[11] = (uint64_t)(uintptr_t)fiber_entry;                                     /* lr */
+    f->uc.r[12] = ((uint64_t)(uintptr_t)f->stack + f->stack_size) & ~(uint64_t)15;      /* sp */
+#else
     getcontext(&f->uc);
     f->uc.uc_stack.ss_sp = f->stack; f->uc.uc_stack.ss_size = f->stack_size; f->uc.uc_link = NULL;
     makecontext(&f->uc, fiber_entry, 0);
+#endif
     return f;
 }
 void SwitchToFiber(LPVOID fiber) {
     Fiber *from = t_fiber, *to = fiber;
     if (from == to) return;
     t_fiber = to;
+#if defined(__APPLE__) && defined(__aarch64__)
+    plat_fiber_switch(&from->uc, &to->uc);
+#else
     swapcontext(&from->uc, &to->uc);
+#endif
 }
 void DeleteFiber(LPVOID fiber) {
     Fiber *f = fiber;
@@ -482,6 +611,23 @@ int plat_current_fiber_stack(uintptr_t *lo, uintptr_t *hi) {      /* crash repor
     return 1;
 }
 LPVOID GetFiberData(void) { return t_fiber ? t_fiber->param : NULL; }
+/* nnunwind.c: the bounds of the stack this thread runs on now: the running fiber's, else the thread's own */
+int plat_current_stack(uintptr_t *lo, uintptr_t *hi) {
+    if (plat_current_fiber_stack(lo, hi)) return 1;
+#ifdef __APPLE__
+    pthread_t t = pthread_self();
+    *hi = (uintptr_t)pthread_get_stackaddr_np(t);
+    *lo = *hi - pthread_get_stacksize_np(t);
+    return 1;
+#else
+    pthread_attr_t a; void *base; size_t sz;
+    if (pthread_getattr_np(pthread_self(), &a)) return 0;
+    pthread_attr_getstack(&a, &base, &sz);
+    pthread_attr_destroy(&a);
+    *lo = (uintptr_t)base; *hi = (uintptr_t)base + sz;
+    return 1;
+#endif
+}
 
 /* ================================================================ virtual memory
  * Windows keeps a state for every page (free / reserved / committed, protection); VirtualQuery reports runs of pages
@@ -521,10 +667,41 @@ static void seg_set(uintptr_t lo, uintptr_t hi, uintptr_t base, DWORD state, DWO
     memcpy(g_seg + i, tmp, (size_t)nt * sizeof *tmp);
     g_nseg = n;
 }
+#ifdef __APPLE__
+/* Host pages (MAC2): Apple Silicon maps memory in 16 KB pages; the bookkeeping above, VirtualQuery and the guest keep 4 KB
+ * ones (PAGE). mprotect works on whole host pages, so each host page gets the union of the rights of its committed 4 KB
+ * pieces (vm_sync). Decision: more permissive is harmless for the game; what is lost is the fault on a NOACCESS / READONLY
+ * 4 KB piece that shares a host page with a writable one (a guard page smaller than 16 KB does not fault). Write + execute
+ * together is refused on Apple Silicon outside MAP_JIT: such a page keeps read + write (nothing executes guest memory). */
+static uintptr_t g_hpage;
+static uintptr_t hpage(void) { if (!g_hpage) g_hpage = (uintptr_t)getpagesize(); return g_hpage; }
+static int host_rights(uintptr_t h, uintptr_t he) {    /* g_vm_lock held */
+    int r = 0;
+    for (int k = seg_find(h); k < g_nseg && g_seg[k].lo < he; k++) if (g_seg[k].state == MEM_COMMIT) r |= prot_posix(g_seg[k].prot);
+    if ((r & PROT_WRITE) && (r & PROT_EXEC)) r &= ~PROT_EXEC;
+    return r;
+}
+static int ww_arm(uintptr_t h, int r);
+/* Applies the segments' rights to the host pages over [lo, hi) (after seg_set); one mprotect per run of equal rights. */
+static void vm_sync(uintptr_t lo, uintptr_t hi) {     /* g_vm_lock held */
+    uintptr_t H = hpage(), run = 0;
+    int rr = -1;
+    for (uintptr_t h = lo & ~(H - 1); h < hi; h += H) {
+        int r = ww_arm(h, host_rights(h, h + H));
+        if (r != rr) { if (rr >= 0) mprotect((void *)run, h - run, rr); run = h; rr = r; }
+    }
+    if (rr >= 0) mprotect((void *)run, ((hi + H - 1) & ~(H - 1)) - run, rr);
+}
+#define vm_mprotect(lo, hi, prot) 0                   /* the rights are applied by vm_sync, after the bookkeeping */
+#else
+#define vm_sync(lo, hi) ((void)0)
+#define vm_mprotect(lo, hi, prot) mprotect((void *)(lo), (hi) - (lo), prot_posix(prot))
+#endif
 /* Write watch (MEM_WRITE_WATCH, GetWriteWatch): userfaultfd write protection in asynchronous mode (Linux 6.7+), which the
  * kernel resolves by itself on the first write to a page and records; PAGEMAP_SCAN lists the written pages of a range
  * and protects them again in the same call. This is what Wine uses for the same function. Without it (older kernel,
  * userfaultfd not allowed) the regions are not watched and GetWriteWatch fails, as for memory that is not watched. */
+#ifdef __linux__
 static int g_uffd = -2, g_pagemap = -1;
 typedef struct { uintptr_t lo, hi; } WwRegion;
 static WwRegion g_ww[64];
@@ -591,6 +768,141 @@ UINT ResetWriteWatch(LPVOID base, SIZE_T size) {
     ww_protect(lo, hi - lo);
     return 0;
 }
+void plat_prepare_write(void *p, size_t n) { (void)p; (void)n; }       /* the kernel resolves the write protection itself */
+int plat_write_fault(void *addr) { (void)addr; return 0; }
+#else
+/* macOS (MAC2): no userfaultfd. A watched host page that has not been written since the last reset is mapped without the
+ * write right; the first write faults (SIGBUS), plat_write_fault gives the right back and marks the page's 4 KB pieces
+ * written; GetWriteWatch lists them and, with the reset flag, takes the right away again. Granularity: a write anywhere
+ * in a 16 KB host page reports its four 4 KB pieces (more than Windows, never less: nvn_gl.c then hashes the texture).
+ * The fault path takes no lock (the faulting thread may hold g_vm_lock): regions stay in their slot, rights[] and dirty[]
+ * are read with atomics. The kernel does not fault for its own writes (read(), fread's direct read): those fail with
+ * EFAULT, so ReadFile and fread call plat_prepare_write first. */
+typedef struct { uintptr_t lo, hi; uint8_t *rights, *dirty; } WwRegion;    /* rights: the host page's own rights (vm_sync) */
+static WwRegion g_ww[64];
+static int g_nww;                                          /* slots in use or freed (hi = 0); never moved */
+static struct sigaction g_ww_old_segv, g_ww_old_bus;
+static volatile LONG64 g_ww_faults;
+static int ww_find(uintptr_t a) {
+    int n = __atomic_load_n(&g_nww, __ATOMIC_ACQUIRE);
+    for (int i = 0; i < n; i++) {
+        uintptr_t lo = __atomic_load_n(&g_ww[i].lo, __ATOMIC_ACQUIRE), hi = __atomic_load_n(&g_ww[i].hi, __ATOMIC_ACQUIRE);
+        if (a >= lo && a < hi) return i;
+    }
+    return -1;
+}
+/* Gives a watched host page its write right back and marks its pieces written (the marks after the mprotect: see
+ * ww_reset). 0 = not a watched page that has the write right. */
+static int ww_unarm(uintptr_t a) {
+    int i = ww_find(a);
+    if (i < 0) return 0;
+    uintptr_t H = g_hpage, idx = (a - g_ww[i].lo) / H;
+    int r = __atomic_load_n(&g_ww[i].rights[idx], __ATOMIC_ACQUIRE);
+    if (!(r & PROT_WRITE) || mprotect((void *)(a & ~(H - 1)), H, r)) return 0;
+    __atomic_fetch_or(&g_ww[i].dirty[idx], 0xff, __ATOMIC_SEQ_CST);
+    return 1;
+}
+int plat_write_fault(void *addr) {
+    if (!ww_unarm((uintptr_t)addr)) return 0;
+    __atomic_fetch_add(&g_ww_faults, 1, __ATOMIC_RELAXED);
+    return 1;
+}
+void plat_prepare_write(void *p, size_t n) {
+    if (!n || !__atomic_load_n(&g_nww, __ATOMIC_ACQUIRE)) return;
+    uintptr_t H = hpage(), a = (uintptr_t)p, e = a + n;
+    for (uintptr_t h = a & ~(H - 1); h < e; h += H) {
+        int i = ww_find(h);
+        if (i >= 0 && __atomic_load_n(&g_ww[i].dirty[(h - g_ww[i].lo) / H], __ATOMIC_ACQUIRE) != 0xff) ww_unarm(h);
+    }
+}
+static void ww_signal(int sig, siginfo_t *si, void *uc) {
+    if (plat_write_fault(si->si_addr)) return;
+    struct sigaction *o = sig == SIGBUS ? &g_ww_old_bus : &g_ww_old_segv;
+    if (o->sa_flags & SA_SIGINFO) { if (o->sa_sigaction) { o->sa_sigaction(sig, si, uc); return; } }
+    else if (o->sa_handler != SIG_DFL && o->sa_handler != SIG_IGN) { o->sa_handler(sig); return; }
+    signal(sig, SIG_DFL);                                  /* nobody else: the default action when the instruction runs again */
+}
+/* The rights a watched host page gets: no write right (armed), even if some pieces are still marked (a write marks them
+ * all again). Records the page's own rights for the fault path. g_vm_lock held. */
+static int ww_arm(uintptr_t h, int r) {
+    int i = ww_find(h);
+    if (i < 0) return r;
+    __atomic_store_n(&g_ww[i].rights[(h - g_ww[i].lo) / g_hpage], (uint8_t)r, __ATOMIC_RELEASE);
+    return r & ~PROT_WRITE;
+}
+static void ww_add(uintptr_t lo, size_t n) {               /* g_vm_lock held; the caller runs vm_sync over the range */
+    static int installed;
+    if (getenv("SSBU_NO_WRITEWATCH")) return;
+    int slot = -1;
+    for (int i = 0; i < g_nww; i++) if (!g_ww[i].hi) { slot = i; break; }
+    if (slot < 0) { if (g_nww == 64) return; slot = g_nww; }
+    uintptr_t H = hpage(), nh = (n + H - 1) / H;
+    uint8_t *rights = calloc(nh, 1), *dirty = calloc(nh, 1);
+    if (!rights || !dirty) { free(rights); free(dirty); return; }
+    if (!installed) {
+        struct sigaction sa;
+        memset(&sa, 0, sizeof sa);
+        sa.sa_sigaction = ww_signal;
+        sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+        sigemptyset(&sa.sa_mask);
+        sigaction(SIGBUS, &sa, &g_ww_old_bus); sigaction(SIGSEGV, &sa, &g_ww_old_segv);
+        installed = 1;
+    }
+    free(g_ww[slot].rights); free(g_ww[slot].dirty);
+    g_ww[slot].rights = rights; g_ww[slot].dirty = dirty;
+    __atomic_store_n(&g_ww[slot].lo, lo, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_ww[slot].hi, lo + n, __ATOMIC_RELEASE);
+    if (slot == g_nww) __atomic_store_n(&g_nww, g_nww + 1, __ATOMIC_RELEASE);
+}
+static void ww_drop(uintptr_t lo) {        /* the arrays stay until the slot is reused: a late fault reads valid memory */
+    int i = ww_find(lo);
+    if (i >= 0) __atomic_store_n(&g_ww[i].hi, 0, __ATOMIC_RELEASE);
+}
+/* Clears the marks of the 4 KB pieces of [lo, hi) (g_vm_lock held); with rearm the written host pages lose the write right
+ * again. Order: protect, clear, protect again. A write whose fault raced the first mprotect sets its marks after its own
+ * mprotect, so it is either after the clear (still marked) or caught by the second mprotect: a page is never left
+ * writable with clear marks. */
+static void ww_reset(int i, uintptr_t lo, uintptr_t hi, int rearm) {
+    uintptr_t H = g_hpage;
+    for (uintptr_t h = lo & ~(H - 1); h < hi; h += H) {
+        uintptr_t idx = (h - g_ww[i].lo) / H, a = h < lo ? lo : h, e = h + H > hi ? hi : h + H;
+        if (!__atomic_load_n(&g_ww[i].dirty[idx], __ATOMIC_ACQUIRE)) continue;     /* not written: already armed */
+        uint8_t mask = 0;
+        for (uintptr_t p = a; p < e; p += PAGE) mask |= (uint8_t)(1u << ((p - h) / PAGE));
+        int r = __atomic_load_n(&g_ww[i].rights[idx], __ATOMIC_ACQUIRE);
+        if (rearm && (r & PROT_WRITE)) mprotect((void *)h, H, r & ~PROT_WRITE);
+        __atomic_fetch_and(&g_ww[i].dirty[idx], (uint8_t)~mask, __ATOMIC_SEQ_CST);
+        if (rearm && (r & PROT_WRITE)) mprotect((void *)h, H, r & ~PROT_WRITE);
+    }
+}
+static void ww_protect(uintptr_t lo, size_t n) {          /* decommitted pieces: not written; vm_sync arms the pages */
+    int i = ww_find(lo);
+    if (i >= 0) ww_reset(i, lo, lo + n, 0);
+}
+UINT GetWriteWatch(DWORD flags, PVOID base, SIZE_T size, PVOID *addrs, ULONG_PTR *count, ULONG *gran) {
+    uintptr_t lo = (uintptr_t)base & ~(uintptr_t)(PAGE - 1), hi = ((uintptr_t)base + size + PAGE - 1) & ~(uintptr_t)(PAGE - 1);
+    pthread_mutex_lock(&g_vm_lock);
+    int i = ww_find(lo);
+    if (i < 0 || hi > g_ww[i].hi || !size) { pthread_mutex_unlock(&g_vm_lock); t_lasterr = ERROR_INVALID_PARAMETER; return 1; }
+    ULONG_PTR max = *count, got = 0;
+    uintptr_t H = g_hpage, p = lo;
+    for (; p < hi && got < max; p += PAGE)
+        if (__atomic_load_n(&g_ww[i].dirty[(p - g_ww[i].lo) / H], __ATOMIC_ACQUIRE) & (1u << ((p & (H - 1)) / PAGE))) addrs[got++] = (PVOID)p;
+    if (flags & WRITE_WATCH_FLAG_RESET) ww_reset(i, lo, p, 1);           /* the pieces looked at */
+    pthread_mutex_unlock(&g_vm_lock);
+    if (gran) *gran = PAGE;
+    *count = got;
+    return 0;
+}
+UINT ResetWriteWatch(LPVOID base, SIZE_T size) {
+    uintptr_t lo = (uintptr_t)base & ~(uintptr_t)(PAGE - 1), hi = ((uintptr_t)base + size + PAGE - 1) & ~(uintptr_t)(PAGE - 1);
+    pthread_mutex_lock(&g_vm_lock);
+    int i = ww_find(lo);
+    if (i >= 0) ww_reset(i, lo, hi < g_ww[i].hi ? hi : g_ww[i].hi, 1);
+    pthread_mutex_unlock(&g_vm_lock);
+    return i < 0;
+}
+#endif
 /* MEM_RESERVE maps the range PROT_NONE (address space only) and MEM_COMMIT is an mprotect; reservations start on 64 KB, the
  * Windows allocation granularity. Decommit (VirtualFree MEM_DECOMMIT) drops the pages, so a new commit reads zeros as on Windows. */
 LPVOID VirtualAlloc(LPVOID addr, SIZE_T size, DWORD type, DWORD prot) {
@@ -601,21 +913,28 @@ LPVOID VirtualAlloc(LPVOID addr, SIZE_T size, DWORD type, DWORD prot) {
         uintptr_t lo = a & ~(uintptr_t)0xffff;          /* reservations start on 64 KB, as on Windows */
         size_t n = (size + (a - lo) + PAGE - 1) & ~(size_t)(PAGE - 1);
         int commit = (type & MEM_COMMIT) != 0;
+#ifdef __APPLE__                                  /* whole host pages, no rights yet (vm_sync below gives them) */
+        size_t nm = (n + hpage() - 1) & ~(size_t)(hpage() - 1);
+        int mprot = PROT_NONE;
+#else
+        size_t nm = n;
+        int mprot = commit ? prot_posix(prot) : PROT_NONE;
+#endif
         int flags = MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE;
         void *p;
-        if (addr) p = mmap((void *)lo, n, commit ? prot_posix(prot) : PROT_NONE, flags | MAP_FIXED_NOREPLACE, -1, 0);
+        if (addr) p = mmap((void *)lo, nm, mprot, flags | MAP_FIXED_NOREPLACE, -1, 0);
         else {
             /* 64 KB alignment: over-allocate and trim */
-            p = mmap(NULL, n + 0x10000, commit ? prot_posix(prot) : PROT_NONE, flags, -1, 0);
+            p = mmap(NULL, nm + 0x10000, mprot, flags, -1, 0);
             if (p != MAP_FAILED) {
                 uintptr_t s = (uintptr_t)p, al = (s + 0xffff) & ~(uintptr_t)0xffff;
                 if (al > s) munmap(p, al - s);
-                if (s + n + 0x10000 > al + n) munmap((void *)(al + n), s + n + 0x10000 - (al + n));
+                if (s + nm + 0x10000 > al + nm) munmap((void *)(al + nm), s + nm + 0x10000 - (al + nm));
                 p = (void *)al;
             }
         }
         if (p == MAP_FAILED || (addr && (uintptr_t)p != lo)) {
-            if (p != MAP_FAILED) munmap(p, n);
+            if (p != MAP_FAILED) munmap(p, nm);
             pthread_mutex_unlock(&g_vm_lock);
             t_lasterr = ERROR_INVALID_ADDRESS;
             return NULL;
@@ -623,6 +942,7 @@ LPVOID VirtualAlloc(LPVOID addr, SIZE_T size, DWORD type, DWORD prot) {
         lo = (uintptr_t)p;
         seg_set(lo, lo + n, lo, commit ? MEM_COMMIT : MEM_RESERVE, commit ? prot : 0, prot);
         if (type & MEM_WRITE_WATCH) ww_add(lo, n);
+        if (commit) vm_sync(lo, lo + n);
         pthread_mutex_unlock(&g_vm_lock);
         return addr ? (void *)a : p;
     }
@@ -636,8 +956,9 @@ LPVOID VirtualAlloc(LPVOID addr, SIZE_T size, DWORD type, DWORD prot) {
         if (k >= g_nseg || g_seg[k].lo > p) { pthread_mutex_unlock(&g_vm_lock); t_lasterr = ERROR_INVALID_ADDRESS; return NULL; }
         p = g_seg[k].hi;
     }
-    if (mprotect((void *)lo, hi - lo, prot_posix(prot))) { pthread_mutex_unlock(&g_vm_lock); fail_errno(); return NULL; }
+    if (vm_mprotect(lo, hi, prot)) { pthread_mutex_unlock(&g_vm_lock); fail_errno(); return NULL; }
     seg_set(lo, hi, base, MEM_COMMIT, prot, aprot);
+    vm_sync(lo, hi);
     pthread_mutex_unlock(&g_vm_lock);
     return addr;
 }
@@ -657,10 +978,27 @@ BOOL VirtualFree(LPVOID addr, SIZE_T size, DWORD type) {
         uintptr_t lo = a & ~(uintptr_t)(PAGE - 1), hi = size ? (a + size + PAGE - 1) & ~(uintptr_t)(PAGE - 1) : lo;
         if (!size) { uintptr_t base = g_seg[i].alloc_base; int k = seg_find(base); lo = base; while (k < g_nseg && g_seg[k].alloc_base == base) hi = g_seg[k++].hi; }
         uintptr_t base = g_seg[i].alloc_base; DWORD aprot = g_seg[i].alloc_prot;
+#ifdef __APPLE__
+        /* MADV_DONTNEED keeps the pages on macOS: a new mapping over the whole host pages reads zeros; the 4 KB pieces of a
+         * host page shared with other pieces are cleared by hand (the page gets read + write for that, vm_sync below
+         * gives it its rights again) */
+        uintptr_t H = hpage(), flo = (lo + H - 1) & ~(H - 1), fhi = hi & ~(H - 1);
+        if (flo < fhi) mmap((void *)flo, fhi - flo, PROT_NONE, MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+        else flo = fhi = hi;
+        for (uintptr_t p = lo; p < hi; p += PAGE) {
+            if (p >= flo && p < fhi) continue;
+            int k = seg_find(p);
+            if (k >= g_nseg || g_seg[k].lo > p || g_seg[k].state != MEM_COMMIT) continue;   /* never committed: zero already */
+            mprotect((void *)(p & ~(H - 1)), H, PROT_READ | PROT_WRITE);
+            memset((void *)p, 0, PAGE);
+        }
+#else
         madvise((void *)lo, hi - lo, MADV_DONTNEED);     /* decommitted pages come back zero */
         mprotect((void *)lo, hi - lo, PROT_NONE);
+#endif
         if (ww_find(lo) >= 0) ww_protect(lo, hi - lo);   /* emptied pages are watched again (not "written") */
         seg_set(lo, hi, base, MEM_RESERVE, 0, aprot);
+        vm_sync(lo, hi);
     }
     pthread_mutex_unlock(&g_vm_lock);
     return TRUE;
@@ -676,7 +1014,11 @@ BOOL VirtualProtect(LPVOID addr, SIZE_T size, DWORD prot, DWORD *old) {
     int i = seg_find(lo);
     int tracked = i < g_nseg && g_seg[i].lo <= lo;
     if (old) *old = tracked ? g_seg[i].prot : untracked_old;
-    if (mprotect((void *)lo, hi - lo, prot_posix(prot))) { pthread_mutex_unlock(&g_vm_lock); return fail_errno(); }
+#ifdef __APPLE__                                  /* memory we did not map: whole host pages (vm_sync does ours) */
+    uintptr_t hlo = lo & ~(hpage() - 1), hhi = (hi + hpage() - 1) & ~(hpage() - 1);
+    if (!tracked && mprotect((void *)hlo, hhi - hlo, prot_posix(prot))) { pthread_mutex_unlock(&g_vm_lock); return fail_errno(); }
+#endif
+    if (vm_mprotect(lo, hi, prot)) { pthread_mutex_unlock(&g_vm_lock); return fail_errno(); }
     if (tracked) {                                   /* per segment: keeps each one's allocation base */
         for (uintptr_t p = lo; p < hi;) {
             int k = seg_find(p);
@@ -685,6 +1027,7 @@ BOOL VirtualProtect(LPVOID addr, SIZE_T size, DWORD prot, DWORD *old) {
             seg_set(p, e, g_seg[k].alloc_base, MEM_COMMIT, prot, g_seg[k].alloc_prot);
             p = e;
         }
+        vm_sync(lo, hi);
     }
     pthread_mutex_unlock(&g_vm_lock);
     return TRUE;
@@ -749,6 +1092,28 @@ SIZE_T VirtualQuery(LPCVOID addr, MEMORY_BASIC_INFORMATION *mi, SIZE_T len) {
         if (errno == ENOTTY || errno == EINVAL || errno == EOPNOTSUPP) __atomic_store_n(&pmq_fd, -1, __ATOMIC_RELEASE);
     }
 #endif
+#ifdef __APPLE__
+    {   /* macOS: the region at a, or the next one, from Mach */
+        mach_vm_address_t ra = a;
+        mach_vm_size_t rs = 0;
+        vm_region_basic_info_data_64_t bi;
+        mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64;
+        mach_port_t obj = MACH_PORT_NULL;
+        if (mach_vm_region(mach_task_self(), &ra, &rs, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&bi, &cnt, &obj) != KERN_SUCCESS) {
+            mi->State = MEM_FREE; mi->Protect = PAGE_NOACCESS; mi->RegionSize = (next_tracked != UINTPTR_MAX ? next_tracked : 0x800000000000ULL) - a;
+            return sizeof *mi;
+        }
+        if (ra > a) {                                  /* in a gap */
+            uintptr_t end = ra < next_tracked ? (uintptr_t)ra : next_tracked;
+            mi->AllocationBase = NULL; mi->State = MEM_FREE; mi->Protect = PAGE_NOACCESS; mi->RegionSize = end - a;
+        } else {
+            char perm[4] = { bi.protection & VM_PROT_READ ? 'r' : '-', bi.protection & VM_PROT_WRITE ? 'w' : '-', bi.protection & VM_PROT_EXECUTE ? 'x' : '-', 0 };
+            mi->AllocationBase = (void *)(uintptr_t)ra; mi->AllocationProtect = prot_from_maps(perm);
+            mi->State = MEM_COMMIT; mi->Protect = prot_from_maps(perm); mi->RegionSize = (uintptr_t)(ra + rs) - a; mi->Type = MEM_PRIVATE;
+        }
+        return sizeof *mi;
+    }
+#endif
     FILE *f = fopen("/proc/self/maps", "r");
     if (!f) return 0;
     char line[512];
@@ -774,19 +1139,34 @@ SIZE_T VirtualQuery(LPCVOID addr, MEMORY_BASIC_INFORMATION *mi, SIZE_T len) {
     if (!found) { mi->State = MEM_FREE; mi->Protect = PAGE_NOACCESS; mi->RegionSize = (next_tracked != UINTPTR_MAX ? next_tracked : 0x800000000000ULL) - a; }
     return sizeof *mi;
 }
+#if defined(__APPLE__) && defined(__aarch64__)      /* arm64 does not keep code coherent with data writes */
+BOOL FlushInstructionCache(HANDLE p, LPCVOID base, SIZE_T size) { (void)p; if (base && size) sys_icache_invalidate((void *)base, size); return TRUE; }
+#else
 BOOL FlushInstructionCache(HANDLE p, LPCVOID base, SIZE_T size) { (void)p; (void)base; (void)size; return TRUE; }     /* x86-64 keeps code coherent */
+#endif
 BOOL ReadProcessMemory(HANDLE p, LPCVOID src, LPVOID dst, SIZE_T n, SIZE_T *got) {
     /* a read that does not fault: process_vm_readv on ourselves */
     (void)p;
+#ifdef __APPLE__                                  /* Mach's read of our own task: fails instead of faulting */
+    mach_vm_size_t k = 0;
+    kern_return_t kr = mach_vm_read_overwrite(mach_task_self(), (mach_vm_address_t)(uintptr_t)src, n, (mach_vm_address_t)(uintptr_t)dst, &k);
+    if (got) *got = kr == KERN_SUCCESS ? (SIZE_T)k : 0;
+    return kr == KERN_SUCCESS && k == n;
+#else
     struct iovec l = {dst, n}, r = {(void *)src, n};
     ssize_t k = process_vm_readv(getpid(), &l, 1, &r, 1, 0);      /* glibc's wrapper: through syscall() the int flags argument
                                                                         went on the stack with its upper half unset (EINVAL at random) */
     if (got) *got = k > 0 ? (SIZE_T)k : 0;
     return k == (ssize_t)n;
+#endif
 }
 void GetSystemInfo(SYSTEM_INFO *si) {
     memset(si, 0, sizeof *si);
+#ifdef __aarch64__
+    si->wProcessorArchitecture = 12;                 /* PROCESSOR_ARCHITECTURE_ARM64 */
+#else
     si->wProcessorArchitecture = 9;                  /* PROCESSOR_ARCHITECTURE_AMD64 */
+#endif
     si->dwPageSize = PAGE;
     si->lpMinimumApplicationAddress = (void *)0x10000;
     si->lpMaximumApplicationAddress = (void *)0x7ffffffeffffULL;
@@ -795,12 +1175,24 @@ void GetSystemInfo(SYSTEM_INFO *si) {
     si->dwAllocationGranularity = 0x10000;
 }
 BOOL GlobalMemoryStatusEx(MEMORYSTATUSEX *m) {
+#ifdef __APPLE__                                  /* macOS: hw.memsize, and Mach's free + inactive pages; swap grows as needed */
+    uint64_t total = 0;
+    size_t len = sizeof total;
+    vm_statistics64_data_t vs;
+    mach_msg_type_number_t cnt = HOST_VM_INFO64_COUNT;
+    if (sysctlbyname("hw.memsize", &total, &len, NULL, 0) || host_statistics64(mach_host_self(), HOST_VM_INFO64, (host_info64_t)&vs, &cnt) != KERN_SUCCESS) return FALSE;
+    m->ullTotalPhys = total;
+    m->ullAvailPhys = ((ULONGLONG)vs.free_count + vs.inactive_count) * vm_page_size;
+    m->ullTotalPageFile = m->ullTotalPhys;
+    m->ullAvailPageFile = m->ullAvailPhys;
+#else
     struct sysinfo s;
     if (sysinfo(&s)) return FALSE;
     m->ullTotalPhys = (ULONGLONG)s.totalram * s.mem_unit;
     m->ullAvailPhys = (ULONGLONG)(s.freeram + s.bufferram) * s.mem_unit;
     m->ullTotalPageFile = m->ullTotalPhys + (ULONGLONG)s.totalswap * s.mem_unit;
     m->ullAvailPageFile = m->ullAvailPhys + (ULONGLONG)s.freeswap * s.mem_unit;
+#endif
     m->ullTotalVirtual = m->ullAvailVirtual = 0x7ffffffeffffULL;
     m->dwMemoryLoad = (DWORD)(m->ullTotalPhys ? 100 - m->ullAvailPhys * 100 / m->ullTotalPhys : 0);
     return TRUE;
@@ -808,10 +1200,19 @@ BOOL GlobalMemoryStatusEx(MEMORYSTATUSEX *m) {
 BOOL GetProcessMemoryInfo(HANDLE p, PROCESS_MEMORY_COUNTERS *pmc, DWORD cb) {
     (void)p;
     memset(pmc, 0, cb < sizeof *pmc ? cb : sizeof *pmc);
+#ifdef __APPLE__                                  /* the resident size from Mach, counted in PAGE as statm counts it; ru_maxrss is in bytes here */
+    unsigned long long res = 0;
+    mach_task_basic_info_data_t ti;
+    mach_msg_type_number_t cnt = MACH_TASK_BASIC_INFO_COUNT;
+    if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO, (task_info_t)&ti, &cnt) == KERN_SUCCESS) res = ti.resident_size / PAGE;
+    struct rusage ru; getrusage(RUSAGE_SELF, &ru);
+    ru.ru_maxrss /= 1024;
+#else
     unsigned long long size = 0, res = 0;
     FILE *f = fopen("/proc/self/statm", "r");
     if (f) { if (fscanf(f, "%llu %llu", &size, &res) != 2) size = res = 0; fclose(f); }
     struct rusage ru; getrusage(RUSAGE_SELF, &ru);
+#endif
     pmc->cb = cb;
     pmc->WorkingSetSize = (SIZE_T)(res * PAGE);
     pmc->PeakWorkingSetSize = (SIZE_T)ru.ru_maxrss * 1024;
@@ -921,7 +1322,11 @@ HANDLE CreateFileA(LPCSTR path, DWORD access, DWORD share, SECURITY_ATTRIBUTES *
     int fd = open(P(path, b), of | O_CLOEXEC, 0666);
     if (fd < 0 && errno == EISDIR && !(access & GENERIC_WRITE)) fd = open(b, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     if (fd < 0) { fail_errno(); return INVALID_HANDLE_VALUE; }
+#ifdef __APPLE__
+    if (flags & FILE_FLAG_SEQUENTIAL_SCAN) fcntl(fd, F_RDAHEAD, 1);
+#else
     if (flags & FILE_FLAG_SEQUENTIAL_SCAN) posix_fadvise(fd, 0, 0, POSIX_FADV_SEQUENTIAL);
+#endif
     PlatObj *o = obj_new(PO_FILE);
     o->fd = fd;
     t_lasterr = 0;
@@ -932,6 +1337,7 @@ intptr_t _get_osfhandle(int fd) { return fd < 0 ? -1 : (intptr_t)(FD_TAG + (uint
 BOOL ReadFile(HANDLE h, LPVOID buf, DWORD n, DWORD *got, OVERLAPPED *ov) {
     int fd = plat_handle_fd(h);
     size_t done = 0;
+    plat_prepare_write(buf, n);                      /* write-watched memory (macOS): the kernel's write would fail */
     while (done < n) {
         ssize_t k = ov ? pread(fd, (char *)buf + done, n - done, (off_t)(((uint64_t)ov->OffsetHigh << 32 | ov->Offset) + done))
                        : read(fd, (char *)buf + done, n - done);
@@ -1130,22 +1536,36 @@ static char g_bcrypt_tag;
 
 static const char *exe_dir(void) {
     static char dir[PATH_MAX];
-    if (!dir[0]) { ssize_t k = readlink("/proc/self/exe", dir, sizeof dir - 1); if (k > 0) { dir[k] = 0; char *s = strrchr(dir, '/'); if (s) *s = 0; } else strcpy(dir, "."); }
+    if (!dir[0]) { ssize_t k = self_exe_path(dir, sizeof dir - 1); if (k > 0) { dir[k] = 0; char *s = strrchr(dir, '/'); if (s) *s = 0; } else strcpy(dir, "."); }
     return dir;
+}
+static void *sys_dlopen(const char *name) {        /* a system library by its plain name */
+    void *h = dlopen(name, RTLD_NOW | RTLD_LOCAL);
+#ifdef __APPLE__                                  /* dyld does not search Homebrew's folders by itself */
+    static const char *const dirs[] = {"/opt/homebrew/lib/", "/usr/local/lib/"};
+    char p[PATH_MAX];
+    for (int i = 0; !h && name[0] != '/' && i < 2; i++) { snprintf(p, sizeof p, "%s%s", dirs[i], name); h = dlopen(p, RTLD_NOW | RTLD_LOCAL); }
+#endif
+    return h;
 }
 HMODULE LoadLibraryA(LPCSTR name) {
     static const struct { const char *win, *linux_; } map[] = {
+#ifdef __APPLE__                                  /* Homebrew's libraries; the Vulkan loader finds MoltenVK through its driver file */
+        {"vulkan-1.dll", "libvulkan.1.dylib"}, {"libopus-0.dll", "libopus.0.dylib"}, {"opus.dll", "libopus.0.dylib"},
+        {"SDL3.dll", "libSDL3.0.dylib"}, {"opengl32.dll", "/System/Library/Frameworks/OpenGL.framework/OpenGL"},
+#else
         {"vulkan-1.dll", "libvulkan.so.1"}, {"libopus-0.dll", "libopus.so.0"}, {"opus.dll", "libopus.so.0"},
         {"SDL3.dll", "libSDL3.so.0"}, {"opengl32.dll", "libGL.so.1"},
+#endif
     };
     char b[PATH_MAX], c[PATH_MAX];
     P(name, b);
     const char *base = strrchr(b, '/') ? strrchr(b, '/') + 1 : b;
     if (!strcasecmp(base, "bcrypt.dll")) return BCRYPT_MODULE;
     for (size_t i = 0; i < sizeof map / sizeof *map; i++)
-        if (!strcasecmp(base, map[i].win)) { void *h = dlopen(map[i].linux_, RTLD_NOW | RTLD_LOCAL); if (!h) t_lasterr = ERROR_FILE_NOT_FOUND; return h; }
+        if (!strcasecmp(base, map[i].win)) { void *h = sys_dlopen(map[i].linux_); if (!h) t_lasterr = ERROR_FILE_NOT_FOUND; return h; }
     size_t n = strlen(b);
-    if (n > 4 && !strcasecmp(b + n - 4, ".dll")) strcpy(b + n - 4, ".so");     /* our own modules: x.dll -> x.so */
+    if (n > 4 && !strcasecmp(b + n - 4, ".dll")) strcpy(b + n - 4, PLAT_SO_EXT);     /* our own modules: x.dll -> x.so (.dylib) */
     /* Windows looks next to the exe first; dlopen only does that for a path */
     if (b[0] != '/') snprintf(c, sizeof c, "%s/%s", exe_dir(), b); else snprintf(c, sizeof c, "%s", b);
     void *h = dlopen(c, RTLD_NOW | RTLD_LOCAL);
@@ -1168,7 +1588,7 @@ HMODULE GetModuleHandleA(LPCSTR name) {
     char b[PATH_MAX];
     P(name, b);
     size_t n = strlen(b);
-    if (n > 4 && !strcasecmp(b + n - 4, ".dll")) strcpy(b + n - 4, ".so");
+    if (n > 4 && !strcasecmp(b + n - 4, ".dll")) strcpy(b + n - 4, PLAT_SO_EXT);
     return dlopen(b, RTLD_NOW | RTLD_NOLOAD);
 }
 BOOL GetModuleHandleExA(DWORD flags, LPCSTR name, HMODULE *out) {
@@ -1184,8 +1604,12 @@ BOOL GetModuleHandleExA(DWORD flags, LPCSTR name, HMODULE *out) {
 }
 DWORD GetModuleFileNameA(HMODULE m, LPSTR out, DWORD n) {
     char b[PATH_MAX] = "";
-    if (!m || m == dlopen(NULL, RTLD_NOW)) { ssize_t k = readlink("/proc/self/exe", b, sizeof b - 1); if (k < 0) k = 0; b[k] = 0; }
+    if (!m || m == dlopen(NULL, RTLD_NOW)) { ssize_t k = self_exe_path(b, sizeof b - 1); if (k < 0) k = 0; b[k] = 0; }
+#ifdef __APPLE__
+    else { const char *path; uintptr_t base; if (dyld_image_of(m, &path, &base)) snprintf(b, sizeof b, "%s", path); }
+#else
     else { struct link_map *lm = NULL; if (!dlinfo(m, RTLD_DI_LINKMAP, &lm) && lm) snprintf(b, sizeof b, "%s", lm->l_name); }
+#endif
     for (char *p = b; *p; p++) if (*p == '/') *p = '\\';      /* Windows form: callers cut at the last '\\'; every file function here turns it back */
     DWORD k = (DWORD)snprintf(out, n, "%s", b);
     return k < n ? k : n;
@@ -1193,9 +1617,14 @@ DWORD GetModuleFileNameA(HMODULE m, LPSTR out, DWORD n) {
 uintptr_t plat_module_base(HMODULE m) {
     Dl_info di;
     if (!m || m == dlopen(NULL, RTLD_NOW)) { if (dladdr((void *)&plat_module_base, &di)) return (uintptr_t)di.dli_fbase; return 0; }
+#ifdef __APPLE__
+    const char *path; uintptr_t base;
+    return dyld_image_of(m, &path, &base) ? base : 0;
+#else
     struct link_map *lm = NULL;
     if (!dlinfo(m, RTLD_DI_LINKMAP, &lm) && lm) return (uintptr_t)lm->l_addr;
     return 0;
+#endif
 }
 
 /* ================================================================ text: UTF-8 <-> wchar_t (UTF-32 here)
@@ -1317,12 +1746,22 @@ BOOLEAN SystemFunction036(PVOID buf, ULONG n) {
     return TRUE;
 }
 BOOL QueryThreadCycleTime(HANDLE h, ULONG64 *cycles) {
+#ifdef __APPLE__                                  /* the thread's CPU time from Mach (no pthread_getcpuclockid on macOS) */
+    pthread_t th = is_obj(h) && ((PlatObj *)h)->kind == PO_THREAD ? ((PlatObj *)h)->th : pthread_self();
+    thread_basic_info_data_t bi;
+    mach_msg_type_number_t cnt = THREAD_BASIC_INFO_COUNT;
+    if (thread_info(pthread_mach_thread_np(th), THREAD_BASIC_INFO, (thread_info_t)&bi, &cnt) != KERN_SUCCESS) return FALSE;
+    *cycles = ((ULONG64)bi.user_time.seconds + (ULONG64)bi.system_time.seconds) * 1000000000ULL
+            + ((ULONG64)bi.user_time.microseconds + (ULONG64)bi.system_time.microseconds) * 1000ULL;
+    return TRUE;
+#else
     clockid_t id = CLOCK_THREAD_CPUTIME_ID;
     if (is_obj(h) && ((PlatObj *)h)->kind == PO_THREAD && pthread_getcpuclockid(((PlatObj *)h)->th, &id)) return FALSE;
     struct timespec ts;
     if (clock_gettime(id, &ts)) return FALSE;
     *cycles = (ULONG64)ts.tv_sec * 1000000000ULL + (ULONG64)ts.tv_nsec;
     return TRUE;
+#endif
 }
 HANDLE OpenProcess(DWORD access, BOOL inherit, DWORD pid) {
     (void)access; (void)inherit;
@@ -1613,6 +2052,7 @@ MMRESULT waveOutSetVolume(HWAVEOUT w, DWORD vol) {
 /* boot.c print_build_identity: the Windows build names the link time stamp of the exe and of each DLL beside it; an ELF
  * file has none, so the Linux build names each of its own files (the exe's folder) with its modification time, size and
  * GNU build id when the linker wrote one. File names only, as there. */
+#ifndef __APPLE__
 typedef struct { const char *dir; size_t dl; } BuildIdArg;
 static int build_identity_one(struct dl_phdr_info *info, size_t size, void *p) {
     (void)size;
@@ -1647,5 +2087,41 @@ void plat_print_build_identity(const char *exe, size_t dir_len) {
     BuildIdArg a = {dir, strlen(dir)};
     dl_iterate_phdr(build_identity_one, &a);
 }
+#else
+/* macOS: each loaded image of the exe's folder with its modification time, size and the linker's UUID (LC_UUID) */
+void plat_print_build_identity(const char *exe, size_t dir_len) {
+    char dir[PATH_MAX];
+    snprintf(dir, sizeof dir, "%.*s", (int)dir_len, exe);
+    for (char *q = dir; *q; q++) if (*q == '\\') *q = '/';
+    size_t dl = strlen(dir);
+    for (uint32_t i = 0, n = _dyld_image_count(); i < n; i++) {
+        const char *name = _dyld_get_image_name(i);
+        if (!name || strncmp(name, dir, dl)) continue;
+        struct stat st;
+        char when[32] = "?", id[48] = "";
+        memset(&st, 0, sizeof st);
+        if (!stat(name, &st)) { struct tm tm; gmtime_r(&st.st_mtime, &tm); strftime(when, sizeof when, "%Y-%m-%d %H:%M:%S UTC", &tm); }
+        const struct mach_header_64 *h = (const struct mach_header_64 *)_dyld_get_image_header(i);
+        const uint8_t *lc = (const uint8_t *)(h + 1);
+        for (uint32_t k = 0; h && k < h->ncmds; k++) {
+            const struct load_command *c = (const struct load_command *)lc;
+            if (c->cmd == LC_UUID) {
+                const struct uuid_command *u = (const struct uuid_command *)c;
+                for (int j = 0; j < 16; j++) snprintf(id + 2 * j, sizeof id - 2 * j, "%02x", u->uuid[j]);
+                break;
+            }
+            lc += c->cmdsize;
+        }
+        printf("build: %-22s modified %s (%lld bytes%s%s)\n", name + dl, when, (long long)st.st_size, id[0] ? ", uuid " : "", id);
+    }
+}
+#endif
 /* There are no 8.3 names: callers fall back to the long name. */
 DWORD GetShortPathNameW(LPCWSTR path, LPWSTR out, DWORD n) { (void)path; (void)out; (void)n; SetLastError(1 /* ERROR_INVALID_FUNCTION */); return 0; }
+#ifdef __APPLE__
+#undef fread
+size_t plat_fread(void *p, size_t size, size_t n, FILE *f) {
+    plat_prepare_write(p, size * n);                 /* stdio reads large requests straight into p */
+    return fread(p, size, n, f);
+}
+#endif

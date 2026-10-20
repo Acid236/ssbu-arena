@@ -21,8 +21,18 @@ OBJ = os.path.join(HERE, os.environ.get('RECOMP_OBJ', 'obj_eh_o1'))
 CLANG = os.environ.get('RECOMP_CLANG', r'C:\llvm-8.0.0\bin\clang.exe')      # scripts\setup.py sets RECOMP_CLANG (LLVM/clang 9.0.0)
 # RECOMP_TARGET=linux: a native Linux build (ELF objects, the game and the modules as .so files, the exe linked with the
 # system's SDL3 / FreeType / OpenSSL). The Win32 calls of the host sources come from plat/windows.h + plat_posix.c.
+# RECOMP_TARGET=macos: the same on macOS / Apple Silicon (Mach-O, .dylib files; plan/phases/MAC1_port.md). Work in progress:
+# the host runtime compiles and its platform layer passes tests/plat_selftest.c; the game library and the module libraries
+# are made as .dylib (build_nro.py, build_opt.py), not yet built from a dump on a Mac (MAC3).
 TARGET_LINUX = os.environ.get('RECOMP_TARGET') == 'linux'
-PLAT_FLAGS = ['-fPIC', '-fvisibility=hidden', '-include', os.path.join(HERE, 'plat', 'plat_pre.h')] if TARGET_LINUX else []
+TARGET_MACOS = os.environ.get('RECOMP_TARGET') == 'macos'
+TARGET_POSIX = TARGET_LINUX or TARGET_MACOS
+PLAT_FLAGS = ['-fPIC', '-fvisibility=hidden', '-include', os.path.join(HERE, 'plat', 'plat_pre.h')] if TARGET_POSIX else []
+MACOS_MIN = ['-mmacosx-version-min=14.4'] if TARGET_MACOS else []     # os_sync_wait_on_address (plat_posix.c): macOS 14.4+
+PLAT_FLAGS += MACOS_MIN
+# Linux x86-64: 16-byte atomics (the lifted LDXP/STXP, CASP) inline as cmpxchg16b, as clang does by default for Windows x64;
+# without it -O1 code calls __atomic_compare_exchange_16 (libatomic), which the libraries are not linked with
+PLAT_FLAGS += ['-mcx16'] if TARGET_LINUX else []
 CFLAGS = ['-c', '-O1', '-w', '-fno-strict-aliasing', '-I', HERE, '-I', GEN] + PLAT_FLAGS
 HOST_SOURCES = ['hostrt.c', 'boot.c', 'nnsdk.c', 'libcxx.c', 'os_threads.c', 'nvn_stub.c', 'nvn_gl.c', 'nvn_vk.c', 'mx_translate.c', 'tex_decode.c', 'nnfs.c', 'clib.c', 'nntime.c', 'nnhid.c', 'nnpad_sdl.c', 'nnpad_gca.c', 'display.c', 'nnpl.c', 'nnfontll.c', 'nnmovie.c', 'nnmisc.c', 'nnaudio.c', 'nnro.c', 'nnmovie_mf.c', 'nniostream.c', 'nncxxrt.c', 'nncxxlib.c', 'nnlibc2.c',
                 'sdklift_rt.c', 'nnsdk2.c', 'nnmii.c', 'nnapplet.c', 'nnalbum.c', 'nnnet.c', 'nnfsdir.c', 'nnunwind.c', 'nvn_sdk.c', 'nvn_c4.c', 'nvn_c5.c', 'hitch.c', 'gfx_options.c', 'debug_mode.c', 'r1_state.c',
@@ -106,7 +116,7 @@ def cmd_compile(jobs, force):
 
 # The lifted game code lives in ssbu_game.dll, linked only when obj\ changes; the exe holds just the
 # host runtime, so the edit-link-run loop costs a couple of seconds (see game_shim.c, gamedll.c).
-GAME_DLL = os.environ.get('RECOMP_DLL', 'ssbu_game_eh_o1.dll')
+GAME_DLL = os.environ.get('RECOMP_DLL', 'ssbu_game_eh_o1' + ('.dylib' if TARGET_MACOS else '.so' if TARGET_LINUX else '.dll'))
 HOST_FLAGS = ['-O1', '-g', '-w', '-fno-strict-aliasing', '-I', HERE, '-I', GEN, '-Dfn_table=(*game_fn_table_p)', '-Dfn_table_count=(*game_fn_table_count_p)',
               '-Ddyn_syms=(*game_dyn_syms_p)', '-Ddyn_sym_count=(*game_dyn_sym_count_p)',
               '-I', os.path.join(os.environ.get('SDL3_ROOT', os.path.join(HERE, '..', 'reference', 'upstream', 'SDL3-3.4.18-VC', 'SDL3-3.4.18')), 'include'),
@@ -131,10 +141,10 @@ LIBS += ['-ldelayimp', '-Wl,/DELAYLOAD:MFPlat.DLL', '-Wl,/DELAYLOAD:MFReadWrite.
 # default deps\ffmpeg, the package scripts\fetch_media.py downloads; without them the exe simply has no fallback.
 FFMPEG_ROOT = os.environ.get('FFMPEG_ROOT') or os.path.join(HERE, 'deps', 'ffmpeg')
 HAVE_FFMPEG = os.path.isfile(os.path.join(FFMPEG_ROOT, 'include', 'libavcodec', 'avcodec.h'))
-if HAVE_FFMPEG and not TARGET_LINUX:
+if HAVE_FFMPEG and not TARGET_POSIX:
     HOST_SOURCES.append('mf_ffmpeg.c')
     HOST_FLAGS = HOST_FLAGS + ['-I', os.path.join(FFMPEG_ROOT, 'include')]
-if TARGET_LINUX:
+if TARGET_POSIX:
     def pkg(*args):
         return subprocess.run(['pkg-config'] + list(args) + ['sdl3', 'freetype2', 'openssl', 'libavformat', 'libavcodec', 'libswscale', 'libswresample', 'libavutil'], capture_output=True, text=True, check=True).stdout.split()
     _sdl_inc = HOST_FLAGS.index('-I', HOST_FLAGS.index('-Ddyn_sym_count=(*game_dyn_sym_count_p)'))      # the SDL3 VC package: the system's SDL3 instead
@@ -143,6 +153,8 @@ if TARGET_LINUX:
     # (net_relay.c: Winsock extensions, COM UPnP; net_off.c answers "off", as with SSBU_ONLINE unset)
     HOST_SOURCES = [n for n in HOST_SOURCES if n != 'net_relay.c'] + ['plat_posix.c', 'plat_mf.c', 'net_off.c']
     LIBS = pkg('--libs') + ['-lGL', '-lm', '-ldl', '-lpthread']      # libGL: the OpenGL front end is linked (not used)
+    if TARGET_MACOS:                                     # OpenGL is a system framework; dl / pthread are in libSystem
+        LIBS = pkg('--libs') + ['-framework', 'OpenGL', '-lm']
     HAVE_IMGUI, CXX_SOURCES = False, []                  # the settings menu (menu.cpp) is Win32 + D3D: menu_stub.c on Linux for now
 
 
@@ -186,6 +198,8 @@ def link_dll(objs, dll, rsp, implib=True, fltused=False):
         objs = list(objs) + [nocrt_fltused(libdir)]
     with open(rsp, 'w') as f:
         f.write('\n'.join('"%s"' % o.replace('\\', '/') for o in objs))
+    if TARGET_MACOS:          # a .dylib found through the exe's rpath; undefined names resolve at load, as on Linux
+        return subprocess.run([CLANG, '-dynamiclib', '@' + rsp, '-o', dll] + PLAT_FLAGS + ['-lm', '-Wl,-install_name,@rpath/' + os.path.basename(dll), '-Wl,-undefined,dynamic_lookup'], capture_output=True, text=True, errors='replace')
     if TARGET_LINUX:          # a .so: -z now resolves everything at load, as a DLL is
         return subprocess.run([CLANG, '-shared', '@' + rsp, '-o', dll] + PLAT_FLAGS + ['-lm', '-Wl,-soname,' + os.path.basename(dll), '-Wl,-z,now'], capture_output=True, text=True, errors='replace')
     if not NOCRT:
@@ -221,7 +235,7 @@ def compile_game_data(objdir, shim):
 
 def build_game_dll():
     dll = os.path.join(HERE, GAME_DLL)
-    lib = dll if TARGET_LINUX else dll[:-4] + '.lib'          # Linux: the exe links against the .so itself
+    lib = dll if TARGET_POSIX else dll[:-4] + '.lib'          # Linux: the exe links against the .so itself
     shim = os.path.join(HERE, os.environ.get('RECOMP_SHIM', 'game_shim_eh.c'))
     data_dir = OBJ + '_data'                 # beside OBJ, not in it (cmd_compile removes what it does not know there)
     data_objs = compile_game_data(data_dir, shim)
@@ -298,11 +312,15 @@ def cmd_link(host_only=False):
                 print('FAILED %s\n%s' % (os.path.basename(src), err))
     if failed:
         return 1
-    if TARGET_LINUX:
-        r = subprocess.run([CLANG] + objs + ['-L', HERE, '-l:' + GAME_DLL, '-Wl,-rpath,$ORIGIN'] + LIBS + ['-o', out], capture_output=True, text=True, errors='replace')
+    if TARGET_MACOS:          # host alone (build.py host): the game library's names are left to be found at load
+        game = ['-Wl,-undefined,dynamic_lookup'] if host_only else [os.path.join(HERE, GAME_DLL)]
+        r = subprocess.run([CLANG] + MACOS_MIN + objs + game + ['-Wl,-rpath,@executable_path'] + LIBS + ['-o', out], capture_output=True, text=True, errors='replace')
+    elif TARGET_LINUX:
+        game = ['-Wl,--unresolved-symbols=ignore-in-object-files'] if host_only else ['-L', HERE, '-l:' + GAME_DLL]      # host alone: a compile + link check, not runnable
+        r = subprocess.run([CLANG] + objs + game + ['-Wl,-rpath,$ORIGIN'] + LIBS + ['-o', out], capture_output=True, text=True, errors='replace')
     else:
         r = subprocess.run([CLANG] + objs + [game_import_lib(objdir), os.path.join(SDL_DIR, 'SDL3.lib')] + LIBS + debug_link_flags(out) + ['-o', out], capture_output=True, text=True, errors='replace')
-    if r.returncode == 0 and not TARGET_LINUX:
+    if r.returncode == 0 and not TARGET_POSIX:
         import shutil
         try:
             shutil.copy2(os.path.join(SDL_DIR, 'SDL3.dll'), os.path.join(HERE, 'SDL3.dll'))

@@ -336,7 +336,7 @@ static VStage *vstage_get(Prog *p, int s, const uint32_t *key, uint32_t fo) {
 }
 
 /* ---------------------------------------------------------------- pipelines */
-typedef struct { uint32_t vs, fs, chanmask, sample_mask; int32_t cfmt[8], dfmt; uint8_t topo_class, ncolor, samples, poly, a2c, dclamp, logic, sshade, blend_on, pad[3]; uint8_t blend[8][8]; } PKey;
+typedef struct { uint32_t vs, fs, chanmask, sample_mask; int32_t cfmt[8], dfmt; uint8_t topo_class, ncolor, samples, poly, a2c, dclamp, logic, sshade, blend_on, pad[3]; uint8_t blend[8][8]; PKEY_VI } PKey;
 typedef struct Pipe { PKey k; VkPipeline p, p_fast; /* p_fast: the pipeline linked at once, after the optimised one took its place */ VkPipelineLayout layout; VkDescriptorSetLayout dl[2]; int nb[2], push0; VStage *vs, *fs; volatile LONG state; uint8_t recorded, predicted, used, libbed, lib_how; struct Pipe *next; } Pipe;      /* libbed: linked from libraries (layout and set layouts belong to the pair library); lib_how: 0 the pair library was there, 1 compiled by this build, 2 waited for */      /* state: 0 queued for a worker, 1 being made, 2 made */
 static Pipe *g_pipes[1024];
 static void pkey_targets(PKey *k);
@@ -804,7 +804,7 @@ static double pipe_build(Pipe *p) {
     if (k->dfmt && (fmt_aspect((VkFormat)k->dfmt) & VK_IMAGE_ASPECT_STENCIL_BIT)) ri.stencilAttachmentFormat = (VkFormat)k->dfmt;
     VkGraphicsPipelineCreateInfo gi = {VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
     gi.pNext = &ri; gi.stageCount = fs ? 2 : 1; gi.pStages = st; gi.pInputAssemblyState = &ia; gi.pViewportState = &vp; gi.pRasterizationState = &rs; gi.pMultisampleState = &ms;
-    gi.pDepthStencilState = &ds; gi.pColorBlendState = &cb; gi.pDynamicState = &dy; gi.layout = p->layout;
+    gi.pDepthStencilState = &ds; gi.pColorBlendState = &cb; gi.pDynamicState = &dy; gi.layout = p->layout; NVK_VI_PIPE(k, dyn, &gi)
     VkResult r = pw_graphics(g_pcache, &gi, &p->p);
     if (r != VK_SUCCESS) vkd_fail("vkCreateGraphicsPipelines (vertex stage %u, fragment stage %u, %d colour targets, depth format %d): %s", k->vs, k->fs, k->ncolor, k->dfmt, vk_result_name(r));
     InterlockedIncrement64(&R.pipelines);

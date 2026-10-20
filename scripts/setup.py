@@ -4,6 +4,8 @@
     python scripts/setup.py --dump <folder> [--jobs N] [tool locations ...]
     python scripts/setup.py --target linux --dump <folder> [--jobs N]      a native Linux build, in <repo>/build-linux
                                                                             (BUILDING_LINUX.md; scripts/linux/install_deps.sh first)
+    python scripts/setup.py --target macos --dump <folder> [--jobs N]      a native macOS build (Apple Silicon, macOS 14.4+), in
+                                                                            <repo>/build-macos (BUILDING_MAC.md; scripts/macos/install_mac.sh)
 
 <folder> holds what you dumped from YOUR console (see BUILDING.md):
     <folder>/exefs/    the title's ExeFS files: main  sdk  (rtld, subsdk0, main.npdm are not used), update applied
@@ -65,11 +67,16 @@ LINUX_EXE = 'ssbu_native'
 
 
 def exe_name(cx):
-    return LINUX_EXE if cx.linux else EXE
+    return LINUX_EXE if cx.posix else EXE
+
+
+def lib_ext(cx):
+    """the extension of the game and module libraries"""
+    return '.dylib' if cx.mac else '.so' if cx.linux else '.dll'
 
 
 def game_lib(cx):
-    return 'ssbu_game_eh_o1.so' if cx.linux else 'ssbu_game_eh_o1.dll'
+    return 'ssbu_game_eh_o1' + lib_ext(cx)
 
 
 # ---------------------------------------------------------------------------------------------- helpers
@@ -101,6 +108,9 @@ def default_jobs():
     processes killed (seen with 22 jobs on 31 GB). build_opt.py also limits each compiler's memory on Linux."""
     jobs = min(24, os.cpu_count() or 8)
     try:
+        if sys.platform == 'darwin':                # macOS: no /proc; hw.memsize is in bytes
+            mem = int(subprocess.run(['sysctl', '-n', 'hw.memsize'], capture_output=True, text=True).stdout.strip())
+            return max(1, min(jobs, mem // (4 << 30)))
         with open('/proc/meminfo') as f:
             kb = next(int(l.split()[1]) for l in f if l.startswith('MemTotal:'))
         jobs = max(1, min(jobs, kb // (4 << 20)))
@@ -113,9 +123,12 @@ class Ctx:
     def __init__(self, a):
         self.a = a
         self.linux = getattr(a, 'target', 'windows') == 'linux'
+        self.mac = getattr(a, 'target', 'windows') == 'macos'
+        self.posix = self.linux or self.mac          # "not Windows": a POSIX host build with clang and pkg-config
         # --build, else the install location chosen in the installer window (build_location.txt), else <repo>/build;
-        # --target linux: <repo>/build-linux
-        self.build = os.path.abspath(a.build or (os.path.join(REPO, 'build-linux') if self.linux else build_location.get()))
+        # --target linux: <repo>/build-linux; --target macos: <repo>/build-macos
+        self.build = os.path.abspath(a.build or (os.path.join(REPO, 'build-linux') if self.linux else
+                                                 os.path.join(REPO, 'build-macos') if self.mac else build_location.get()))
         self.work = os.path.join(self.build, 'work')
         self.logs = os.path.join(self.build, 'logs')
         self.state_file = os.path.join(self.build, 'state.json')
@@ -155,6 +168,8 @@ class Ctx:
             env['SUYU_ROOT'] = t['suyu']
         if 'imgui' in t:
             env['IMGUI_ROOT'] = t['imgui']
+        if t.get('pkg_config_path'):               # macOS: Homebrew's keg-only openssl@3 (deps_mac)
+            env['PKG_CONFIG_PATH'] = t['pkg_config_path']
         if self.nocrt:
             env['RECOMP_NOCRT'] = '1'
         env.update(extra)
@@ -382,6 +397,8 @@ def step_deps(cx):
     say('  python %s' % sys.version.split()[0])
     if cx.linux:
         return deps_linux(cx)
+    if cx.mac:
+        return deps_mac(cx)
     if a.runtime:
         m = load_runtime(cx, a.runtime)
         say('  runtime package: %s (commit %s, built %s): the exe is not built here' % (cx.runtime_dir, str(m.get('source_commit'))[:10], m.get('built')))
@@ -635,7 +652,142 @@ def deps_linux(cx):
             raise Fail('%s not found (--%s <folder containing %s>)%s' % (sub, {'vulkan': 'vulkan-headers', 'suyu': 'suyu'}[key], probe_rel, LINUX_HINT))
         cx.tools[key] = found
         say('  %-13s %s' % (sub, found))
-    check_dump(cx)
+    if not cx.a.tools_only:
+        check_dump(cx)
+
+
+MAC_MIN = '-mmacosx-version-min=14.4'          # os_sync_wait_on_address (runtime/plat_posix.c): macOS 14.4 and newer
+MAC_HINT = '\n(scripts/macos/install_mac.sh installs everything the macOS build needs; see BUILDING_MAC.md)'
+GLSLANG_LIBS_MAC = (['-lglslang', '-lglslang-default-resource-limits'],                    # Homebrew's shared glslang
+                    ['-lglslang', '-lglslang-default-resource-limits', '-lSPIRV', '-lMachineIndependent', '-lGenericCodeGen',
+                     '-lOSDependent', '-lSPIRV-Tools-opt', '-lSPIRV-Tools', '-lc++'])      # static glslang
+
+
+def mac_shim_argv(clang, prefix, libs):
+    """The glslang shim (runtime/vk_glslang_shim.c -> ssbu_glslang.dylib), as the link step builds it; run in a folder that holds
+    the source. prefix = Homebrew's prefix."""
+    return [clang, '-O2', '-dynamiclib', '-fPIC', MAC_MIN, 'vk_glslang_shim.c', '-o', 'ssbu_glslang.dylib',
+            '-I' + os.path.join(prefix, 'include'), '-L' + os.path.join(prefix, 'lib')] + list(libs)
+
+
+def brew_prefix():
+    """Homebrew's prefix (/opt/homebrew on Apple Silicon), or None."""
+    brew = shutil.which('brew') or next((p for p in ('/opt/homebrew/bin/brew', '/usr/local/bin/brew') if os.path.exists(p)), None)
+    if brew:
+        r = subprocess.run([brew, '--prefix'], capture_output=True, text=True)
+        if r.returncode == 0 and r.stdout.strip():
+            return r.stdout.strip()
+    return next((p for p in ('/opt/homebrew', '/usr/local') if os.path.isdir(p)), None)
+
+
+def deps_mac(cx):
+    """--target macos: Apple's (or Homebrew's) clang and the Homebrew development packages of SDL3, FreeType, OpenSSL, FFmpeg
+    and glslang; the Vulkan loader, MoltenVK and Opus the game loads at run time. scripts/macos/install_mac.sh installs them."""
+    a = cx.a
+    missing = []
+    for mod, pkg in (('numpy', 'numpy'), ('lz4.block', 'lz4'), ('zstandard', 'zstandard'), ('PIL', 'Pillow'), ('unicorn', 'unicorn')):
+        try:
+            __import__(mod)
+        except ImportError:
+            missing.append(pkg)
+    if missing:
+        raise Fail('missing Python packages: %s (run setup.py with deps/venv/bin/python)%s' % (', '.join(missing), MAC_HINT))
+    say('  python packages: numpy lz4 zstandard Pillow unicorn: ok')
+    if sys.platform == 'darwin' and subprocess.run(['uname', '-m'], capture_output=True, text=True).stdout.strip() != 'arm64':
+        say('  WARNING: this Mac is not an Apple Silicon Mac (arm64): only Apple Silicon is supported')
+    prefix = brew_prefix()
+    if not prefix:
+        raise Fail('Homebrew not found (https://brew.sh)' + MAC_HINT)
+    cx.tools['brew_prefix'] = prefix
+    clang = os.path.join(a.llvm, 'bin', 'clang') if a.llvm else None
+    if not clang:          # /usr/bin/clang: Apple's wrapper, which finds the macOS SDK (the toolchain's own clang does not)
+        clang = '/usr/bin/clang' if os.path.exists('/usr/bin/clang') else shutil.which('clang')
+    if not clang or not os.path.exists(clang):
+        raise Fail('clang not found (install the Xcode Command Line Tools: xcode-select --install; or --llvm <folder with bin/clang>)' + MAC_HINT)
+    ver = subprocess.run([clang, '--version'], capture_output=True, text=True).stdout.splitlines()[0]
+    say('  clang: %s   [%s]' % (ver, clang))
+    try:
+        major = int(ver.split('version ')[1].split('.')[0])
+    except (IndexError, ValueError):
+        major = 0
+    if major and major < 15:
+        raise Fail('clang %d is too old: Apple clang 15 (Xcode 15 / Command Line Tools 15) or newer is needed' % major)
+    cx.tools['clang'] = clang
+    if not shutil.which('pkg-config'):
+        raise Fail('pkg-config not found (brew install pkgconf)' + MAC_HINT)
+
+    def pc_env(path):
+        e = dict(os.environ)
+        if path:
+            e['PKG_CONFIG_PATH'] = path
+        return e
+    # openssl@3 is keg-only: pkg-config does not see it unless its folder is on PKG_CONFIG_PATH (the children get it too)
+    path = None
+    if any(subprocess.run(['pkg-config', '--exists', pc], capture_output=True).returncode for pc, _ in LINUX_PKGS):
+        extra = [os.path.join(prefix, 'opt', 'openssl@3', 'lib', 'pkgconfig'), os.path.join(prefix, 'lib', 'pkgconfig'),
+                 os.path.join(prefix, 'share', 'pkgconfig')]
+        path = os.pathsep.join([p for p in extra if os.path.isdir(p)] + ([os.environ['PKG_CONFIG_PATH']] if os.environ.get('PKG_CONFIG_PATH') else []))
+        cx.tools['pkg_config_path'] = path
+        say('  PKG_CONFIG_PATH for the build: %s' % path)
+    for pc, name in LINUX_PKGS:
+        r = subprocess.run(['pkg-config', '--modversion', pc], capture_output=True, text=True, env=pc_env(path))
+        if r.returncode:
+            raise Fail('development files of %s (%s) not found by pkg-config%s' % (name, pc, MAC_HINT))
+        say('  %-13s %s' % (pc, r.stdout.strip()))
+    gl_h = os.path.join(prefix, 'include', 'glslang', 'Include', 'glslang_c_interface.h')
+    if not os.path.exists(gl_h):
+        raise Fail('glslang headers not found (%s; brew install glslang)%s' % (gl_h, MAC_HINT))
+    # one program linked against every library of the build, and run: a missing library shows here, not after an hour
+    probe = os.path.join(cx.build, 'probe')
+    os.makedirs(probe, exist_ok=True)
+    with open(os.path.join(probe, 'p.c'), 'w') as f:
+        f.write('#include <stdio.h>\n#include <SDL3/SDL.h>\n#include <ft2build.h>\n#include FT_FREETYPE_H\n#include <openssl/evp.h>\n'
+                '#include <libavcodec/avcodec.h>\n#include <glslang/Include/glslang_c_interface.h>\n'
+                'int main(void) {\n    FT_Library ft;\n    if (FT_Init_FreeType(&ft)) return 1;\n'
+                '    printf("%d %p %p\\n", SDL_GetVersion(), (void *)EVP_sha256, (void *)glslang_initialize_process);\n'
+                '    if (!avcodec_find_decoder(AV_CODEC_ID_VP9)) { puts("noVP9"); return 0; }\n'
+                '    if (!avcodec_find_decoder(AV_CODEC_ID_VORBIS)) { puts("noVorbis"); return 0; }\n'
+                '    puts("ok");\n    return 0;\n}\n')
+    flags = subprocess.run(['pkg-config', '--cflags', '--libs'] + [p for p, _ in LINUX_PKGS], capture_output=True, text=True, env=pc_env(path)).stdout.split()
+    err = ''
+    for libs in GLSLANG_LIBS_MAC:
+        r = subprocess.run([clang, MAC_MIN, os.path.join(probe, 'p.c'), '-o', os.path.join(probe, 'p'), '-I' + os.path.join(prefix, 'include'),
+                            '-L' + os.path.join(prefix, 'lib')] + flags + libs + ['-framework', 'OpenGL', '-lm'], capture_output=True, text=True)
+        if not r.returncode:
+            cx.tools['glslang_libs'] = libs
+            break
+        err = r.stderr
+    else:
+        raise Fail('a test program using SDL3, FreeType, OpenSSL, FFmpeg, glslang and OpenGL does not build:\n%s%s' % (err[-1200:], MAC_HINT))
+    out = subprocess.run([os.path.join(probe, 'p')], capture_output=True, text=True).stdout.strip().splitlines()
+    if out and out[-1].startswith('no'):
+        raise Fail('this FFmpeg has no %s decoder: the game\'s movies are VP9 video with Vorbis audio (brew reinstall ffmpeg)' % out[-1][2:])
+    if not out or out[-1] != 'ok':
+        raise Fail('the test program built against the libraries does not run (output %r)' % out)
+    say('  test program with SDL3, FreeType, OpenSSL, FFmpeg (VP9 + Vorbis), glslang, OpenGL: builds and runs')
+    # what the game loads at run time (plat_posix.c looks in Homebrew's lib folder, as dyld does not)
+    libdir = os.path.join(prefix, 'lib')
+    for names, name in ((('libvulkan.1.dylib',), 'the Vulkan loader (libvulkan.1.dylib; brew install vulkan-loader)'),
+                        (('libopus.0.dylib', 'libopus.dylib'), 'the Opus library (libopus.0.dylib; brew install opus)')):
+        if not any(os.path.exists(os.path.join(libdir, n)) for n in names):
+            raise Fail('%s not found in %s: the game loads it at run time%s' % (name, libdir, MAC_HINT))
+    icd = next((p for p in (os.path.join(prefix, 'etc', 'vulkan', 'icd.d', 'MoltenVK_icd.json'),
+                            os.path.join(prefix, 'share', 'vulkan', 'icd.d', 'MoltenVK_icd.json')) if os.path.exists(p)), None)
+    if not icd:
+        raise Fail('the MoltenVK driver file (MoltenVK_icd.json) was not found under %s (brew install molten-vk)%s' % (prefix, MAC_HINT))
+    cx.tools['moltenvk_icd'] = icd
+    say('  run-time libraries: libvulkan, libopus, MoltenVK (%s): ok' % icd)
+    deps = os.path.join(REPO, 'deps')
+    for key, opt, envv, sub, probe_rel in (
+            ('vulkan', a.vulkan_headers, 'VULKAN_HEADERS', 'Vulkan-Headers', os.path.join('include', 'vulkan', 'vulkan.h')),
+            ('suyu', a.suyu, 'SUYU_ROOT', 'suyu', os.path.join('src', 'core', 'hle', 'service', 'mii', 'types', 'raw_data.cpp'))):
+        found = find_first([opt, os.environ.get(envv), os.path.join(deps, sub), prefix if key == 'vulkan' else None], lambda d, p=probe_rel: os.path.exists(os.path.join(d, p)))
+        if not found:
+            raise Fail('%s not found (--%s <folder containing %s>)%s' % (sub, {'vulkan': 'vulkan-headers', 'suyu': 'suyu'}[key], probe_rel, MAC_HINT))
+        cx.tools[key] = found
+        say('  %-13s %s' % (sub, found))
+    if not cx.a.tools_only:
+        check_dump(cx)
 
 
 def check_dump(cx):
@@ -823,6 +975,8 @@ def step_sdk(cx):
 def build_env(cx):
     if cx.linux:
         return cx.env(RECOMP_GEN='gen_eh_o2', RECOMP_OBJ='obj_eh_o1', RECOMP_DLL=game_lib(cx), RECOMP_NRO_SUFFIX='_eh_o2', RECOMP_TARGET='linux')
+    if cx.mac:
+        return cx.env(RECOMP_GEN='gen_eh_o2', RECOMP_OBJ='obj_eh_o1', RECOMP_DLL=game_lib(cx), RECOMP_NRO_SUFFIX='_eh_o2', RECOMP_TARGET='macos')
     # FFMPEG_ROOT: build.py compiles the movie fallback (mf_ffmpeg.c) with the headers install.py put in deps\ffmpeg
     return cx.env(RECOMP_GEN='gen_eh_o2', RECOMP_OBJ='obj_eh_o1', RECOMP_DLL='ssbu_game_eh_o1.dll', RECOMP_NRO_SUFFIX='_eh_o2',
                   FFMPEG_ROOT=os.environ.get('FFMPEG_ROOT') or os.path.join(REPO, 'deps', 'ffmpeg'))
@@ -859,12 +1013,14 @@ def step_nro(cx):
     argv = [sys.executable, 'build_opt.py', 'nro', str(cx.jobs)] + ([] if mods == ['all'] else mods)
     cx.run('nro', argv, env=build_env(cx))
     d = os.path.join(cx.work, 'nro_bin_eh_o2')
-    say('  %d module libraries in nro_bin_eh_o2 (%.0f MB)' % (len([f for f in os.listdir(d) if f.endswith('.so' if cx.linux else '.dll')]), disk_mb(d)))
+    say('  %d module libraries in nro_bin_eh_o2 (%.0f MB)' % (len([f for f in os.listdir(d) if f.endswith(lib_ext(cx))]), disk_mb(d)))
 
 
 def step_link(cx):
     if cx.linux:
         return link_linux(cx)
+    if cx.mac:
+        return link_mac(cx)
     if cx.runtime_dir:                        # the prebuilt runtime: copied and checked; only the game DLL is linked here
         cx.run('link', [sys.executable, 'build.py', 'gamedll'], env=cx.env(**{k: v for k, v in build_env(cx).items() if k != 'RECOMP_NRO_SUFFIX'}))
         with open(os.path.join(cx.runtime_dir, 'manifest.json')) as f:
@@ -914,6 +1070,23 @@ def link_linux(cx):
     say('  %s %.1f MB, ssbu_glslang.so, %s beside it' % (LINUX_EXE, os.path.getsize(os.path.join(cx.work, LINUX_EXE)) / 1048576.0, game_lib(cx)))
 
 
+def link_mac(cx):
+    prefix = cx.tools['brew_prefix']
+    libs_list = [cx.tools['glslang_libs']] if cx.tools.get('glslang_libs') else list(GLSLANG_LIBS_MAC)
+    for i, libs in enumerate(libs_list):                 # (the deps step already found the working list)
+        try:
+            cx.run('link', mac_shim_argv(cx.tools['clang'], prefix, libs))
+            break
+        except Fail:
+            if i == len(libs_list) - 1:
+                raise
+    cx.run('link', [sys.executable, 'build.py', 'link'], env=cx.env(**{k: v for k, v in build_env(cx).items() if k != 'RECOMP_NRO_SUFFIX'}, RECOMP_EXE=LINUX_EXE))
+    for f in (LINUX_EXE, 'ssbu_glslang.dylib', game_lib(cx)):
+        if not os.path.exists(os.path.join(cx.work, f)):
+            raise Fail('%s was not produced' % f)
+    say('  %s %.1f MB, ssbu_glslang.dylib, %s beside it' % (LINUX_EXE, os.path.getsize(os.path.join(cx.work, LINUX_EXE)) / 1048576.0, game_lib(cx)))
+
+
 def game_env(cx, **extra):
     d = cx.state['dump']
     e = cx.env(SSBU_ROMFS=d['romfs'], SSBU_ONLINE='off', **extra)      # self-tests offline: online play is on by default
@@ -935,12 +1108,12 @@ def step_check(cx):
     out = cx.run('check', [exe, main_elf, '60'], env=game_env(cx, SSBU_SDK_SELFTEST='1', SSBU_USERDATA=scratch), log='check_sdk', ok=tuple(range(256)))
     line = next((l for l in reversed(out.splitlines()) if l.startswith('SDK self-test:')), '')
     failed = [l.strip() for l in out.splitlines() if l.rstrip().endswith('FAILED')]
-    known = [l for l in failed if cx.linux and l.startswith('album:')]     # recording movies to the album: not on Linux yet
+    known = [l for l in failed if cx.posix and l.startswith('album:')]     # recording movies to the album: not on Linux / macOS yet
     if '0 failure(s)' not in line and not (failed and len(known) == len(failed) and ('%d failure(s)' % len(failed)) in line):
         raise Fail('SSBU_SDK_SELFTEST: ' + (line or 'no result line'))
     say('  SSBU_SDK_SELFTEST: ' + line.strip())
     if known:
-        say('  (the %d failures are all album movie recording, which the Linux build does not have yet: accepted)' % len(known))
+        say('  (the %d failures are all album movie recording, which the %s build does not have yet: accepted)' % (len(known), 'Linux' if cx.linux else 'macOS'))
     out = cx.run('check', [exe, main_elf, '5'], env=game_env(cx, SSBU_PAD_SELFTEST='1', SSBU_USERDATA=scratch), log='check_pad')
     line = next((l for l in reversed(out.splitlines()) if 'pad' in l.lower() and '/' in l), out.strip().splitlines()[-1] if out.strip() else '')
     say('  SSBU_PAD_SELFTEST: ' + line.strip())
@@ -960,8 +1133,8 @@ def step_check(cx):
         return
     cx.run('check', [py, 'difftest.py', 'sample'], log='check_difftest')
     cx.run('check', [py, 'difftest.py', 'gen'], log='check_difftest')
-    dt = 'difftest' if cx.linux else 'difftest.exe'
-    cx.run('check', [cx.tools['clang'], '-O0', '-w', '-fno-strict-aliasing', '-I', '.', 'difftest_gen.c', 'difftest_host.c', '-o', dt] + (['-lm'] if cx.linux else []), log='check_difftest')
+    dt = 'difftest' if cx.posix else 'difftest.exe'
+    cx.run('check', [cx.tools['clang'], '-O0', '-w', '-fno-strict-aliasing', '-I', '.', 'difftest_gen.c', 'difftest_host.c', '-o', dt] + (['-lm'] if cx.posix else []), log='check_difftest')
     out = cx.run('check', [py, 'difftest.py', 'check'], env=cx.env(DIFFTEST_EXE=os.path.join(w, dt)), log='check_difftest')
     line = next((l for l in out.splitlines() if l.startswith('tests:')), '')
     if not line:
@@ -986,6 +1159,13 @@ def how_to_run(cx):
         say('or by hand:   cd %s   and run   ./%s ../binaries/%s/main.elf 0' % (cx.work, LINUX_EXE, cx.state.get('game_version', '13.0.4')))
         say('with the environment variables SSBU_ROMFS=%s  SSBU_USERDATA=<saves>' % d.get('romfs', '<romfs>'))
         return
+    if cx.mac:
+        say('  ./play_mac.sh                                       (saves in ~/Library/Application Support/ssbu-recomp/userdata;')
+        say('                                                       the game log goes to build-macos/logs)')
+        say('or:   deps/venv/bin/python scripts/run.py --mac --play')
+        say('or by hand:   cd %s   and run   ./%s ../binaries/%s/main.elf 0' % (cx.work, LINUX_EXE, cx.state.get('game_version', '13.0.4')))
+        say('with the environment variables SSBU_ROMFS=%s  SSBU_USERDATA=<saves>' % d.get('romfs', '<romfs>'))
+        return
     say('  python scripts/run.py --userdata <a folder for your saves> [--seconds 0]')
     say('or by hand:   cd build\\work   and run   %s ..\\binaries\\%s\\main.elf 0' % (EXE, cx.state.get('game_version', '13.0.4')))
     say('with the environment variables SSBU_ROMFS=%s  SSBU_USERDATA=<saves>  (options: BUILDING.md)' % d.get('romfs', '<romfs>'))
@@ -995,8 +1175,9 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--dump', help='folder with exefs\\ and romfs\\ (and optionally sysdata\\) dumped from your console')
     ap.add_argument('--exefs'), ap.add_argument('--romfs'), ap.add_argument('--sysdata')
-    ap.add_argument('--target', choices=('windows', 'linux'), default='windows', help='windows (default: the Windows exe) or linux (a native Linux build: BUILDING_LINUX.md)')
-    ap.add_argument('--build', help='build folder (default: the install location of build_location.txt, else <repo>/build; <repo>/build-linux for --target linux)')
+    ap.add_argument('--target', choices=('windows', 'linux', 'macos'), default='windows', help='windows (default: the Windows exe), linux (a native Linux build: BUILDING_LINUX.md) or macos (Apple Silicon: BUILDING_MAC.md)')
+    ap.add_argument('--tools-only', action='store_true', help='only check the tools (step deps, no dump needed; --target linux / macos)')
+    ap.add_argument('--build', help='build folder (default: the install location of build_location.txt, else <repo>/build; <repo>/build-linux for --target linux, <repo>/build-macos for --target macos)')
     ap.add_argument('--jobs', type=int, help='parallel compiler jobs (default min(24, cpus); off Windows also at most one per 4 GB of RAM)')
     ap.add_argument('--llvm', help='LLVM 9.0.0 folder (bin\\clang.exe)')
     ap.add_argument('--sdl3', help='SDL3 development package (VC) folder: include\\, lib\\x64\\')
@@ -1048,10 +1229,13 @@ def main():
     if a.only:
         todo = sorted({'deps', 'stage', a.only}, key=STEPS.index)
         force.add(a.only)
+    if a.tools_only:
+        todo = ['deps']
     # a finished build whose game files have gone since (an antivirus quarantines the 500 MB unsigned game DLL, or a
     # copy was interrupted): compile (the objects are kept, so only the DLL is linked again) and link run again
     if 'link' in done and not a.dry_run:
-        gone = [f for f in (EXE, 'ssbu_game_eh_o1.dll', 'SDL3.dll') if not os.path.exists(os.path.join(cx.work, f))]
+        gone = [f for f in ((EXE, 'ssbu_game_eh_o1.dll', 'SDL3.dll') if not cx.posix else (LINUX_EXE, game_lib(cx), 'ssbu_glslang' + lib_ext(cx)))
+                if not os.path.exists(os.path.join(cx.work, f))]
         if gone:
             say('%s missing from %s although the build was finished (an antivirus may have removed it: Windows Security > '
                 'Protection history): it is made again' % (', '.join(gone), cx.work))

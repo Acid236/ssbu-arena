@@ -1,0 +1,73 @@
+# Linux build (BUILDING_LINUX.md): compile and link the host runtime alone and run the platform self-test. Only the runtime's
+# own sources: no dump, no game files, nothing derived from the game (none is ever on a runner).
+name: Linux runtime
+
+on:
+  push:
+    paths: ['runtime/**', 'fighter_sdk/**', 'tests/plat_selftest.c', 'tools/lifter/build.py', 'tools/lifter/build_nro.py', 'scripts/macos/**', 'tools/lifter/**', 'scripts/setup.py', 'scripts/linux/**', 'BUILDING_LINUX.md', '.github/workflows/linux-runtime.yml']
+  pull_request:
+    paths: ['runtime/**', 'fighter_sdk/**', 'tests/plat_selftest.c', 'tools/lifter/build.py', 'tools/lifter/build_nro.py', 'scripts/macos/**', 'tools/lifter/**', 'scripts/setup.py', 'scripts/linux/**', 'BUILDING_LINUX.md', '.github/workflows/linux-runtime.yml']
+  workflow_dispatch:
+
+jobs:
+  host:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # clang 19+ (C23 typeof_unqual in plat/windows.h); SDL3 is not packaged for Ubuntu 24.04: built from its release tag
+      - name: Dependencies (apt, SDL3 from source, Khronos headers, Mii reference sources)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang-19 lld-19 cmake ninja-build pkg-config libfreetype-dev libssl-dev libavformat-dev libavcodec-dev \
+            libswscale-dev libswresample-dev libavutil-dev glslang-dev libvulkan-dev libgl-dev libopus0 \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev libwayland-dev libxkbcommon-dev libpulse-dev libasound2-dev libdrm-dev libgbm-dev
+          git -c advice.detachedHead=false clone --quiet --depth 1 --branch release-3.4.14 https://github.com/libsdl-org/SDL.git deps/SDL
+          cmake -S deps/SDL -B deps/SDL/build -G Ninja -DCMAKE_BUILD_TYPE=Release -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF -DSDL_X11_XTEST=OFF -DSDL_UNIX_CONSOLE_BUILD=ON > /dev/null
+          cmake --build deps/SDL/build > /dev/null
+          sudo cmake --install deps/SDL/build > /dev/null
+          sudo ldconfig
+          python -m pip install --quiet Pillow capstone unicorn numpy lz4 zstandard
+          git -c advice.detachedHead=false clone --quiet --depth 1 --branch v1.4.351 https://github.com/KhronosGroup/Vulkan-Headers.git deps/Vulkan-Headers
+          git clone --quiet --depth 1 --filter=blob:none --sparse https://git.eden-emu.dev/eden-emu/eden.git deps/suyu
+          git -C deps/suyu sparse-checkout set src/core/hle/service/mii
+          clang-19 --version
+          pkg-config --modversion sdl3
+
+      - name: Compile the host runtime (and a stand-in module .so)
+        run: python scripts/macos/host_check.py --target linux --clang clang-19 --vulkan-headers deps/Vulkan-Headers --suyu deps/suyu
+
+      - name: Differential test of the lifted code on this host (no game data; -O0 and -O1)
+        run: |
+          python scripts/macos/difftest_synthetic.py --work build-linux/work --clang clang-19 --opt=-O0
+          python scripts/macos/difftest_synthetic.py --work build-linux/work --clang clang-19 --opt=-O1 --cflags=-mcx16
+
+      - name: Build and run the platform self-test
+        working-directory: runtime
+        run: |
+          clang-19 -O1 -w -include plat/plat_pre.h -I plat $(pkg-config --cflags sdl3 openssl) ../tests/plat_selftest.c plat_posix.c \
+            -o plat_selftest $(pkg-config --libs sdl3 openssl) -lpthread -ldl -lm
+          ./plat_selftest
+
+      - name: setup.py --target linux --tools-only (the deps step without a dump)
+        run: |
+          bash -n scripts/linux/install_deps.sh scripts/linux/collect_logs_linux.sh
+          python scripts/setup.py --target linux --tools-only --llvm /usr/lib/llvm-19 --vulkan-headers deps/Vulkan-Headers --suyu deps/suyu
+
+      - name: collect_logs_linux.sh makes a report without game files
+        run: |
+          mkdir -p build-linux/logs build-linux/binaries/13.0.4 build-linux/work
+          echo "stand-in" > build-linux/binaries/13.0.4/main.elf     # must NOT end up in the report
+          echo "stand-in" > build-linux/work/secret.c
+          echo "a game log" > build-linux/logs/game_20260101_000000.log
+          echo "a build log" > build-linux/logs/compile.log
+          bash scripts/linux/collect_logs_linux.sh
+          f=$(ls ~/ssbu_linux_report_*.zip ~/ssbu_linux_report_*.tar.gz 2>/dev/null | head -1)
+          if [[ "$f" == *.zip ]]; then unzip -l "$f" | tee list.txt; else tar -tzf "$f" | tee list.txt; fi
+          ! grep -E "main\.elf|secret\.c|binaries|/work/" list.txt
+

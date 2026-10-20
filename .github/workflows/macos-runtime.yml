@@ -1,0 +1,147 @@
+# macOS port (plan/phases/MAC1_port.md): compile the host runtime for macOS on Apple Silicon and report what does not build.
+# Only the runtime's own sources: no dump, no game files, nothing derived from the game (none is ever on a runner).
+name: macOS runtime
+
+on:
+  push:
+    paths: ['runtime/**', 'fighter_sdk/**', 'tests/plat_selftest.c', 'tools/lifter/**', 'scripts/macos/**', 'scripts/setup.py', 'scripts/run.py', 'BUILDING_MAC.md', 'play_mac.sh', '.github/workflows/macos-runtime.yml']
+  pull_request:
+    paths: ['runtime/**', 'fighter_sdk/**', 'tests/plat_selftest.c', 'tools/lifter/**', 'scripts/macos/**', 'scripts/setup.py', 'scripts/run.py', 'BUILDING_MAC.md', 'play_mac.sh', '.github/workflows/macos-runtime.yml']
+  workflow_dispatch:
+
+jobs:
+  # What a tester's install does, as far as it can be proven without game files: the scripts parse, install_mac.sh (no
+  # --dump) installs the tools, setup.py --target macos --tools-only checks every library with a test program, the glslang
+  # shim is built as the link step builds it, and collect_logs_mac.sh makes a report that holds no game files.
+  setup-macos:
+    runs-on: macos-14
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Shell scripts parse
+        run: bash -n scripts/macos/install_mac.sh && bash -n scripts/macos/collect_logs_mac.sh && bash -n play_mac.sh
+
+      - name: install_mac.sh (Homebrew packages, venv, Khronos headers, Mii sources; no dump, no build)
+        run: bash scripts/macos/install_mac.sh
+
+      - name: setup.py --target macos --tools-only (the deps step without a dump)
+        run: |
+          deps/venv/bin/python scripts/setup.py --target macos --tools-only
+          # a fake dump must make the full run stop at the dump check, not at the tools
+          mkdir -p fake_dump/exefs fake_dump/romfs
+          if deps/venv/bin/python scripts/setup.py --target macos --only deps --dump fake_dump > fake.txt 2>&1; then
+            echo "the fake dump was accepted"; cat fake.txt; exit 1
+          fi
+          cat fake.txt
+          grep -q "not found: the ExeFS folder needs the files main and sdk" fake.txt
+
+      - name: The glslang shim, built as the link step builds it
+        run: |
+          cd runtime
+          ../deps/venv/bin/python - <<'EOF'
+          import json, subprocess, sys
+          sys.path.insert(0, '../scripts')
+          import setup
+          prefix = setup.brew_prefix()
+          for libs in setup.GLSLANG_LIBS_MAC:                  # as the deps step chooses: the first list that links
+              argv = setup.mac_shim_argv('/usr/bin/clang', prefix, libs)
+              print(' '.join(argv), flush=True)
+              if subprocess.call(argv) == 0:
+                  sys.exit(0)
+          sys.exit(1)
+          EOF
+          otool -L ssbu_glslang.dylib
+          file ssbu_glslang.dylib
+          rm -f ssbu_glslang.dylib
+
+      - name: collect_logs_mac.sh makes a report without game files
+        run: |
+          mkdir -p build-macos/logs build-macos/binaries/13.0.4 build-macos/work
+          echo "stand-in" > build-macos/binaries/13.0.4/main.elf     # must NOT end up in the report
+          echo "stand-in" > build-macos/work/secret.c
+          echo "a game log" > build-macos/logs/game_20260101_000000.log
+          bash scripts/macos/collect_logs_mac.sh
+          zip="$(ls ~/Desktop/ssbu_mac_report_*.zip)"
+          unzip -l "$zip" | tee list.txt
+          grep -q "state.json" list.txt
+          grep -q "game_20260101_000000.log" list.txt
+          if grep -Eq "main\.elf|secret\.c|romfs|exefs|binaries|work/|\.keys|data\.arc" list.txt; then echo "the report holds files it must not"; exit 1; fi
+
+  host:
+    runs-on: macos-14            # Apple Silicon (arm64)
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Dependencies (Homebrew, Python, Khronos headers, Mii reference sources)
+        run: |
+          brew install --quiet pkgconf sdl3 freetype openssl@3 ffmpeg
+          python -m pip install --quiet Pillow capstone unicorn
+          git -c advice.detachedHead=false clone --quiet --depth 1 --branch v1.4.351 https://github.com/KhronosGroup/Vulkan-Headers.git deps/Vulkan-Headers
+          git clone --quiet --depth 1 --filter=blob:none --sparse https://git.eden-emu.dev/eden-emu/eden.git deps/suyu
+          git -C deps/suyu sparse-checkout set src/core/hle/service/mii
+          clang --version
+
+      - name: Compile the host runtime
+        run: |
+          export PKG_CONFIG_PATH="$(brew --prefix openssl@3)/lib/pkgconfig:${PKG_CONFIG_PATH}"
+          python scripts/macos/host_check.py --vulkan-headers deps/Vulkan-Headers --suyu deps/suyu
+
+      - name: Differential test of the lifted code on this host (no game data; -O0 and -O1)
+        run: |
+          python scripts/macos/difftest_synthetic.py --work build-macos/work --clang clang --opt=-O0
+          python scripts/macos/difftest_synthetic.py --work build-macos/work --clang clang --opt=-O1
+
+  # tests/plat_selftest.c: the Win32 subset of plat_posix.c by itself (threads, events, condition variables, fibers,
+  # virtual memory, files, libraries). Runs on the runner: no window, no game.
+  plat-selftest:
+    runs-on: macos-14
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Dependencies (Homebrew)
+        run: brew install --quiet pkgconf sdl3 openssl@3 vulkan-loader molten-vk
+      - name: Build and run the platform self-test
+        working-directory: runtime
+        run: |
+          export PKG_CONFIG_PATH="$(brew --prefix openssl@3)/lib/pkgconfig:${PKG_CONFIG_PATH}"
+          clang -O1 -w -mmacosx-version-min=14.4 -include plat/plat_pre.h -I plat $(pkg-config --cflags sdl3 openssl) \
+            ../tests/plat_selftest.c plat_posix.c -o plat_selftest $(pkg-config --libs sdl3 openssl)
+          ./plat_selftest
+
+  # What MoltenVK (Homebrew) offers on the runner's GPU: API version, portability subset, the extensions nvn_vk.c asks for.
+  vulkan-info:
+    runs-on: macos-14
+    timeout-minutes: 15
+    steps:
+      - name: Dependencies (Homebrew)
+        run: brew install --quiet vulkan-loader molten-vk vulkan-tools
+      - name: vulkaninfo
+        run: |
+          # The runner's GPU is Apple's paravirtual device: MoltenVK's feature probe of Metal argument encoders aborts on it
+          # (seen in run 39426136241). Try the default first, then without argument buffers.
+          brew info --quiet molten-vk | head -1 | tee -a "$GITHUB_STEP_SUMMARY"
+          vulkaninfo --summary > summary.txt 2>&1 || MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=0 vulkaninfo --summary > summary.txt 2>&1 || true
+          cat summary.txt
+          vulkaninfo > full.txt 2>/dev/null || MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=0 vulkaninfo > full.txt 2>/dev/null || true
+          echo "### Vulkan on macos-14 (MoltenVK)" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          grep -E "apiVersion|driverName|driverInfo|deviceName|conformanceVersion" summary.txt | sort -u >> "$GITHUB_STEP_SUMMARY" || true
+          for e in VK_KHR_portability_subset VK_KHR_portability_enumeration VK_EXT_graphics_pipeline_library VK_EXT_extended_dynamic_state3 \
+                   VK_EXT_vertex_input_dynamic_state VK_KHR_push_descriptor VK_EXT_custom_border_color VK_EXT_index_type_uint8 \
+                   VK_KHR_index_type_uint8 VK_EXT_provoking_vertex VK_EXT_shader_object VK_KHR_dynamic_rendering VK_KHR_synchronization2 \
+                   VK_EXT_extended_dynamic_state VK_EXT_extended_dynamic_state2 VK_KHR_maintenance4 VK_EXT_transform_feedback \
+                   VK_KHR_pipeline_library VK_EXT_robustness2 VK_EXT_depth_clip_enable; do
+            if grep -q "$e" full.txt; then echo "has     $e"; else echo "MISSING $e"; fi
+          done | tee -a "$GITHUB_STEP_SUMMARY"
+          grep -E "^\s*(textureCompressionBC|geometryShader|logicOp|wideLines|depthClamp|tessellationShader|dualSrcBlend|multiViewport|samplerAnisotropy|shaderFloat64|triangleFans|imageViewFormatSwizzle|pointPolygons|separateStencilMaskRef|events|vertexAttributeAccessBeyondStride|minVertexInputBindingStrideAlignment)\s*=" full.txt | sort -u | tee -a "$GITHUB_STEP_SUMMARY" || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vulkaninfo-macos-14
+          path: '*.txt'

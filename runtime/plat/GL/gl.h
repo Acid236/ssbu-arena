@@ -15,7 +15,270 @@
 #define glCompressedTexImage3D plat_sys_glCompressedTexImage3D
 #define glSampleCoverage plat_sys_glSampleCoverage
 #define GL_GLEXT_LEGACY
+#ifdef __APPLE__                 /* macOS: the OpenGL framework's header (GL 2.1 legacy profile). It declares GL 1.2 - 2.1
+                                    functions that nvn_gl.c loads itself as pointers of the same name: all of nvn_gl.c's
+                                    names are moved out of the way while it is read (list: the GLF / GLO tables there) */
+#define GL_SILENCE_DEPRECATION
+#define glAttachShader plat_sys_glAttachShader
+#define glBeginQuery plat_sys_glBeginQuery
+#define glBindBuffer plat_sys_glBindBuffer
+#define glBindBufferRange plat_sys_glBindBufferRange
+#define glBindFramebuffer plat_sys_glBindFramebuffer
+#define glBindImageTexture plat_sys_glBindImageTexture
+#define glBindProgramARB plat_sys_glBindProgramARB
+#define glBindProgramPipeline plat_sys_glBindProgramPipeline
+#define glBindVertexBuffer plat_sys_glBindVertexBuffer
+#define glBlendColor plat_sys_glBlendColor
+#define glBlendEquationSeparatei plat_sys_glBlendEquationSeparatei
+#define glBlendEquationi plat_sys_glBlendEquationi
+#define glBlendFuncSeparatei plat_sys_glBlendFuncSeparatei
+#define glBlendParameteriNV plat_sys_glBlendParameteriNV
+#define glBlitFramebuffer plat_sys_glBlitFramebuffer
+#define glBufferData plat_sys_glBufferData
+#define glBufferSubData plat_sys_glBufferSubData
+#define glCheckFramebufferStatus plat_sys_glCheckFramebufferStatus
+#define glClearBufferfv plat_sys_glClearBufferfv
+#define glClearBufferiv plat_sys_glClearBufferiv
+#define glClearBufferuiv plat_sys_glClearBufferuiv
+#define glClientWaitSync plat_sys_glClientWaitSync
+#define glClipControl plat_sys_glClipControl
+#define glColorMaski plat_sys_glColorMaski
+#define glCompileShader plat_sys_glCompileShader
+#define glCompressedTexSubImage2D plat_sys_glCompressedTexSubImage2D
+#define glCompressedTexSubImage3D plat_sys_glCompressedTexSubImage3D
+#define glConservativeRasterParameterfNV plat_sys_glConservativeRasterParameterfNV
+#define glCoverageModulationNV plat_sys_glCoverageModulationNV
+#define glCoverageModulationTableNV plat_sys_glCoverageModulationTableNV
+#define glCreateBuffers plat_sys_glCreateBuffers
+#define glCreateProgram plat_sys_glCreateProgram
+#define glCreateShader plat_sys_glCreateShader
+#define glCreateShaderProgramv plat_sys_glCreateShaderProgramv
+#define glDebugMessageCallback plat_sys_glDebugMessageCallback
+#define glDebugMessageControl plat_sys_glDebugMessageControl
+#define glDebugMessageInsert plat_sys_glDebugMessageInsert
+#define glDeleteBuffers plat_sys_glDeleteBuffers
+#define glDeleteFramebuffers plat_sys_glDeleteFramebuffers
+#define glDeleteProgram plat_sys_glDeleteProgram
+#define glDeleteProgramsARB plat_sys_glDeleteProgramsARB
+#define glDeleteShader plat_sys_glDeleteShader
+#define glDeleteSync plat_sys_glDeleteSync
+#define glDepthBoundsEXT plat_sys_glDepthBoundsEXT
+#define glDepthRangeIndexed plat_sys_glDepthRangeIndexed
+#define glDetachShader plat_sys_glDetachShader
+#define glDisableVertexAttribArray plat_sys_glDisableVertexAttribArray
+#define glDisablei plat_sys_glDisablei
+#define glDispatchCompute plat_sys_glDispatchCompute
+#define glDrawArraysInstancedBaseInstance plat_sys_glDrawArraysInstancedBaseInstance
+#define glDrawBuffers plat_sys_glDrawBuffers
+#define glDrawElementsInstancedBaseVertexBaseInstance plat_sys_glDrawElementsInstancedBaseVertexBaseInstance
+#define glEnableVertexAttribArray plat_sys_glEnableVertexAttribArray
+#define glEnablei plat_sys_glEnablei
+#define glEndQuery plat_sys_glEndQuery
+#define glFenceSync plat_sys_glFenceSync
+#define glFragmentCoverageColorNV plat_sys_glFragmentCoverageColorNV
+#define glFramebufferParameteri plat_sys_glFramebufferParameteri
+#define glFramebufferSampleLocationsfvNV plat_sys_glFramebufferSampleLocationsfvNV
+#define glFramebufferTexture plat_sys_glFramebufferTexture
+#define glFramebufferTextureLayer plat_sys_glFramebufferTextureLayer
+#define glGenBuffers plat_sys_glGenBuffers
+#define glGenFramebuffers plat_sys_glGenFramebuffers
+#define glGenProgramPipelines plat_sys_glGenProgramPipelines
+#define glGenProgramsARB plat_sys_glGenProgramsARB
+#define glGenQueries plat_sys_glGenQueries
+#define glGenSamplers plat_sys_glGenSamplers
+#define glGetCompressedTextureSubImage plat_sys_glGetCompressedTextureSubImage
+#define glGetGraphicsResetStatus plat_sys_glGetGraphicsResetStatus
+#define glGetNamedBufferSubData plat_sys_glGetNamedBufferSubData
+#define glGetProgramBinary plat_sys_glGetProgramBinary
+#define glGetProgramInfoLog plat_sys_glGetProgramInfoLog
+#define glGetProgramiv plat_sys_glGetProgramiv
+#define glGetQueryObjectui64v plat_sys_glGetQueryObjectui64v
+#define glGetQueryObjectuiv plat_sys_glGetQueryObjectuiv
+#define glGetShaderiv plat_sys_glGetShaderiv
+#define glGetTextureHandleARB plat_sys_glGetTextureHandleARB
+#define glGetTextureSamplerHandleARB plat_sys_glGetTextureSamplerHandleARB
+#define glGetTextureSubImage plat_sys_glGetTextureSubImage
+#define glInvalidateFramebuffer plat_sys_glInvalidateFramebuffer
+#define glLinkProgram plat_sys_glLinkProgram
+#define glMakeTextureHandleNonResidentARB plat_sys_glMakeTextureHandleNonResidentARB
+#define glMakeTextureHandleResidentARB plat_sys_glMakeTextureHandleResidentARB
+#define glMemoryBarrier plat_sys_glMemoryBarrier
+#define glMinSampleShading plat_sys_glMinSampleShading
+#define glNamedBufferData plat_sys_glNamedBufferData
+#define glNamedBufferSubData plat_sys_glNamedBufferSubData
+#define glObjectLabel plat_sys_glObjectLabel
+#define glPatchParameterfv plat_sys_glPatchParameterfv
+#define glPatchParameteri plat_sys_glPatchParameteri
+#define glPolygonOffsetClamp plat_sys_glPolygonOffsetClamp
+#define glPopDebugGroup plat_sys_glPopDebugGroup
+#define glPrimitiveRestartIndex plat_sys_glPrimitiveRestartIndex
+#define glProgramBinary plat_sys_glProgramBinary
+#define glProgramParameteri plat_sys_glProgramParameteri
+#define glProgramStringARB plat_sys_glProgramStringARB
+#define glProgramUniform2ui plat_sys_glProgramUniform2ui
+#define glPushDebugGroup plat_sys_glPushDebugGroup
+#define glRasterSamplesEXT plat_sys_glRasterSamplesEXT
+#define glSampleMaski plat_sys_glSampleMaski
+#define glSamplerParameterIiv plat_sys_glSamplerParameterIiv
+#define glSamplerParameterIuiv plat_sys_glSamplerParameterIuiv
+#define glSamplerParameterf plat_sys_glSamplerParameterf
+#define glSamplerParameterfv plat_sys_glSamplerParameterfv
+#define glSamplerParameteri plat_sys_glSamplerParameteri
+#define glScissorIndexed plat_sys_glScissorIndexed
+#define glShaderSource plat_sys_glShaderSource
+#define glStencilFuncSeparate plat_sys_glStencilFuncSeparate
+#define glStencilMaskSeparate plat_sys_glStencilMaskSeparate
+#define glStencilOpSeparate plat_sys_glStencilOpSeparate
+#define glSubpixelPrecisionBiasNV plat_sys_glSubpixelPrecisionBiasNV
+#define glTexStorage1D plat_sys_glTexStorage1D
+#define glTexStorage2D plat_sys_glTexStorage2D
+#define glTexStorage2DMultisample plat_sys_glTexStorage2DMultisample
+#define glTexStorage3D plat_sys_glTexStorage3D
+#define glTexStorage3DMultisample plat_sys_glTexStorage3DMultisample
+#define glTexSubImage3D plat_sys_glTexSubImage3D
+#define glTextureBarrier plat_sys_glTextureBarrier
+#define glTextureView plat_sys_glTextureView
+#define glUseProgram plat_sys_glUseProgram
+#define glUseProgramStages plat_sys_glUseProgramStages
+#define glVertexAttribBinding plat_sys_glVertexAttribBinding
+#define glVertexAttribFormat plat_sys_glVertexAttribFormat
+#define glVertexAttribIFormat plat_sys_glVertexAttribIFormat
+#define glVertexBindingDivisor plat_sys_glVertexBindingDivisor
+#define glViewportIndexedf plat_sys_glViewportIndexedf
+#define glViewportSwizzleNV plat_sys_glViewportSwizzleNV
+#define glWaitSync plat_sys_glWaitSync
+#include <OpenGL/gl.h>
+#undef glAttachShader
+#undef glBeginQuery
+#undef glBindBuffer
+#undef glBindBufferRange
+#undef glBindFramebuffer
+#undef glBindImageTexture
+#undef glBindProgramARB
+#undef glBindProgramPipeline
+#undef glBindVertexBuffer
+#undef glBlendColor
+#undef glBlendEquationSeparatei
+#undef glBlendEquationi
+#undef glBlendFuncSeparatei
+#undef glBlendParameteriNV
+#undef glBlitFramebuffer
+#undef glBufferData
+#undef glBufferSubData
+#undef glCheckFramebufferStatus
+#undef glClearBufferfv
+#undef glClearBufferiv
+#undef glClearBufferuiv
+#undef glClientWaitSync
+#undef glClipControl
+#undef glColorMaski
+#undef glCompileShader
+#undef glCompressedTexSubImage2D
+#undef glCompressedTexSubImage3D
+#undef glConservativeRasterParameterfNV
+#undef glCoverageModulationNV
+#undef glCoverageModulationTableNV
+#undef glCreateBuffers
+#undef glCreateProgram
+#undef glCreateShader
+#undef glCreateShaderProgramv
+#undef glDebugMessageCallback
+#undef glDebugMessageControl
+#undef glDebugMessageInsert
+#undef glDeleteBuffers
+#undef glDeleteFramebuffers
+#undef glDeleteProgram
+#undef glDeleteProgramsARB
+#undef glDeleteShader
+#undef glDeleteSync
+#undef glDepthBoundsEXT
+#undef glDepthRangeIndexed
+#undef glDetachShader
+#undef glDisableVertexAttribArray
+#undef glDisablei
+#undef glDispatchCompute
+#undef glDrawArraysInstancedBaseInstance
+#undef glDrawBuffers
+#undef glDrawElementsInstancedBaseVertexBaseInstance
+#undef glEnableVertexAttribArray
+#undef glEnablei
+#undef glEndQuery
+#undef glFenceSync
+#undef glFragmentCoverageColorNV
+#undef glFramebufferParameteri
+#undef glFramebufferSampleLocationsfvNV
+#undef glFramebufferTexture
+#undef glFramebufferTextureLayer
+#undef glGenBuffers
+#undef glGenFramebuffers
+#undef glGenProgramPipelines
+#undef glGenProgramsARB
+#undef glGenQueries
+#undef glGenSamplers
+#undef glGetCompressedTextureSubImage
+#undef glGetGraphicsResetStatus
+#undef glGetNamedBufferSubData
+#undef glGetProgramBinary
+#undef glGetProgramInfoLog
+#undef glGetProgramiv
+#undef glGetQueryObjectui64v
+#undef glGetQueryObjectuiv
+#undef glGetShaderiv
+#undef glGetTextureHandleARB
+#undef glGetTextureSamplerHandleARB
+#undef glGetTextureSubImage
+#undef glInvalidateFramebuffer
+#undef glLinkProgram
+#undef glMakeTextureHandleNonResidentARB
+#undef glMakeTextureHandleResidentARB
+#undef glMemoryBarrier
+#undef glMinSampleShading
+#undef glNamedBufferData
+#undef glNamedBufferSubData
+#undef glObjectLabel
+#undef glPatchParameterfv
+#undef glPatchParameteri
+#undef glPolygonOffsetClamp
+#undef glPopDebugGroup
+#undef glPrimitiveRestartIndex
+#undef glProgramBinary
+#undef glProgramParameteri
+#undef glProgramStringARB
+#undef glProgramUniform2ui
+#undef glPushDebugGroup
+#undef glRasterSamplesEXT
+#undef glSampleMaski
+#undef glSamplerParameterIiv
+#undef glSamplerParameterIuiv
+#undef glSamplerParameterf
+#undef glSamplerParameterfv
+#undef glSamplerParameteri
+#undef glScissorIndexed
+#undef glShaderSource
+#undef glStencilFuncSeparate
+#undef glStencilMaskSeparate
+#undef glStencilOpSeparate
+#undef glSubpixelPrecisionBiasNV
+#undef glTexStorage1D
+#undef glTexStorage2D
+#undef glTexStorage2DMultisample
+#undef glTexStorage3D
+#undef glTexStorage3DMultisample
+#undef glTexSubImage3D
+#undef glTextureBarrier
+#undef glTextureView
+#undef glUseProgram
+#undef glUseProgramStages
+#undef glVertexAttribBinding
+#undef glVertexAttribFormat
+#undef glVertexAttribIFormat
+#undef glVertexBindingDivisor
+#undef glViewportIndexedf
+#undef glViewportSwizzleNV
+#undef glWaitSync
+#else
 #include_next <GL/gl.h>
+#endif
 #undef glBlendColor
 #undef glCompressedTexSubImage2D
 #undef glCompressedTexSubImage3D
