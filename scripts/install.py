@@ -582,8 +582,18 @@ def step_dump(cx):
                    'Check that prod.keys belongs to the same console as the game files, and that base and update are the same game.')
     if os.path.isdir(out) and not dump_ok(out):
         os.replace(out, out + '.old_%d' % int(time.time()))      # an unfinished dump of an older run: kept aside, not deleted
+    rebuilt = False
+    if os.path.isdir(out) and dump_ok(out):
+        # a complete dump made from OTHER game files (the player chose another update, e.g. 13.0.5 -> 13.0.4): the installer
+        # made it, the new one replaces it, and the build is made again from the conversion on (a tester's switch to 13.0.4
+        # kept the 13.0.5 dump and game, 2026-10-20)
+        say('   the game files changed (%s): the old unpacked game is replaced and the game is built again' % os.path.basename(cx.update))
+        shutil.rmtree(out, ignore_errors=True)
+        rebuilt = True
     if not os.path.isdir(out):
         os.replace(part, out)
+    if rebuilt:
+        cx.setup_args += ['--from', 'convert']
     try:                                                         # what this dump was made from (Resume keeps it next time)
         with open(os.path.join(out, 'made_from.json'), 'w', encoding='utf-8') as f:
             json.dump({'key': made_from_key(cx.base, cx.update)}, f)
