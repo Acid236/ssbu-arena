@@ -53,6 +53,7 @@ EXTRA = ['-ffp-contract=off'] + os.environ.get('RECOMP_CFLAGS', '').split()
 # sources, same floating-point flags; a file whose inlined compile fails is compiled again without it (compile_file).
 INLINE_FLAG = '-Dinline=__inline__ __attribute__((always_inline))'
 INLINE = os.environ.get('RECOMP_INLINE', '0') not in ('', '0')      # the game code only (cmd_main); the script modules keep EXTRA
+INLINE_LIMIT = float(os.environ.get('RECOMP_INLINE_LIMIT', '45'))   # seconds an inlined compile may take; longer: the file is compiled without
 OPTNONE_LINES = int(os.environ.get('RECOMP_OPTNONE_LINES', '20000'))
 TIME_LIMIT = float(os.environ.get('RECOMP_TIME_LIMIT', '180'))
 # Linux build: address-space limit per compiler, bytes (0: none). Set by limit_memory(): the most one compiler may get.
@@ -306,17 +307,32 @@ _jobs = [0]
 
 
 def compile_file_inline(src, obj, base_flags, time_limit=None):
-    """compile_file; with RECOMP_INLINE a file that fails again (build.py compiles the failures again with fewer jobs: out
-    of memory is the usual cause) is compiled once more WITHOUT the inlined helpers, so a file too heavy to inline gets its
-    normal object instead of stopping the build. With one job there is no second round: the fallback comes at once."""
+    """With RECOMP_INLINE: ONE inlined compile with a short time limit (RECOMP_INLINE_LIMIT, 45 s); a file that takes longer
+    (the biggest generated files: inlining made the whole game compile 2-4x slower, testers 2026-10-21 "40 min -> over an
+    hour") or fails is compiled the normal way (compile_file, its own ladder), so the slowdown per file is bounded. The
+    files that compile fast, most of them, keep the faster code. Without RECOMP_INLINE: compile_file."""
+    if not INLINE:
+        return compile_file(src, obj, base_flags, time_limit)
     with _tries_lock:
         _tries[obj] += 1
         n = _tries[obj]
-    code, out, secs, note = compile_file(src, obj, base_flags, time_limit, EXTRA + [INLINE_FLAG] if INLINE else None)
-    if code and INLINE and (n >= 2 or _jobs[0] <= 1):
+    if n == 1:
+        hdr, count, lines = optnone_header(src, obj, OPTNONE_LINES)
+        cmd = [CLANG, '-c', OPT] + EXTRA + [INLINE_FLAG] + base_flags + (['-include', hdr] if hdr else []) + [src, '-o', obj]
+        want = mem_estimate(src, function_sizes(src)) * 2 if MEM_BUDGET else 0
+        if want:
+            mem_acquire(want)
+        try:
+            code, out, secs = run_limited(cmd, INLINE_LIMIT, want)
+        finally:
+            if want:
+                mem_release(want)
+        if code == 0:
+            return 0, out, secs, ('%d function(s) over %d statements unoptimised (%d statements)' % (count, OPTNONE_LINES, lines) if count else '')
         code2, out2, secs2, note2 = compile_file(src, obj, base_flags, time_limit)
-        return code2, out2, secs + secs2, ('helpers not inlined (the inlined compile failed)' + ('; ' + note2 if note2 else ''))
-    return code, out, secs, note
+        return code2, out2, secs + secs2, ('helpers not inlined (%s)' % ('over %.0f s' % INLINE_LIMIT if code is None else 'the inlined compile failed')) + ('; ' + note2 if note2 else '')
+    return compile_file(src, obj, base_flags, time_limit)      # a retry round (build.py, fewer jobs): the normal way
+
 
 
 _report = []
