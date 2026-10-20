@@ -109,7 +109,7 @@ def check_ram():
         return _r('warn', 'Memory', 'could not be read; if the build stops with "out of memory", use --jobs 2')
     jobs = suggested_jobs(gb)
     hint = 'suggested: --jobs %d' % jobs
-    if gb < RAM_FAIL_GB - 0.75:     # an "8 GB" PC reports 7.2-7.9 GB (memory kept by the firmware / integrated GPU): issue #55
+    if gb < RAM_FAIL_GB - 0.85:     # an "8 GB" PC reports 7.2-7.9 GB (memory kept by the firmware / integrated GPU): issue #55
         return _r('fail', 'Memory', '%.1f GB of RAM is too little; at least %d GB are needed (16 GB or more is comfortable)' % (gb, RAM_FAIL_GB))
     if gb < RAM_WARN_GB:
         return _r('warn', 'Memory', '%.1f GB of RAM: enough, but the build will be slow and tight; close other programs (%s)' % (gb, hint))
