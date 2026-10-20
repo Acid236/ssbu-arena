@@ -43,7 +43,7 @@ def main():
     ap.add_argument('--work', required=True)
     ap.add_argument('--clang', default='clang')
     ap.add_argument('--max-different', type=int, default=0)
-    ap.add_argument('--cflags', default='', help='more compiler flags, e.g. -mcx16 (the Linux build's)')
+    ap.add_argument('--cflags', default='', help='more compiler flags, e.g. -mcx16 (as the Linux build uses)')
     ap.add_argument('--opt', default='-O0', help='optimisation of the test program (-O1: as the game library is built)')
     a = ap.parse_args()
     work = os.path.abspath(a.work)
