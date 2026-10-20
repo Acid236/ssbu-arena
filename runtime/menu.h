@@ -16,6 +16,9 @@ void menu_request_toggle(void);         /* F1 (display.c) or the pad combination
 /* R3 (rb_net.c): a message box in the middle of the picture while the game itself shows nothing new (the online match
  * waiting for the other player). NULL or "" removes it. The caller redraws the last frame (nvn_front_osk_redraw). */
 void menu_notice(const char *text);
+/* O1 (net_relay.c): a small box at the top of the picture for 7 s, over the game, taking no input ("Cannot join this
+ * room" + the cause). Any thread; a new one replaces the old. */
+void menu_popup(const char *title, const char *text);
 
 /* display.c, window thread: 1 = the message was taken by the menu (the window procedure returns 0) */
 int  menu_wndproc(void *hwnd, unsigned msg, uintptr_t w, intptr_t l);

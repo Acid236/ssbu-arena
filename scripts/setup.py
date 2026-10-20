@@ -669,8 +669,22 @@ def deps_linux(cx):
             raise Fail('%s not found (--%s <folder containing %s>)%s' % (sub, {'vulkan': 'vulkan-headers', 'suyu': 'suyu'}[key], probe_rel, LINUX_HINT))
         cx.tools[key] = found
         say('  %-13s %s' % (sub, found))
+    find_imgui(cx, deps)
     if not cx.a.tools_only:
         check_dump(cx)
+
+
+def find_imgui(cx, deps):
+    """Linux / macOS (U2): Dear ImGui for the in-game settings menu (F1), as on Windows. Optional: without it the runtime builds
+    with menu_stub.c and F1 only logs why. install_deps.sh / install_mac.sh put it in deps/imgui."""
+    found = find_first([cx.a.imgui, os.environ.get('IMGUI_ROOT'), os.path.join(deps, 'imgui')],
+                       lambda d: os.path.exists(os.path.join(d, 'imgui.h')) and os.path.exists(os.path.join(d, 'imgui.cpp')))
+    if found:
+        cx.tools['imgui'] = found
+        say('  %-13s %s' % ('imgui', found))
+    else:
+        say('  WARNING: Dear ImGui not found: the settings menu (F1) will be left out of the build (--imgui <folder with imgui.h>, '
+            'IMGUI_ROOT or deps/imgui; the install script fetches it)')
 
 
 MAC_MIN = '-mmacosx-version-min=14.4'          # os_sync_wait_on_address (runtime/plat_posix.c): macOS 14.4 and newer
@@ -809,6 +823,7 @@ def deps_mac(cx):
             raise Fail('%s not found (--%s <folder containing %s>)%s' % (sub, {'vulkan': 'vulkan-headers', 'suyu': 'suyu'}[key], probe_rel, MAC_HINT))
         cx.tools[key] = found
         say('  %-13s %s' % (sub, found))
+    find_imgui(cx, deps)
     if not cx.a.tools_only:
         check_dump(cx)
 
@@ -1018,6 +1033,13 @@ def build_env(cx):
                   FFMPEG_ROOT=os.environ.get('FFMPEG_ROOT') or os.path.join(REPO, 'deps', 'ffmpeg'))
 
 
+def copy_logo(cx):
+    """media/opensmash.ico beside the exe: display.c loads it as the window's and taskbar's icon."""
+    src = os.path.join(REPO, 'media', 'opensmash.ico')
+    if os.path.isfile(src):
+        shutil.copy2(src, os.path.join(cx.work, 'opensmash.ico'))
+
+
 def copy_ffmpeg(cx):
     """The movie fallback's FFmpeg DLLs (deps\\ffmpeg\\bin, install.py) beside the exe, where mf_ffmpeg.c loads them from.
     Returns how many were copied (0: none there; the movies then play only where Windows' own codecs can)."""
@@ -1092,6 +1114,7 @@ def step_link(cx):
         if not opus:
             say('  WARNING: no libopus (neither in the runtime package nor in deps\\opus): music and the other Opus sounds will be silent')
         copy_ffmpeg(cx)
+        copy_logo(cx)
         return
     cx.run('link', [os.environ.get('COMSPEC', 'cmd.exe'), '/c', os.path.join(cx.work, 'build_glslang.bat')], env=cx.env())
     ldn = '1' if cx.state.get('ldn_online') else '0'                 # --ldn-online: built into the exe or absent from it
@@ -1114,6 +1137,7 @@ def step_link(cx):
     if not opus:
         say('  WARNING: no libopus: music and the other Opus sounds will be silent (deps step above; BUILDING.md)')
     copy_ffmpeg(cx)
+    copy_logo(cx)
 
 
 def link_linux(cx):

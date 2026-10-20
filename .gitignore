@@ -74,3 +74,6 @@ dist/
 config/
 build_location.txt
 __pycache__/
+
+# an SD card folder with Skyline plugins and mods you installed (docs/SKYLINE.md)
+/sd/

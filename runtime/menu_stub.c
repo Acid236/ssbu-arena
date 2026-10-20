@@ -30,6 +30,7 @@ int menu_is_open(void) { return 0; }
 int menu_input_blocked(void) { return 0; }
 void menu_request_toggle(void) {}
 void menu_notice(const char *text) { (void)text; }      /* (the message is in the log only) */
+void menu_popup(const char *title, const char *text) { printf("menu: popup (no menu in this build): %s: %s\n", title ? title : "", text ? text : ""); fflush(stdout); }
 int menu_wndproc(void *hwnd, unsigned msg, uintptr_t w, intptr_t l) {
     (void)hwnd; (void)l;
     if (msg == WM_KEYDOWN && w == VK_F1) say_why("F1 was pressed");
@@ -44,3 +45,8 @@ void menu_assert_fail(const char *what, const char *file, int line) { (void)what
 /* net_stats.h: the default answer until the online code defines net_stats_get itself (as in menu.cpp) */
 void net_stats_get_default(NetStats *o) { memset(o, 0, sizeof *o); o->state = NET_OFFLINE; o->ping_ms = -1; }
 #pragma comment(linker, "/alternatename:net_stats_get=net_stats_get_default")
+#ifndef _WIN32
+/* Linux / macOS (display.c's SDL window thread): nothing to take from the window without the menu */
+void menu_sdl_attach(void *window) { (void)window; }
+void menu_sdl_service(void) {}
+#endif

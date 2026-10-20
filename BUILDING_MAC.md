@@ -54,7 +54,9 @@ Controllers: any pad SDL3 knows. Remapping: `build-macos/config/controllers.ini`
   at start with a message starting with `nvn_vk:` that names the missing part. That message is useful: send it.
 - Speed is unknown. It may be slow, or stutter while shaders are prepared.
 - **Mods and the hook table are off** on macOS.
-- The **settings menu (F1) is not available**.
+- The **settings menu (F1)** is built (Dear ImGui, fetched by `install_mac.sh` into `deps/imgui`): F1, a controller's
+  Home / Guide button, or hold − and + together for 1 s. It compiles in CI but **has not been tried on a Mac yet**.
+  Text boxes: the keyboard, or "Type in a dialog" (a macOS dialog through `osascript`).
 - **Online play is off.**
 - Recording movies to the album does not work (the self-test cases for it are accepted as known failures).
 

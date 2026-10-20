@@ -52,8 +52,7 @@ EXTRA = ['-ffp-contract=off'] + os.environ.get('RECOMP_CFLAGS', '').split()
 # 2026-10-13 (private round 15): main thread -25-30 %, audio update 9-17 -> 2-4 ms, per-frame hash identical. Same
 # sources, same floating-point flags; a file whose inlined compile fails is compiled again without it (compile_file).
 INLINE_FLAG = '-Dinline=__inline__ __attribute__((always_inline))'
-if os.environ.get('RECOMP_INLINE', '0') not in ('', '0'):
-    EXTRA.append(INLINE_FLAG)
+INLINE = os.environ.get('RECOMP_INLINE', '0') not in ('', '0')      # the game code only (cmd_main); the script modules keep EXTRA
 OPTNONE_LINES = int(os.environ.get('RECOMP_OPTNONE_LINES', '20000'))
 TIME_LIMIT = float(os.environ.get('RECOMP_TIME_LIMIT', '180'))
 # Linux build: address-space limit per compiler, bytes (0: none). Set by limit_memory(): the most one compiler may get.
@@ -313,9 +312,9 @@ def compile_file_inline(src, obj, base_flags, time_limit=None):
     with _tries_lock:
         _tries[obj] += 1
         n = _tries[obj]
-    code, out, secs, note = compile_file(src, obj, base_flags, time_limit)
-    if code and INLINE_FLAG in EXTRA and (n >= 2 or _jobs[0] <= 1):
-        code2, out2, secs2, note2 = compile_file(src, obj, base_flags, time_limit, [a for a in EXTRA if a != INLINE_FLAG])
+    code, out, secs, note = compile_file(src, obj, base_flags, time_limit, EXTRA + [INLINE_FLAG] if INLINE else None)
+    if code and INLINE and (n >= 2 or _jobs[0] <= 1):
+        code2, out2, secs2, note2 = compile_file(src, obj, base_flags, time_limit)
         return code2, out2, secs + secs2, ('helpers not inlined (the inlined compile failed)' + ('; ' + note2 if note2 else ''))
     return code, out, secs, note
 
@@ -351,7 +350,7 @@ def cmd_main(jobs):
     t0 = time.time()
     # objects compiled with the other RECOMP_INLINE setting are compiled again (the compile skips an object newer than its
     # source, whatever flags made it): a build from before inlining existed gets the faster code on its next update
-    stamp, want = os.path.join(build.OBJ, '_inline.txt'), '1' if INLINE_FLAG in EXTRA else '0'
+    stamp, want = os.path.join(build.OBJ, '_inline.txt'), '1' if INLINE else '0'
     try:
         have = open(stamp).read().strip()
     except OSError:
@@ -391,6 +390,13 @@ def cmd_nro(jobs, names):
     if not names:
         names = [e['name'] for e in build_nro.load_map()]
     rc = build_nro.main(names + ['--jobs=%d' % jobs])
+    # a compiler that crashed with many running at once usually ran out of memory (clang "due to signal"): the modules are
+    # built again with far fewer at a time, then one; only the objects that failed are compiled again
+    for retry in (max(1, jobs // 4), 1):
+        if not rc or retry >= jobs:
+            continue
+        print('building the modules again with %d job(s): some compiles failed (usually out of memory with %d at once)' % (retry, jobs), flush=True)
+        rc = build_nro.main(names + ['--jobs=%d' % retry])
     report(os.path.join(HERE, 'obj_nro' + os.environ['RECOMP_NRO_SUFFIX']))
     return rc
 

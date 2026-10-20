@@ -337,7 +337,7 @@ function Add-Field([string]$key, [string]$label, [string]$kind, [string]$hint) {
 Add-Field 'base' 'Base game' 'base' 'Your game: .xci / .nsp / .nsz / .nca, or a folder you already extracted (with exefs\ and romfs\). Looking...'
 Add-Field 'update' 'Update' 'update' '13.0.4 or 13.0.5 (.nsp / .nsz). Looking...'
 Add-Field 'prodkeys' 'prod.keys' 'keys' 'Your console keys: needed to read package files. Looking...'
-Add-Field 'firmware' 'Firmware (optional)' 'fw' 'Your own firmware fonts (folder with the firmware .nca files); otherwise open-source fonts are used. Looking...'
+Add-Field 'firmware' 'Firmware (optional)' 'fw' 'Only the fonts change. With your firmware: the console''s own fonts, Chinese / Japanese / Korean text included. Without: open-source fonts (same game, Latin text looks a little different, Asian characters missing). Looking...'
 
 # DLC list (optional)
 $dr = $tIn.RowCount
@@ -395,17 +395,24 @@ function New-Check([string]$text, [bool]$on) {
 }
 $script:cbShort = New-Check 'Create desktop and Start menu shortcuts' $true
 $script:cbUpd = New-Check 'Check for updates first' $true
-$script:cbRuntime = New-Check 'Use the prebuilt runtime (no Visual Studio needed)' $true
+$script:cbRuntime = New-Check 'Use the prebuilt runtime (recommended)' $true
+$script:tips = New-Object System.Windows.Forms.ToolTip
+$script:tips.AutoPopDelay = 20000
+$script:tips.SetToolTip($script:cbRuntime, 'No Visual Studio needed (about 3 GB less disk), some minutes shorter. The game you get is the same.')
 $script:cbRb = New-Check 'Rollback netcode for online play (experimental; the first build takes about twice as long)' $false
 $script:cbDry = New-Check 'Dry run (show what would happen, change nothing)' $false
 $fJobs = New-Object System.Windows.Forms.FlowLayoutPanel
 $fJobs.AutoSize = $true; $fJobs.WrapContents = $false
-[void]$fJobs.Controls.Add((New-Label 'Compiler jobs:'))
+$lblJ = New-Label 'Compiler jobs:'
+[void]$fJobs.Controls.Add($lblJ)
 $script:numJobs = New-Object System.Windows.Forms.NumericUpDown
 $script:numJobs.Minimum = 1; $script:numJobs.Maximum = 64; $script:numJobs.Width = (S 56)
 $script:numJobs.Value = [Math]::Max(1, [Math]::Min(24, [Environment]::ProcessorCount - 2))
 [void]$fJobs.Controls.Add($script:numJobs)
-[void]$fJobs.Controls.Add((New-Label '(fewer = the PC stays usable while it builds)' $cDim))
+$script:lblJobs = New-Label '(fewer = slower, PC stays usable)' $cDim
+[void]$fJobs.Controls.Add($script:lblJobs)
+$tJ = 'Compilers running at once. Each takes a CPU thread and about 1.5 GB of RAM: more than the safe number can run the PC out of memory. Fewer = slower, but the PC stays usable.'
+foreach ($c in @($lblJ, $script:numJobs, $script:lblJobs)) { $script:tips.SetToolTip($c, $tJ) }
 [void]$fOpt.Controls.Add($fJobs)
 $gOpt.Controls.Add($fOpt)
 $p2.Controls.Add($gOpt, 1, 0)
@@ -595,7 +602,7 @@ function Update-FieldStatus {
     } else { Set-FieldStatus 'prodkeys' 'This file does not exist.' $cFail }
 
     $v = $script:F['firmware'].Box.Text.Trim().Trim('"')
-    if (-not $v) { Set-FieldStatus 'firmware' 'Optional: your own firmware fonts; otherwise open-source fonts are used.' $cWarn }
+    if (-not $v) { Set-FieldStatus 'firmware' 'Optional. Only the fonts change: without it open-source fonts are used (no Chinese / Japanese / Korean characters). The game is the same.' $cWarn }
     elseif (Is-Dir $v) {
         $it = if ($fd) { Find-Item $fd.firmware $v } else { $null }
         if ($it) { Set-FieldStatus 'firmware' (Strip-Desc $it) $cOk }
@@ -1166,7 +1173,8 @@ function Apply-Precheck {
             $script:buildGb = [double]$c.build_gb; $script:dumpGb = [double]$c.dump_gb; Update-LocStatus
         }
         if ($c.what -eq 'Memory' -and ([string]$c.msg) -match '--jobs (\d+)') {
-            $j = [int]$Matches[1]; if ($j -ge 1 -and $j -le 64) { $script:numJobs.Value = $j }
+            $j = [int]$Matches[1]; if ($j -ge 1 -and $j -le 64) { $script:numJobs.Value = $j
+                $script:lblJobs.Text = ('(safe here: 1 to {0})' -f $j) }
         }
     }
 }

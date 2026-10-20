@@ -25,8 +25,28 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#ifdef _WIN32
 #include <shellapi.h>
 #include <psapi.h>
+#else
+/* U2 (plan\phases\U2_menu_linux.md): Linux and macOS. The window is SDL's (display.c): its events reach the menu through
+ * an SDL event watch (menu_sdl_attach) instead of window messages, and the few calls SDL wants on the window's thread
+ * (text input on / off, the clipboard) are made by that thread (menu_sdl_service). The drawing is the same Vulkan pass
+ * (nvn_vk_menu.c). Text boxes for a controller player: the desktop's own prompt (kdialog / zenity; osascript on a Mac). */
+#include <SDL3/SDL.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <fcntl.h>
+#include <dlfcn.h>
+#include <spawn.h>
+#ifdef __APPLE__
+#include <sys/param.h>
+#include <mach-o/dyld.h>
+#else
+#include <link.h>
+#endif
+extern char **environ;
+#endif
 #include "imgui.h"
 #include "net_stats.h"
 extern "C" {
@@ -45,6 +65,7 @@ long long nvn_front_presents(void); void nvn_front_osk_redraw(void); /* nvn_gl.c
 const char *nvn_vk_device_name(void);                                /* nvn_vk_menu.c */
 int osk_active(void);                                                /* osk.c */
 int osk_run(const wchar_t *header, const wchar_t *guide, const wchar_t *initial, int max_len, int min_len, int password, wchar_t *out);      /* osk.c */
+extern "C" void display_refresh_info(double *hz, int *lock_k);      /* display.c */
 int net_online(void); int net_mode(void); const char *net_room_code(void); const char *net_lan_code(void); const char *net_upnp_result(void);      /* net_relay.c */
 int r1_ra_phase(void);                                               /* r1_state.c (read only): 0 = run-ahead not running now */
 }
@@ -62,7 +83,7 @@ extern "C" int menu_enabled(void) {
         int on = e && e[0] ? atoi(e) != 0 : gfx_menu();
         if (t && t[0]) on = 1;
         g_enabled = on;
-        if (on) { printf("menu: settings menu on (F1, or the Home / Guide or Capture / Share button of a controller; %s)\n", e && e[0] ? "SSBU_MENU" : t && t[0] ? "SSBU_MENU_TEST" : "graphics.ini menu = on"); fflush(stdout); }
+        if (on) { printf("menu: settings menu on (F1, or the Home / Guide or Capture / Share button of a controller, or hold - and + together for 1 s; %s)\n", e && e[0] ? "SSBU_MENU" : t && t[0] ? "SSBU_MENU_TEST" : "graphics.ini menu = on"); fflush(stdout); }
     }
     return g_enabled;
 }
@@ -80,9 +101,25 @@ extern "C" void menu_notice(const char *text) {
     if (!g_notice[0]) InterlockedExchange(&g_notice_drawn, 0);
     ReleaseSRWLockExclusive(&g_notice_lock);
 }
+/* O1: a short message at the top of the picture ("Cannot join this room" + the cause), any thread, for 7 s */
+static SRWLOCK g_popup_lock = SRWLOCK_INIT;
+static char g_popup_title[96], g_popup_text[512];
+static volatile LONG64 g_popup_until;
+static volatile LONG g_popup_drawn;
+extern "C" void menu_popup(const char *title, const char *text) {
+    AcquireSRWLockExclusive(&g_popup_lock);
+    snprintf(g_popup_title, sizeof g_popup_title, "%s", title ? title : "");
+    snprintf(g_popup_text, sizeof g_popup_text, "%s", text ? text : "");
+    InterlockedExchange(&g_popup_drawn, 0);
+    InterlockedExchange64(&g_popup_until, (LONG64)GetTickCount64() + 7000);
+    ReleaseSRWLockExclusive(&g_popup_lock);
+}
+static int popup_on(void) { return (ULONGLONG)g_popup_until > GetTickCount64(); }
 /* net_stats.h: the default answer until the online code defines net_stats_get itself */
 extern "C" void net_stats_get_default(NetStats *o) { memset(o, 0, sizeof *o); o->state = NET_OFFLINE; o->ping_ms = -1; }
+#ifdef _WIN32
 #pragma comment(linker, "/alternatename:net_stats_get=net_stats_get_default")
+#endif                                               /* (Linux / macOS: net_off.c or net_relay.c defines net_stats_get) */
 static volatile LONG g_stats_req;                    /* F2 */
 static int g_asserts;
 extern "C" void menu_assert_fail(const char *what, const char *file, int line) {
@@ -113,6 +150,7 @@ static int q_take(Ev *out, int max) {
     return n;
 }
 
+#ifdef _WIN32
 extern "C" int menu_wndproc(void *hwnd, unsigned m, uintptr_t w, intptr_t l) {
     (void)hwnd;
     if (!menu_enabled()) return 0;
@@ -133,6 +171,175 @@ extern "C" int menu_wndproc(void *hwnd, unsigned m, uintptr_t w, intptr_t l) {
     }
     return 0;
 }
+#else
+extern "C" int menu_wndproc(void *hwnd, unsigned m, uintptr_t w, intptr_t l) { (void)hwnd; (void)m; (void)w; (void)l; return 0; }      /* (no window messages here) */
+/* the SDL window's events, as the window procedure above takes the Windows ones. An event watch sees every event on the
+ * thread that pumps it (display.c's window thread, or nnpad_sdl.c's), whoever empties the queue afterwards. */
+static SDL_Window *g_sdl_win;
+static float g_sdl_density = 1.0f;                   /* window pixels per SDL window coordinate (2 on a Retina screen) */
+static volatile LONG g_text_want, g_text_on;         /* render thread: an ImGui text box is active; window thread: SDL_StartTextInput done */
+static SRWLOCK g_clip_lock = SRWLOCK_INIT;
+static char *g_clip_set, *g_clip_got;                /* text to put on the clipboard / what the window thread read from it */
+static volatile LONG g_clip_get_req, g_clip_get_done;
+static int sdl_vk(SDL_Scancode sc) {                 /* the Windows key code of a key, as plat_posix.c's vk_scancode maps them back */
+    if (sc >= SDL_SCANCODE_A && sc <= SDL_SCANCODE_Z) return 'A' + (sc - SDL_SCANCODE_A);
+    if (sc >= SDL_SCANCODE_1 && sc <= SDL_SCANCODE_9) return '1' + (sc - SDL_SCANCODE_1);
+    if (sc >= SDL_SCANCODE_F1 && sc <= SDL_SCANCODE_F12) return VK_F1 + (sc - SDL_SCANCODE_F1);
+    if (sc >= SDL_SCANCODE_KP_1 && sc <= SDL_SCANCODE_KP_9) return VK_NUMPAD0 + 1 + (sc - SDL_SCANCODE_KP_1);
+    switch (sc) {
+    case SDL_SCANCODE_0: return '0';
+    case SDL_SCANCODE_KP_0: return VK_NUMPAD0;
+    case SDL_SCANCODE_BACKSPACE: return VK_BACK;
+    case SDL_SCANCODE_TAB: return VK_TAB;
+    case SDL_SCANCODE_RETURN: case SDL_SCANCODE_KP_ENTER: return VK_RETURN;
+    case SDL_SCANCODE_ESCAPE: return VK_ESCAPE;
+    case SDL_SCANCODE_SPACE: return VK_SPACE;
+    case SDL_SCANCODE_PAGEUP: return VK_PRIOR;
+    case SDL_SCANCODE_PAGEDOWN: return VK_NEXT;
+    case SDL_SCANCODE_END: return VK_END;
+    case SDL_SCANCODE_HOME: return VK_HOME;
+    case SDL_SCANCODE_LEFT: return VK_LEFT;
+    case SDL_SCANCODE_UP: return VK_UP;
+    case SDL_SCANCODE_RIGHT: return VK_RIGHT;
+    case SDL_SCANCODE_DOWN: return VK_DOWN;
+    case SDL_SCANCODE_INSERT: return VK_INSERT;
+    case SDL_SCANCODE_DELETE: return VK_DELETE;
+    case SDL_SCANCODE_LSHIFT: case SDL_SCANCODE_RSHIFT: return VK_SHIFT;      /* as Windows sends them (WM_KEYDOWN VK_SHIFT) */
+    case SDL_SCANCODE_LCTRL: case SDL_SCANCODE_RCTRL: return VK_CONTROL;
+    case SDL_SCANCODE_LALT: case SDL_SCANCODE_RALT: return VK_MENU;
+    case SDL_SCANCODE_EQUALS: return VK_OEM_PLUS;
+    case SDL_SCANCODE_MINUS: return VK_OEM_MINUS;
+    case SDL_SCANCODE_SEMICOLON: return 0xBA;
+    case SDL_SCANCODE_COMMA: return 0xBC;
+    case SDL_SCANCODE_PERIOD: return 0xBE;
+    case SDL_SCANCODE_SLASH: return 0xBF;
+    case SDL_SCANCODE_GRAVE: return 0xC0;
+    case SDL_SCANCODE_LEFTBRACKET: return 0xDB;
+    case SDL_SCANCODE_BACKSLASH: return 0xDC;
+    case SDL_SCANCODE_RIGHTBRACKET: return 0xDD;
+    case SDL_SCANCODE_APOSTROPHE: return 0xDE;
+    default: return 0;
+    }
+}
+static bool SDLCALL menu_sdl_watch(void *user, SDL_Event *e) {
+    (void)user;
+    switch (e->type) {
+    case SDL_EVENT_KEY_DOWN: case SDL_EVENT_KEY_UP: {
+        int down = e->type == SDL_EVENT_KEY_DOWN;
+        if (down && e->key.scancode == SDL_SCANCODE_F1) { if (!e->key.repeat) menu_request_toggle(); return true; }
+        if (down && e->key.scancode == SDL_SCANCODE_F2) { if (!e->key.repeat) InterlockedIncrement(&g_stats_req); return true; }      /* the stats overlay */
+        if (!g_open || osk_active()) return true;
+        int vk = sdl_vk(e->key.scancode);
+        if (vk) q_push(EV_KEY, vk, down);
+        return true; }
+    case SDL_EVENT_TEXT_INPUT: {                     /* UTF-8: one EV_CHAR per character (a code point, not UTF-16 as on Windows) */
+        if (!g_open || osk_active() || !e->text.text) return true;
+        const unsigned char *s = (const unsigned char *)e->text.text;
+        while (*s) {
+            unsigned c = *s++, more = c >= 0xf0 ? 3 : c >= 0xe0 ? 2 : c >= 0xc0 ? 1 : 0;
+            if (more) c &= 0x3f >> more;
+            for (; more && (*s & 0xc0) == 0x80; more--) c = c << 6 | (*s++ & 0x3f);
+            if (!more) q_push(EV_CHAR, (int)c, 0);
+        }
+        return true; }
+    case SDL_EVENT_MOUSE_MOTION:
+        if (g_open && !osk_active()) q_push(EV_MOVE, (int)(e->motion.x * g_sdl_density), (int)(e->motion.y * g_sdl_density));
+        return true;
+    case SDL_EVENT_MOUSE_BUTTON_DOWN: case SDL_EVENT_MOUSE_BUTTON_UP: {
+        int b = e->button.button == SDL_BUTTON_LEFT ? 0 : e->button.button == SDL_BUTTON_RIGHT ? 1 : e->button.button == SDL_BUTTON_MIDDLE ? 2 : -1;
+        if (g_open && !osk_active() && b >= 0) q_push(EV_BTN, b, e->type == SDL_EVENT_MOUSE_BUTTON_DOWN);
+        return true; }
+    case SDL_EVENT_MOUSE_WHEEL: {
+        float y = e->wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -e->wheel.y : e->wheel.y;
+        if (g_open && !osk_active() && y != 0.0f) q_push(EV_WHEEL, (int)(y * WHEEL_DELTA), 0);
+        return true; }
+    }
+    return true;
+}
+/* display.c (Linux / macOS), window thread: the window is made / once per turn of its event loop (at least every 8 ms) */
+extern "C" void menu_sdl_attach(void *window) {
+    if (!menu_enabled() || !window) return;
+    g_sdl_win = (SDL_Window *)window;
+    float d = SDL_GetWindowPixelDensity(g_sdl_win);
+    if (d > 0.0f) g_sdl_density = d;
+    SDL_AddEventWatch(menu_sdl_watch, NULL);
+}
+extern "C" void menu_sdl_service(void) {
+    if (!g_sdl_win) return;
+    float d = SDL_GetWindowPixelDensity(g_sdl_win);
+    if (d > 0.0f) g_sdl_density = d;
+    LONG want = g_text_want;
+    if (want != g_text_on) {                         /* text input only while a text box is active (on a Steam Deck SDL may show Steam's keyboard) */
+        if (want) SDL_StartTextInput(g_sdl_win); else SDL_StopTextInput(g_sdl_win);
+        g_text_on = want;
+    }
+    char *set = NULL;
+    AcquireSRWLockExclusive(&g_clip_lock); set = g_clip_set; g_clip_set = NULL; ReleaseSRWLockExclusive(&g_clip_lock);
+    if (set) { SDL_SetClipboardText(set); free(set); }
+    if (InterlockedExchange(&g_clip_get_req, 0)) {
+        char *t = SDL_GetClipboardText();
+        AcquireSRWLockExclusive(&g_clip_lock); free(g_clip_got); g_clip_got = strdup(t ? t : ""); ReleaseSRWLockExclusive(&g_clip_lock);
+        SDL_free(t);
+        InterlockedExchange(&g_clip_get_done, 1);
+    }
+}
+/* ImGui's clipboard (render thread): handed to the window thread; a paste waits for it at most 100 ms */
+static void clip_set(ImGuiContext *, const char *text) {
+    AcquireSRWLockExclusive(&g_clip_lock); free(g_clip_set); g_clip_set = strdup(text ? text : ""); ReleaseSRWLockExclusive(&g_clip_lock);
+}
+static const char *clip_get(ImGuiContext *) {
+    static char *ret;
+    if (!g_sdl_win) return "";
+    InterlockedExchange(&g_clip_get_done, 0);
+    InterlockedExchange(&g_clip_get_req, 1);
+    for (int i = 0; i < 25 && !g_clip_get_done; i++) Sleep(4);
+    AcquireSRWLockExclusive(&g_clip_lock); free(ret); ret = strdup(g_clip_got ? g_clip_got : ""); ReleaseSRWLockExclusive(&g_clip_lock);
+    return ret;
+}
+/* a line of text from the desktop's own prompt (a controller player cannot type in the menu's boxes): kdialog, else zenity
+ * (as nnapplet.c's software keyboard); osascript on a Mac. 1 = OK (out), 0 = cancelled, -1 = no prompt program. Blocks. */
+static void shq(const char *in, char *out, size_t n) {      /* '...' for the shell, a ' inside becomes '\'' */
+    size_t k = 0;
+    if (n < 3) { if (n) out[0] = 0; return; }
+    out[k++] = '\'';
+    for (; *in && k + 6 < n; in++) { if (*in == '\'') { memcpy(out + k, "'\\''", 4); k += 4; } else out[k++] = *in; }
+    out[k++] = '\''; out[k] = 0;
+}
+static int text_prompt(const char *title, const char *text, const char *initial, char *out, int n) {
+    char qt[256], qx[512], qi[256], cmd[1400];
+#ifdef __APPLE__
+    char as[900], a1[300], a2[300];             /* AppleScript strings: \ and " escaped, then the whole script quoted for the shell */
+    size_t k = 0;
+    for (const char *p = text; *p && k + 3 < sizeof a1; p++) { if (*p == '"' || *p == '\\') a1[k++] = '\\'; a1[k++] = *p; } a1[k] = 0; k = 0;
+    for (const char *p = initial; *p && k + 3 < sizeof a2; p++) { if (*p == '"' || *p == '\\') a2[k++] = '\\'; a2[k++] = *p; } a2[k] = 0;
+    snprintf(as, sizeof as, "text returned of (display dialog \"%s\" default answer \"%s\" with title \"%s\")", a1, a2, title);
+    shq(as, qx, sizeof qx);
+    snprintf(cmd, sizeof cmd, "osascript -e %s 2>/dev/null", qx);
+    (void)qt; (void)qi;
+#else
+    shq(title, qt, sizeof qt); shq(text, qx, sizeof qx); shq(initial, qi, sizeof qi);
+    int kd = system("command -v kdialog >/dev/null 2>&1") == 0, zn = !kd && system("command -v zenity >/dev/null 2>&1") == 0;
+    if (kd) snprintf(cmd, sizeof cmd, "kdialog --title %s --inputbox %s %s", qt, qx, qi);
+    else if (zn) snprintf(cmd, sizeof cmd, "zenity --entry --title=%s --text=%s --entry-text=%s", qt, qx, qi);
+    else { printf("menu: no text prompt program (kdialog or zenity): type in the box with a keyboard\n"); fflush(stdout); return -1; }
+#endif
+    FILE *f = popen(cmd, "r");
+    if (!f) return -1;
+    size_t got = fread(out, 1, (size_t)n - 1, f);
+    int st = pclose(f);
+    out[got] = 0;
+    out[strcspn(out, "\r\n")] = 0;
+    if (st == -1 || !WIFEXITED(st) || WEXITSTATUS(st) != 0) return 0;      /* cancelled or closed */
+    return 1;
+}
+static void utf8_cut(char *s, int max_bytes) {        /* at most max_bytes bytes, not in the middle of a character */
+    int n = (int)strlen(s);
+    if (n <= max_bytes) return;
+    n = max_bytes;
+    while (n > 0 && ((unsigned char)s[n] & 0xc0) == 0x80) n--;
+    s[n] = 0;
+}
+#endif
 
 /* ------------------------------------------------------------------ the settings */
 static const char *const k_window[] = {"windowed", "borderless", "fullscreen"};
@@ -268,8 +475,8 @@ static uint64_t g_pad_prev;
 static long long g_closed_at, g_frame;
 static char g_pads[1024];
 static ULONGLONG g_pads_at;
-enum { SEC_DISPLAY, SEC_GRAPHICS, SEC_AUDIO, SEC_CONTROLS, SEC_EXPERIMENTAL, SEC_DLC, SEC_LANG, SEC_LOG, SEC_ABOUT, SEC_N };
-static const char *const k_sections[SEC_N] = {"Display", "Graphics", "Audio", "Controls", "Experimental", "Add-on content", "Language", "Log", "About"};
+enum { SEC_DISPLAY, SEC_GRAPHICS, SEC_AUDIO, SEC_CONTROLS, SEC_EXPERIMENTAL, SEC_ROOMS, SEC_DLC, SEC_LANG, SEC_LOG, SEC_ABOUT, SEC_N };
+static const char *const k_sections[SEC_N] = {"Display", "Graphics", "Audio", "Controls", "Experimental", "Online rooms", "Add-on content", "Language", "Log", "About"};
 
 static ImGuiKey vk_key(int vk) {
     if (vk >= 'A' && vk <= 'Z') return (ImGuiKey)(ImGuiKey_A + (vk - 'A'));
@@ -301,10 +508,27 @@ static void im_init(int h) {
     if (px < 15.0f) px = 15.0f;
     if (px > 40.0f) px = 40.0f;
     g_base_h = (float)h;
+#ifdef _WIN32
     char font[MAX_PATH];
     UINT n = GetWindowsDirectoryA(font, MAX_PATH);
     snprintf(font + n, sizeof font - n, "\\Fonts\\segoeui.ttf");
     ImFont *f = GetFileAttributesA(font) != INVALID_FILE_ATTRIBUTES ? io.Fonts->AddFontFromFileTTF(font, px) : NULL;
+#else
+    /* a sans-serif font of the system (Debian / Ubuntu, Fedora, Arch / SteamOS, macOS), else ImGui's own */
+    static const char *const fonts[] = {"/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf", "/usr/share/fonts/noto/NotoSans-Regular.ttf",
+        "/usr/share/fonts/google-noto/NotoSans-Regular.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/TTF/DejaVuSans.ttf", "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf", "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf", "/System/Library/Fonts/Supplemental/Arial.ttf", "/Library/Fonts/Arial.ttf"};
+    char font[MAX_PATH] = "";
+    ImFont *f = NULL;
+    for (size_t i = 0; i < sizeof fonts / sizeof fonts[0] && !f; i++) {
+        struct stat st;
+        if (stat(fonts[i], &st) == 0 && S_ISREG(st.st_mode)) { snprintf(font, sizeof font, "%s", fonts[i]); f = io.Fonts->AddFontFromFileTTF(font, px); }
+    }
+    ImGui::GetPlatformIO().Platform_SetClipboardTextFn = clip_set;      /* the system clipboard, through the window thread */
+    ImGui::GetPlatformIO().Platform_GetClipboardTextFn = clip_get;
+#endif
     if (!f) { ImFontConfig c; c.SizePixels = px; io.Fonts->AddFontDefault(&c); }
     st.ScaleAllSizes(px / 15.0f);
     int bpp = 0;
@@ -339,7 +563,26 @@ static void sec_display(int cw, int ch) {
     S.window = wm;
     if (combo("Window", &S.window, k_window, N(k_window))) { display_set_window_mode(S.window); ini("window", k_window[S.window]); }
     tag(0, 0);
+    {   /* a screen that is not k x 60 Hz (75, 144, 165 Hz ...): the game is 60 frames per second, so frames cannot all stay
+         * on screen equally long and motion stutters (testers, 2026-10-20: "frame pacing is terrible, 144 Hz screen") */
+        double hz; int k; display_refresh_info(&hz, &k);
+        if (hz > 30 && k == 0) {
+            ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1), "Your screen runs at %.0f Hz: not a multiple of 60, so motion is uneven.", hz);
+#ifdef _WIN32
+            help("The game runs at 60 frames per second. Set the screen to 120 Hz (or 60 Hz) in Windows Settings > Display > "
+                 "Advanced display > Refresh rate, and the game locks to it: every frame is shown equally long. "
+                 "Or turn on G-Sync / FreeSync and play in fullscreen.");
+#else
+            help("The game runs at 60 frames per second. Set the screen to 120 Hz (or 60 Hz) in the system's display settings, "
+                 "and the game locks to it: every frame is shown equally long. Or turn on G-Sync / FreeSync (VRR) and play in fullscreen.");
+#endif
+        } else if (hz > 30) ImGui::TextDisabled("Screen %.0f Hz: locked, %d refresh%s per game frame.", hz, k, k > 1 ? "es" : "");
+    }
+#ifdef _WIN32
     help("F11 also switches between the window and borderless at any time. Fullscreen = borderless and always on top (no display mode change).");
+#else
+    help("Borderless = a window without a frame over the whole screen; fullscreen = the desktop's fullscreen (no display mode change).");
+#endif
     int sz = S.size < 0 ? 0 : S.size;
     if (combo("Window size", &sz, k_size_name, N(k_size_name))) {
         S.size = sz;
@@ -651,6 +894,7 @@ static void online_save(void) {
            O.mode == 3 ? O.join : O.mode == 4 ? O.server : "");
     fflush(stdout);
 }
+#ifdef _WIN32
 static DWORD WINAPI osk_code_thread(LPVOID) {             /* the on-screen keyboard for the room code (it blocks: not on the render thread) */
     wchar_t init[64], out[64] = L"";
     MultiByteToWideChar(CP_UTF8, 0, O.join, -1, init, 64);
@@ -704,6 +948,63 @@ static int ra_build(void) {
     }
     return g_ra_build;
 }
+#else
+static DWORD WINAPI osk_code_thread(LPVOID) {             /* the room code from the desktop's text prompt (it blocks: not on the render thread) */
+    char out[256] = "";
+    int r = text_prompt("Room code (SSBU native)", "The code the host's game shows (like 1A2B3-C4D5E)", O.join, out, sizeof out);
+    if (r == 1) { utf8_cut(out, 32); snprintf(g_osk_text, sizeof g_osk_text, "%s", out); }
+    InterlockedExchange(&g_osk_done, r == 1 ? 1 : 2);
+    InterlockedExchange(&g_osk_busy, 0);
+    return 0;
+}
+static char g_osk_name[64];
+static volatile LONG g_osk_name_done;
+static DWORD WINAPI osk_name_thread(LPVOID arg) {          /* the player's name from the desktop's text prompt */
+    char out[256] = "";
+    int r = text_prompt("Your name (SSBU native)", "The name other players see", (const char *)arg, out, sizeof out);
+    if (r == 1) { utf8_cut(out, 32); snprintf(g_osk_name, sizeof g_osk_name, "%s", out); }
+    InterlockedExchange(&g_osk_name_done, r == 1 ? 1 : 2);
+    InterlockedExchange(&g_osk_busy, 0);
+    return 0;
+}
+static DWORD WINAPI restart_thread(LPVOID) { Sleep(100); exit(0); return 0; }      /* the exit handlers run */
+static void restart_game(void) {                           /* this exe again, same arguments, environment and standard handles */
+    char pid[16], exe[MAX_PATH], path[MAX_PATH];
+    snprintf(pid, sizeof pid, "%d", (int)getpid());
+    setenv("SSBU_RESTART_WAIT_PID", pid, 1);
+    GetModuleFileNameA(NULL, exe, MAX_PATH);
+    plat_path(exe, path, sizeof path);
+    printf("menu: restarting the game: %s\n", path);
+    fflush(stdout);
+    pid_t child;
+    int e = posix_spawn(&child, path, NULL, NULL, __argv, environ);
+    if (!e) {
+        CreateThread(NULL, 0, restart_thread, NULL, 0, NULL);
+        CreateThread(NULL, 0, [](LPVOID) -> DWORD { Sleep(5000); _exit(0); return 0; }, NULL, 0, NULL);      /* if an exit handler hangs */
+    } else { printf("menu: the restart FAILED (error %d): start the game again by hand\n", e); fflush(stdout); }
+}
+static int g_ra_build = -1;               /* the run-ahead pieces are there: a loaded game library with the r1_m1 marks (r1_state.c mark_bind) */
+static int ra_has_mark(const char *name) { /* (the exe has its own r1_m1: not a sign; it is never asked) */
+    void *h = name && name[0] ? dlopen(name, RTLD_LAZY | RTLD_NOLOAD) : NULL;
+    int r = h && dlsym(h, "r1_m1") != NULL;
+    if (h) dlclose(h);
+    return r;
+}
+#ifndef __APPLE__
+static int ra_phdr(struct dl_phdr_info *i, size_t n, void *arg) { (void)n; (void)arg; return ra_has_mark(i->dlpi_name); }
+#endif
+static int ra_build(void) {
+    if (g_ra_build < 0) {
+#ifdef __APPLE__
+        g_ra_build = 0;
+        for (uint32_t i = 1; i < _dyld_image_count() && !g_ra_build; i++) g_ra_build = ra_has_mark(_dyld_get_image_name(i));      /* image 0: the exe */
+#else
+        g_ra_build = dl_iterate_phdr(ra_phdr, NULL) != 0;      /* the exe's own entry has no name */
+#endif
+    }
+    return g_ra_build;
+}
+#endif
 static bool onoff(const char *id, bool on, bool enabled) {     /* a big ON / OFF switch; true when clicked */
     char l[64];
     snprintf(l, sizeof l, "%s##%s", on ? "ON" : "OFF", id);
@@ -741,9 +1042,17 @@ static void sec_experimental(void) {
     ImGui::SameLine();
     const bool dis_6 = g_osk_busy;
     if (dis_6) ImGui::BeginDisabled();
+#ifdef _WIN32
     if (ImGui::Button("Type with the controller##name")) { InterlockedExchange(&g_osk_busy, 1); CreateThread(NULL, 0, osk_name_thread, pname, 0, NULL); }
+#else
+    if (ImGui::Button("Type in a dialog##name")) { InterlockedExchange(&g_osk_busy, 1); CreateThread(NULL, 0, osk_name_thread, pname, 0, NULL); }
+#endif
     if (dis_6) ImGui::EndDisabled();
+#ifdef _WIN32
     if (!pname[0]) ImGui::TextDisabled("Empty: the Windows user name is used.");
+#else
+    if (!pname[0]) ImGui::TextDisabled("Empty: your login name is used.");
+#endif
     ImGui::Separator();
     /* (3) online play (net_relay.c / nnldn.c) */
     bool on = O.mode != 0;
@@ -751,6 +1060,9 @@ static void sec_experimental(void) {
     ImGui::SameLine(); ImGui::Text("Online play");
     tag(1, (O.mode != 0) != (O0.mode != 0));
     ImGui::SameLine(); ImGui::TextDisabled("play with others through the game's Local Wireless menu");
+#ifndef _WIN32
+    if (O.mode) ImGui::TextColored(ImVec4(1, 0.6f, 0.3f, 1), "Online play is not in the Linux / macOS build yet: these settings are kept for when it is.");
+#endif
     if (O.mode) {
         /* (4) rollback netcode over the online connection: Play SSBU.bat (scripts/run.py) starts ssbu_native_rb.exe with
          * SSBU_RB_NET=net when graphics.ini has rollback = on; the pair is built by the installer's "Rollback netcode" */
@@ -758,7 +1070,13 @@ static void sec_experimental(void) {
         if (rb_have < 0) {
             char exe[MAX_PATH], p[MAX_PATH + 32], v[16];
             GetModuleFileNameA(NULL, exe, MAX_PATH); char *s = strrchr(exe, '\\'); if (s) *s = 0;
+#ifdef _WIN32
             snprintf(p, sizeof p, "%s\\ssbu_game_r1.dll", exe);
+#elif defined(__APPLE__)
+            snprintf(p, sizeof p, "%s\\ssbu_game_r1.dylib", exe);
+#else
+            snprintf(p, sizeof p, "%s\\ssbu_game_r1.so", exe);
+#endif
             rb_have = GetFileAttributesA(p) != INVALID_FILE_ATTRIBUTES;
             rb_on = ini_read("rollback", v, sizeof v) && !off_word(v); rb_on0 = rb_on;
         }
@@ -819,7 +1137,11 @@ static void sec_online(void) {
         ImGui::SameLine();
         const bool dis_7 = g_osk_busy;
         if (dis_7) ImGui::BeginDisabled();
+#ifdef _WIN32
         if (ImGui::Button("Type with the controller")) { InterlockedExchange(&g_osk_busy, 1); CreateThread(NULL, 0, osk_code_thread, NULL, 0, NULL); }
+#else
+        if (ImGui::Button("Type in a dialog")) { InterlockedExchange(&g_osk_busy, 1); CreateThread(NULL, 0, osk_code_thread, NULL, 0, NULL); }
+#endif
         if (dis_7) ImGui::EndDisabled();
         if (O0.mode == 3 && net_room_code()[0]) ImGui::TextDisabled("Your own code (only if the host's router blocks you; the host sets it as online_peer): %s", net_room_code());
     }
@@ -881,6 +1203,9 @@ static void sec_lang(void) {
 static char *g_log[LOG_MAX];
 static int g_log_head, g_log_n, g_log_state, g_log_auto = 1;      /* state: 0 not tried, 1 reading, -1 stdout is not a file */
 static HANDLE g_log_h = INVALID_HANDLE_VALUE;
+#ifndef _WIN32
+static int g_log_fd = -1;
+#endif
 static char g_log_path[MAX_PATH + 8], g_log_part[1024], g_export_msg[MAX_PATH + 64];
 static int g_log_partn;
 static ImGuiTextFilter g_log_filter;
@@ -894,6 +1219,7 @@ static void log_add(const char *s, int n) {
 }
 static const char *log_line(int i) { return g_log[(g_log_head + i) % LOG_MAX]; }
 static void log_poll(void) {
+#ifdef _WIN32
     if (g_log_state == 0) {
         HANDLE so = GetStdHandle(STD_OUTPUT_HANDLE);
         g_log_state = -1;
@@ -909,11 +1235,39 @@ static void log_poll(void) {
             }
         }
     }
+#else
+    if (g_log_state == 0) {                          /* stdout is a regular file (play.sh, the test runners): its name, opened again to read */
+        struct stat st;
+        g_log_state = -1;
+        int named = 0;
+        if (fstat(1, &st) == 0 && S_ISREG(st.st_mode)) {
+#ifdef __APPLE__
+            char p[MAXPATHLEN];
+            if (fcntl(1, F_GETPATH, p) != -1) { snprintf(g_log_path, sizeof g_log_path, "%s", p); named = 1; }
+#else
+            ssize_t k = readlink("/proc/self/fd/1", g_log_path, MAX_PATH - 1);
+            if (k > 0) { g_log_path[k] = 0; named = 1; }
+#endif
+        }
+        if (named && (g_log_fd = open(g_log_path, O_RDONLY | O_CLOEXEC)) >= 0) {
+            off_t sz = lseek(g_log_fd, 0, SEEK_END), at = sz > (2 << 20) ? sz - (2 << 20) : 0;      /* the last 2 MB at most */
+            lseek(g_log_fd, at, SEEK_SET);
+            g_log_state = 1;
+            if (at) g_log_partn = -1;                                                  /* the first (cut) line is dropped */
+        }
+    }
+#endif
     if (g_log_state != 1) return;
     fflush(stdout);
     static char buf[256 * 1024];
+#ifdef _WIN32
     DWORD got = 0;
     for (int k = 0; k < 4 && ReadFile(g_log_h, buf, sizeof buf, &got, NULL) && got; k++) {
+#else
+    ssize_t rd;
+    DWORD got = 0;
+    for (int k = 0; k < 4 && (rd = read(g_log_fd, buf, sizeof buf)) > 0 && (got = (DWORD)rd) != 0; k++) {
+#endif
         for (DWORD i = 0; i < got; i++) {
             char ch = buf[i];
             if (ch == '\n') { if (g_log_partn >= 0) { while (g_log_partn && g_log_part[g_log_partn - 1] == '\r') g_log_partn--; log_add(g_log_part, g_log_partn); } g_log_partn = 0; }
@@ -935,10 +1289,27 @@ static int log_export(char *out, int n) {             /* logs\ssbu_log_<date>_<t
     if (!f) return 0;
     for (int i = 0; i < g_log_n; i++) { fputs(log_line(i), f); fputs("\r\n", f); }
     int ok = !fclose(f);
+#ifndef _WIN32
+    { char t[MAX_PATH + 64]; plat_path(out, t, sizeof t); snprintf(out, (size_t)n, "%s", t); }      /* shown with '/' */
+#endif
     printf("menu: log exported: %s (%d lines)\n", out, g_log_n);
     fflush(stdout);
     return ok;
 }
+#ifndef _WIN32
+static DWORD WINAPI reap_thread(LPVOID arg) { int st; waitpid((pid_t)(intptr_t)arg, &st, 0); return 0; }
+static void open_folder(const char *dir) {            /* xdg-open (open on a Mac), not waited for */
+#ifdef __APPLE__
+    const char *prog = "open";
+#else
+    const char *prog = "xdg-open";
+#endif
+    char *argv[3] = {(char *)prog, (char *)dir, NULL};
+    pid_t pid;
+    if (posix_spawnp(&pid, prog, NULL, NULL, argv, environ) == 0) CreateThread(NULL, 0, reap_thread, (LPVOID)(intptr_t)pid, 0, NULL);
+    else { printf("menu: %s could not be started: open %s by hand\n", prog, dir); fflush(stdout); }
+}
+#endif
 static void sec_log(void) {
     log_poll();
     if (g_log_state != 1) { help("The output of this run does not go to a file (started from a console without '> file'): nothing to show. gioca.bat writes it to logs_gioco\\gioca.log."); return; }
@@ -951,9 +1322,15 @@ static void sec_log(void) {
         char path[MAX_PATH + 64];
         if (log_export(path, sizeof path)) {
             snprintf(g_export_msg, sizeof g_export_msg, "written: %s", path);
+#ifdef _WIN32
             char *s = strrchr(path, '\\');
             if (s) *s = 0;
             ShellExecuteA(NULL, "open", path, NULL, NULL, SW_SHOWNORMAL);      /* the folder, in Explorer: this button only */
+#else
+            char *s = strrchr(path, '/');
+            if (s) *s = 0;
+            open_folder(path);                                             /* the folder, in the file manager: this button only */
+#endif
         } else snprintf(g_export_msg, sizeof g_export_msg, "could NOT be written: %s", path);
     }
     ImGui::TextDisabled("%s - %d lines kept (the last %d)%s%s", g_log_path + (strncmp(g_log_path, "\\\\?\\", 4) ? 0 : 4), g_log_n, LOG_MAX, g_export_msg[0] ? " - " : "", g_export_msg);
@@ -998,8 +1375,80 @@ static void draw_stats(void) {
     ImGui::End();
 }
 
+/* ------------------------------------------------------------------ O1: Online rooms (net_relay.c net_rooms_get) */
+static void sec_rooms(void) {
+    static NetRoom rooms[32];
+    static int sel = -1;
+    static char pop_title[96], pop_text[512];
+    int state = 0, n = net_rooms_get(rooms, 32, &state);
+    if (!state) {
+        help("Online play is off: Experimental > Online play.");
+        return;
+    }
+    {   const char *b = net_build_id(), *plus = strchr(b, '+'), *end = plus ? plus : b + strlen(b), *d = end;
+        while (d > b && d[-1] != '-') d--;
+        ImGui::Text("This game: version"); ImGui::SameLine();
+        ImGui::TextColored(ImVec4(0.45f, 0.9f, 0.45f, 1), "%.*s", (int)(end - d), d); }
+    ImGui::SameLine(); ImGui::Text("  mods:"); ImGui::SameLine();
+    ImGui::PushTextWrapPos(0.0f); ImGui::TextUnformatted(net_mods_text()); ImGui::PopTextWrapPos();
+    help("Every room of your lobby, any version or mod set. Join a room from the game: Local Wireless > Rooms List. "
+         "Rooms of another version or mod set are listed there too, but joining one is refused and says why. Select a row for details.");
+    ImGui::Separator();
+    if (state == 1 && !n) { ImGui::TextDisabled("Asking the lobby..."); return; }
+    if (state == 2) { ImGui::TextColored(ImVec4(1, 0.8f, 0.2f, 1), "The lobby does not list rooms of other versions (an older lobby server): only the game's own list works."); return; }
+    if (!n) { ImGui::TextDisabled("No room is open in this lobby right now. Create one: Local Wireless > Create Room."); return; }
+    if (ImGui::BeginTable("rooms", 5, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingStretchProp)) {
+        ImGui::TableSetupColumn("Host", ImGuiTableColumnFlags_WidthStretch, 1.2f);
+        ImGui::TableSetupColumn("Version", ImGuiTableColumnFlags_WidthStretch, 0.6f);
+        ImGui::TableSetupColumn("Mods", ImGuiTableColumnFlags_WidthStretch, 1.6f);
+        ImGui::TableSetupColumn("Players", ImGuiTableColumnFlags_WidthStretch, 0.5f);
+        ImGui::TableSetupColumn("Status", ImGuiTableColumnFlags_WidthStretch, 1.1f);
+        ImGui::TableHeadersRow();
+        for (int i = 0; i < n; i++) {
+            const NetRoom &r = rooms[i];
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            char id[64];
+            snprintf(id, sizeof id, "%s##room%u", r.name[0] ? r.name : "?", r.host);
+            if (ImGui::Selectable(id, sel == i, ImGuiSelectableFlags_SpanAllColumns)) {
+                sel = i;
+                if (r.mine) { snprintf(pop_title, sizeof pop_title, "Your room"); snprintf(pop_text, sizeof pop_text, "This is the room you host."); }
+                else if (r.joinable) { snprintf(pop_title, sizeof pop_title, "%s's room", r.name); snprintf(pop_text, sizeof pop_text, "Same version and mods as yours: join it from the game, Local Wireless > Rooms List."); }
+                else { snprintf(pop_title, sizeof pop_title, "Cannot join %s's room", r.name); snprintf(pop_text, sizeof pop_text, "%s", r.why); }
+                ImGui::OpenPopup("##roomwhy");
+            }
+            ImGui::TableNextColumn(); ImGui::TextUnformatted(r.version[0] ? r.version : "?");
+            ImGui::TableNextColumn(); ImGui::PushTextWrapPos(0.0f); ImGui::TextUnformatted(r.mods[0] ? r.mods : "none"); ImGui::PopTextWrapPos();
+            ImGui::TableNextColumn(); ImGui::Text("%d / %d", r.players, r.most);
+            ImGui::TableNextColumn();
+            if (r.mine) ImGui::TextDisabled("yours");
+            else if (r.joinable) ImGui::TextColored(r.open ? ImVec4(0.45f, 0.9f, 0.45f, 1) : ImVec4(0.7f, 0.7f, 0.7f, 1), "%s", r.open ? "can join" : "full / closed");
+            else {
+                const char *nl = strchr(r.why, '\n'), *colon = strchr(r.why, ':');
+                int len = (int)((colon && (!nl || colon < nl)) ? colon - r.why : nl ? nl - r.why : (ptrdiff_t)strlen(r.why));
+                ImGui::TextColored(ImVec4(1, 0.45f, 0.4f, 1), "%.*s", len, r.why);
+            }
+        }
+        ImGui::EndTable();
+    }
+    if (ImGui::BeginPopupModal("##roomwhy", NULL, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar)) {
+        ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.35f, 1.0f), "%s", pop_title);
+        ImGui::Separator();
+        ImGui::TextUnformatted(pop_text);
+        if (ImGui::Button("OK", ImVec2(ImGui::GetFontSize() * 6, 0))) ImGui::CloseCurrentPopup();
+        ImGui::SetItemDefaultFocus();
+        ImGui::EndPopup();
+    }
+}
+
 static void sec_about(void) {
+#ifdef _WIN32
     ImGui::Text("SSBU native: Super Smash Bros. Ultimate, statically recompiled for Windows");
+#elif defined(__APPLE__)
+    ImGui::Text("SSBU native: Super Smash Bros. Ultimate, statically recompiled for macOS");
+#else
+    ImGui::Text("SSBU native: Super Smash Bros. Ultimate, statically recompiled for Linux");
+#endif
     ImGui::Text("Runtime built %s %s (study tree)", __DATE__, __TIME__);
     ImGui::Text("Renderer: Vulkan on %s", nvn_vk_device_name());
     ImGui::Text("Settings menu: Dear ImGui %s (MIT licence, Omar Cornut and contributors)", ImGui::GetVersion());
@@ -1047,6 +1496,7 @@ static void draw_menu(int cw, int ch) {
     case SEC_AUDIO: sec_audio(); break;
     case SEC_CONTROLS: sec_controls(); break;
     case SEC_EXPERIMENTAL: sec_experimental(); break;
+    case SEC_ROOMS: sec_rooms(); break;
     case SEC_DLC: sec_dlc(); break;
     case SEC_LANG: sec_lang(); break;
     case SEC_LOG: sec_log(); break;
@@ -1166,6 +1616,29 @@ static void test_tick(void) {
     }
     fflush(stdout);
 }
+/* TEST SWITCH SSBU_MENU_ROOMS_TEST=popup (O1, default off): 1 s after the first online popup is drawn, a picture of it
+ * (SSBU_SHOT_DIR/menu_test_popup.bmp); then F1 opens on Online rooms, 3 s later its rooms go to the log ("menu: rooms
+ * test:") with a picture (menu_test_rooms.bmp), and the menu closes. */
+static void rooms_test_tick(void) {
+    static int on = -1, step;
+    static ULONGLONG t0;
+    if (on < 0) { const char *e = getenv("SSBU_MENU_ROOMS_TEST"); on = e && !_stricmp(e, "popup"); }
+    if (!on || step >= 5) return;
+    ULONGLONG t = GetTickCount64();
+    if (step == 0 && g_popup_drawn) { t0 = t; step = 1; }
+    else if (step == 1 && t - t0 >= 1000) { test_shot("popup"); printf("menu: rooms test: picture of the popup\n"); step = 2; t0 = t; }
+    else if (step == 2 && t - t0 >= 1500) { set_open(1); g_section = SEC_ROOMS; g_section_req = g_section; printf("menu: rooms test: Online rooms opened\n"); step = 3; t0 = t; }
+    else if (step == 3 && t - t0 >= 3000) {
+        NetRoom r[32];
+        int st = 0, n = net_rooms_get(r, 32, &st);
+        printf("menu: rooms test: state %d, this game %s, mods %s, %d room(s)\n", st, net_build_id(), net_mods_text(), n);
+        for (int i = 0; i < n; i++)
+            printf("menu: rooms test: room %d: host %s, version %s, mods [%s], players %d/%d, %s%s%s\n", i, r[i].name, r[i].version, r[i].mods,
+                   r[i].players, r[i].most, r[i].mine ? "yours" : r[i].joinable ? "can join" : "CANNOT JOIN: ", r[i].mine || r[i].joinable ? "" : r[i].why, "");
+        test_shot("rooms"); step = 4; t0 = t;
+    } else if (step == 4 && t - t0 >= 1500) { set_open(0); printf("menu: rooms test: over\n"); step = 5; }
+    fflush(stdout);
+}
 extern "C" int menu_shot_wanted(char *path, int n) {
     if (!g_shot_req) return 0;
     g_shot_req = 0;
@@ -1190,8 +1663,20 @@ extern "C" int menu_frame(int width, int height, MenuDraw *out) {
         if (fresh) g_last_t = now; }
     if (!g_sections_inited) { settings_init(width, height); g_sections_inited = 1; CreateThread(NULL, 0, redraw_thread, NULL, 0, NULL); }
     test_tick();
+    rooms_test_tick();
     uint64_t b = nnhid_menu_buttons(), down = b & ~g_pad_prev;
     g_pad_prev = b;
+    {   /* U2: - and + held together for 1 s open the menu too: a controller whose Home / Guide button is taken (the Steam
+         * button of a Steam Deck) or that has none. The game sees the two buttons until the menu opens (+ may pause a match). */
+        static ULONGLONG combo_t0;
+        static int combo_done;
+        const uint64_t combo = BIT(B_MINUS) | BIT(B_PLUS);
+        if ((b & combo) == combo && !g_open && !combo_done) {
+            ULONGLONG now = GetTickCount64();
+            if (!combo_t0) combo_t0 = now;
+            else if (now - combo_t0 >= 1000) { combo_done = 1; menu_request_toggle(); printf("menu: - and + held for 1 s\n"); fflush(stdout); }
+        } else if ((b & combo) != combo) { combo_t0 = 0; combo_done = 0; }
+    }
     if (g_open && capturing()) { if (g_pcap < 0 && (down & (BIT(B_HOME) | BIT(B_CAPTURE)))) capture_cancel("Home / Capture"); }      /* Home cancels a rebinding instead of closing */
     else {
         if (down & (BIT(B_HOME) | BIT(B_CAPTURE))) menu_request_toggle();      /* nnhid_menu_buttons bits 16 / 17: never seen by the game */
@@ -1201,7 +1686,10 @@ extern "C" int menu_frame(int width, int height, MenuDraw *out) {
     for (LONG t = InterlockedExchange(&g_toggle_req, 0); t > 0; t--) set_open(!g_open);
     if (!g_open && g_guard && b == 0 && g_frame - g_closed_at >= 6) InterlockedExchange(&g_guard, 0);      /* closed and every pad button released */
     for (LONG t = InterlockedExchange(&g_stats_req, 0); t > 0; t--) apply_stats(!S.stats);
-    if (!g_open && !S.overlay && !S.stats && !g_notice_on) { Ev drop[8]; while (q_take(drop, 8) == 8) continue; return 0; }
+#ifndef _WIN32
+    if (!g_open) InterlockedExchange(&g_text_want, 0);      /* the window thread turns SDL's text input off */
+#endif
+    if (!g_open && !S.overlay && !S.stats && !g_notice_on && !popup_on()) { Ev drop[8]; while (q_take(drop, 8) == 8) continue; return 0; }
     if (!g_im_ready) im_init(height);
     ImGuiIO &io = ImGui::GetIO();
     io.DisplaySize = ImVec2((float)width, (float)height);
@@ -1223,7 +1711,11 @@ extern "C" int menu_frame(int width, int height, MenuDraw *out) {
         case EV_MOVE: io.AddMousePosEvent((float)e.a, (float)e.b); break;
         case EV_BTN: io.AddMouseButtonEvent(e.a, e.b != 0); break;
         case EV_WHEEL: io.AddMouseWheelEvent(0.0f, (float)e.a / (float)WHEEL_DELTA); break;
+#ifdef _WIN32
         case EV_CHAR: io.AddInputCharacterUTF16((ImWchar16)e.a); break;
+#else
+        case EV_CHAR: io.AddInputCharacter((unsigned int)e.a); break;      /* a code point (SDL's text is UTF-8) */
+#endif
         case EV_KEY:
             if (e.a == VK_ESCAPE && e.b && !ImGui::IsAnyItemActive() && !ImGui::IsPopupOpen(NULL, ImGuiPopupFlags_AnyPopupId)) { menu_request_toggle(); break; }
             if (e.a == VK_CONTROL) io.AddKeyEvent(ImGuiMod_Ctrl, e.b != 0);
@@ -1253,8 +1745,29 @@ extern "C" int menu_frame(int width, int height, MenuDraw *out) {
         ImGui::End();
         if (!InterlockedExchange(&g_notice_drawn, 1)) { printf("menu: online notice drawn (presented frame %lld): %s\n", g_frame, text); fflush(stdout); }
     }
+    if (popup_on()) {                                    /* O1: "Cannot join this room" and why, at the top, taking no input */
+        char title[96], text[512];
+        AcquireSRWLockShared(&g_popup_lock); snprintf(title, sizeof title, "%s", g_popup_title); snprintf(text, sizeof text, "%s", g_popup_text); ReleaseSRWLockShared(&g_popup_lock);
+        ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.06f + (g_open ? ImGui::GetFrameHeight() : 0.0f)), ImGuiCond_Always, ImVec2(0.5f, 0.0f));
+        ImGui::SetNextWindowBgAlpha(0.88f);
+        ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(1.0f, 0.45f, 0.3f, 1.0f));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 2.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(ImGui::GetFontSize() * 1.2f, ImGui::GetFontSize() * 0.8f));
+        ImGui::Begin("##popup", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
+                     ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoSavedSettings);
+        ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.35f, 1.0f), "%s", title);
+        ImGui::Separator();
+        ImGui::TextUnformatted(text);
+        ImGui::End();
+        ImGui::PopStyleVar(2);
+        ImGui::PopStyleColor();
+        if (!InterlockedExchange(&g_popup_drawn, 1)) { printf("menu: online popup drawn (presented frame %lld): %s: %s\n", g_frame, title, text); fflush(stdout); }
+    }
     if (g_open && !osk_active()) draw_menu(width, height);
     ImGui::Render();
+#ifndef _WIN32
+    InterlockedExchange(&g_text_want, g_open && io.WantTextInput ? 1 : 0);      /* a text box is active: SDL's text input on (window thread) */
+#endif
     ImDrawData *dd = ImGui::GetDrawData();
     g_vtx.resize(0); g_idx.resize(0); g_cmd.resize(0);
     for (int i = 0; i < dd->CmdListsCount; i++) {

@@ -237,11 +237,9 @@ static LARGE_INTEGER g_start;
  * MessagePerformanceModeChanged (31) never occur; the enable flags are kept as the game sets them.
  * (close4: the state now follows the applet manager's table, see oe_track_focus: not in focus = 2 only while the window is
  * visible; minimised = 3 for a NoSuspend application and no change at all in the suspending modes.)
- * Differences from the console, stated: (1) in the suspending modes (0, 2, 3) the console also FREEZES the application
- * while it is in the background (mode 3: also while obscured); this port does not freeze the game's threads: a minimised
- * game keeps running (design of the freeze: plan\phases\R6_fake_audit.md, fourth round). (2) A window
- * that has never been in the foreground (the automated tests keep theirs off screen) is treated as in focus.
- * (3) Closing the window is the exit request: see oe_exit_request below.
+ * The watcher below also suspends guest threads in the suspending modes (0, 2, 3). A window that has never
+ * been in the foreground (the automated tests keep theirs off screen) is treated as in focus.
+ * Closing the window is the exit request: see oe_exit_request below.
  * SSBU_FOCUS_NOTIFY=0 turns the focus tracking off. */
 #define OE_MSG_FOCUS_STATE_CHANGED 15u
 static uint8_t g_oe_event[0x40];
@@ -276,6 +274,26 @@ static BOOL CALLBACK oe_find_window(HWND w, LPARAM out) {
     if (GetWindowThreadProcessId(w, &pid) && pid == GetCurrentProcessId() && IsWindowVisible(w) && !GetWindow(w, GW_OWNER)) { *(HWND *)out = w; return FALSE; }
     return TRUE;
 }
+/* Called with g_oe_lock held by both the guest and the watcher. A transient foreground
+ * report from an off-screen test window is not a user bringing the game to the front.
+ * Only an activatable window visible on a monitor opts into later focus loss/suspension;
+ * once opted in, the existing obscured/minimized handling continues to apply. */
+static int oe_observe_foreground(void) {
+    DWORD pid = 0;
+    HWND fg = GetForegroundWindow();
+    if (!fg || !GetWindowThreadProcessId(fg, &pid) || pid != GetCurrentProcessId()) return 0;
+#ifdef _WIN32
+    if (!g_oe_was_foreground && (!IsWindowVisible(fg) || IsIconic(fg)
+            || (GetWindowLongPtrA(fg, GWL_EXSTYLE) & WS_EX_NOACTIVATE)
+            || !MonitorFromWindow(fg, MONITOR_DEFAULTTONULL))) return 0;
+#else   /* Linux / macOS (plat/windows.h): the SDL window is the foreground window only while it has the keyboard focus */
+    if (!g_oe_was_foreground && (!IsWindowVisible(fg) || IsIconic(fg))) return 0;
+#endif
+    g_oe_was_foreground = 1;
+    g_oe_window = fg;
+    return 1;
+}
+static void oe_track_focus(void);
 static DWORD WINAPI oe_watch(LPVOID unused) {
     const char *test = getenv("SSBU_FREEZE_TEST");
     double t_start = 0, t_len = 0;
@@ -289,16 +307,27 @@ static DWORD WINAPI oe_watch(LPVOID unused) {
         if (test && test_phase == 0 && t >= t_start) {
             HWND w = NULL;
             EnumWindows(oe_find_window, (LPARAM)&w);
-            if (w) { g_oe_window = w; g_oe_was_foreground = 1; ShowWindow(w, SW_SHOWMINNOACTIVE); test_phase = 1; printf("nn::oe: freeze test: window minimised (handling mode %d)\n", g_oe_focus_mode); fflush(stdout); }
+            if (w) {
+                EnterCriticalSection(&g_oe_lock);
+                g_oe_window = w; g_oe_was_foreground = 1;
+                int mode = g_oe_focus_mode;
+                LeaveCriticalSection(&g_oe_lock);
+                ShowWindow(w, SW_SHOWMINNOACTIVE); test_phase = 1;
+                printf("nn::oe: freeze test: window minimised (handling mode %d)\n", mode); fflush(stdout);
+            }
         } else if (test_phase == 1 && t >= t_start + t_len) {
-            ShowWindow(g_oe_window, SW_SHOWNOACTIVATE);
+            EnterCriticalSection(&g_oe_lock);
+            HWND w = g_oe_window;
+            LeaveCriticalSection(&g_oe_lock);
+            ShowWindow(w, SW_SHOWNOACTIVATE);
             test_phase = 2;
         }
-        DWORD pid = 0;
-        HWND fg = GetForegroundWindow();
-        int ours = fg && GetWindowThreadProcessId(fg, &pid) && pid == GetCurrentProcessId();
-        if (ours) { g_oe_was_foreground = 1; g_oe_window = fg; }
-        if (!g_oe_was_foreground) continue;
+        /* The game can stop polling oe after losing focus and wait on the notification event.
+         * Keep producing focus notifications even while every guest consumer is asleep. */
+        oe_track_focus();
+        EnterCriticalSection(&g_oe_lock);
+        int ours = oe_observe_foreground();
+        if (!g_oe_was_foreground) { LeaveCriticalSection(&g_oe_lock); continue; }
         int minimised = g_oe_window && IsIconic(g_oe_window);
         int runnable = ours || g_oe_exit_requested || (minimised ? g_oe_focus_mode == 1 : g_oe_focus_mode != 3);
         if (!runnable && !g_guest_frozen) {
@@ -314,6 +343,7 @@ static DWORD WINAPI oe_watch(LPVOID unused) {
             trace_printf("     nn::oe: application resumed after %llu ms\n", (unsigned long long)(GetTickCount64() - frozen_at));
         }
         if (test_phase == 2 && !g_guest_frozen) { g_oe_was_foreground = 0; test_phase = 3; }      /* the test window was never the foreground window: back to "in focus" */
+        LeaveCriticalSection(&g_oe_lock);
     }
     return 0;
 }
@@ -321,17 +351,19 @@ static void oe_track_focus(void) {
     static int enabled = -1;
     static ULONGLONG last;
     static volatile LONG watcher;
+    /* Guest queries and the independent watcher share state and queue transitions. */
+    EnterCriticalSection(&g_oe_lock);
     ULONGLONG now = GetTickCount64();
     if (enabled < 0) { const char *e = getenv("SSBU_FOCUS_NOTIFY"); enabled = !(e && e[0] == '0'); }
-    if (enabled && InterlockedCompareExchange(&watcher, 1, 0) == 0) CloseHandle(CreateThread(NULL, 0, oe_watch, NULL, 0, NULL));
-    if (!enabled || (now - last < 30 && !g_oe_focus_recheck)) return;
+    if (enabled && InterlockedCompareExchange(&watcher, 1, 0) == 0) {
+        HANDLE thread = CreateThread(NULL, 0, oe_watch, NULL, 0, NULL);
+        if (thread) CloseHandle(thread); else InterlockedExchange(&watcher, 0);
+    }
+    if (!enabled || (now - last < 30 && !g_oe_focus_recheck)) { LeaveCriticalSection(&g_oe_lock); return; }
     last = now;
     g_oe_focus_recheck = 0;
-    DWORD pid = 0;
-    HWND fg = GetForegroundWindow();
-    int ours = fg && GetWindowThreadProcessId(fg, &pid) && pid == GetCurrentProcessId();
-    if (ours) { g_oe_was_foreground = 1; g_oe_window = fg; }
-    if (!g_oe_was_foreground) return;
+    int ours = oe_observe_foreground();
+    if (!g_oe_was_foreground) { LeaveCriticalSection(&g_oe_lock); return; }
     /* close4: the applet manager's rule (suyu am/lifecycle_manager.cpp UpdateRequestedFocusState, GetFocusStateWhile*), with
      * the window as the activity state: foreground = ForegroundVisible; visible but not the foreground window = ForegroundObscured
      * (something else has the input, as under an overlay or a library applet); minimised = Background (as behind the HOME menu).
@@ -348,6 +380,7 @@ static void oe_track_focus(void) {
         trace_printf("     nn::oe: focus state -> %d (%s; handling mode %d)\n", state, state == 1 ? "in focus" : state == 2 ? "not in focus" : "background", g_oe_focus_mode);
     }
     if (g_oe_focus_pending && (g_oe_focus_mode == 1 || g_oe_focus_mode == 2)) { g_oe_focus_pending = 0; oe_push(OE_MSG_FOCUS_STATE_CHANGED); }   /* delivered only while notification is enabled */
+    LeaveCriticalSection(&g_oe_lock);
 }
 /* Exit request. [sdk 0x32cc20 / 0x32cca0] Enter / LeaveExitRequestHandlingSection keep a nesting count under a mutex and call the
  * applet manager's ISelfController LockExit when the count goes 0 -> 1 and UnlockExit when it goes 1 -> 0. The applet manager is a
@@ -408,13 +441,22 @@ static void oe_TryPopNotificationMessage(Ctx *c) {       /* (uint32_t *out) -> b
     RET(got);
 }
 static void oe_GetNotificationMessageEvent(Ctx *c) {     /* -> nn::os::SystemEvent *, signalled while a message is pending */
+    oe_track_focus();
     EnterCriticalSection(&g_oe_lock);
     oe_event_setup();
     LeaveCriticalSection(&g_oe_lock);
     RET(g_oe_event);
 }
-static void oe_GetCurrentFocusState(Ctx *c) { oe_track_focus(); RET(g_oe_focus_state); }
-static void oe_SetFocusHandlingMode(Ctx *c) { g_oe_focus_mode = (int)(uint32_t)A0; g_oe_focus_recheck = 1; oe_track_focus(); }               /* 0 SuspendHomeSleep, 1 NoSuspend, 2 SuspendHomeSleepNotify, 3 AlwaysSuspend */
+static void oe_GetCurrentFocusState(Ctx *c) {
+    EnterCriticalSection(&g_oe_lock);
+    oe_track_focus(); RET(g_oe_focus_state);
+    LeaveCriticalSection(&g_oe_lock);
+}
+static void oe_SetFocusHandlingMode(Ctx *c) {              /* 0 SuspendHomeSleep, 1 NoSuspend, 2 SuspendHomeSleepNotify, 3 AlwaysSuspend */
+    EnterCriticalSection(&g_oe_lock);
+    g_oe_focus_mode = (int)(uint32_t)A0; g_oe_focus_recheck = 1; oe_track_focus();
+    LeaveCriticalSection(&g_oe_lock);
+}
 static void oe_SetOperationModeChangedNotificationEnabled(Ctx *c) { g_oe_opmode_notify = (int)(A0 & 1); }
 /* While the game is inside such a section the console does not dim the screen or go to sleep by itself; the same is
  * asked of Windows (display and system kept awake) for as long as at least one section is open. */
@@ -757,6 +799,122 @@ static void ngc_MaskProfanityWordsInText(Ctx *c) { if (A1) wr32(A1, 0); RET(0); 
 static void socket_swap16(Ctx *c) { RET((uint16_t)(((A0 & 0xff) << 8) | ((A0 >> 8) & 0xff))); }
 static void socket_swap32(Ctx *c) { RET(bswap32((uint32_t)A0)); }
 
+/* ---------------------------------------------------------------- names only the Skyline plugins import
+ * (registered unconditionally: hostrt.c keeps handlers of names the game does not import for nnro.c's binding) */
+
+/* nn::oe::GetDisplayVersion(DisplayVersion *): char[16], the version string of the running update (the build main.elf is,
+ * hostrt.c). ARCropolis installs nothing unless it knows the version ([doc] nnsdk-rs oe.rs DisplayVersion { name: [u8; 16] }). */
+static void oe_GetDisplayVersion(Ctx *c) { memset((void *)(uintptr_t)A0, 0, 16); memcpy((void *)(uintptr_t)A0, g_game_build == GAME_13_0_5 ? "13.0.5" : "13.0.4", 6); }
+static void oe_ExitApplication(Ctx *c) {
+    printf("\na plugin asked the application to exit (nn::oe::ExitApplication, caller 0x%llx): stopping.\n", (unsigned long long)c->x[30] - 4);
+    trace_printf("nn::oe::ExitApplication (caller 0x%llx)\n", (unsigned long long)c->x[30] - 4);
+    report_and_exit(0);
+}
+
+/* nn::err::ApplicationErrorArg, 0x1014 bytes ([sdk] 0x199260 default constructor, 0x199280 the C1/C2 constructor
+ * (u32 code, const char *dialogMessage, const char *fullScreenMessage, const LanguageCode &), 0x1986d0 ShowApplicationError
+ * sends 0x1014 bytes): u16 0x102 @0 (header), u32 application error code @8, LanguageCode (8 chars) @0xc, dialog message
+ * char[0x800] @0x14, full-screen message char[0x800] @0x814 (each copied up to 0x7ff characters and terminated). */
+#define ERRARG_CODE 0x8
+#define ERRARG_LANG 0xc
+#define ERRARG_DIALOG 0x14
+#define ERRARG_FULL 0x814
+static void err_copy(uint64_t dst, uint64_t src, size_t cap) {
+    char *d = (char *)(uintptr_t)dst;
+    size_t i = 0;
+    if (src) for (const char *s = (const char *)(uintptr_t)src; i + 1 < cap && s[i]; i++) d[i] = s[i];
+    d[i] = 0;
+}
+static void err_AppErrorArg_ctor(Ctx *c) {
+    uint64_t a = A0;
+    wr16(a, 0x102);
+    wr32(a + ERRARG_CODE, (uint32_t)A1);
+    err_copy(a + ERRARG_DIALOG, A2, 0x800);
+    err_copy(a + ERRARG_FULL, A3, 0x800);
+    memset((void *)(uintptr_t)(a + ERRARG_LANG), 0, 8);
+    if (A4) err_copy(a + ERRARG_LANG, A4, 8);
+}
+static void err_AppErrorArg_default(Ctx *c) { uint64_t a = A0; wr16(a, 0x102); wr32(a + ERRARG_CODE, 0); wr8(a + ERRARG_DIALOG, 0); wr8(a + ERRARG_FULL, 0); }
+/* ShowApplicationError(const ApplicationErrorArg &): the console shows the error applet and waits for the user. A plugin
+ * panic arrives here (skyline's panic hook: the panic message is the full-screen text): this is the main diagnostic, so
+ * both messages go to stdout, the trace and <exe folder>\plugin_errors.txt (appended); nothing waits. */
+static void err_ShowApplicationError(Ctx *c) {
+    uint64_t a = A0;
+    uint32_t code = rd32(a + ERRARG_CODE);
+    const char *dialog = (const char *)(uintptr_t)(a + ERRARG_DIALOG), *full = (const char *)(uintptr_t)(a + ERRARG_FULL);
+    char lang[9] = {0};
+    memcpy(lang, (const void *)(uintptr_t)(a + ERRARG_LANG), 8);
+    printf("\n================ nn::err::ShowApplicationError (code %u, caller 0x%llx) ================\n%.2048s\n---- full screen ----\n%.2048s\n"
+           "================================================================\n", code, (unsigned long long)c->x[30] - 4, dialog, full);
+    fflush(stdout);
+    trace_printf("nn::err::ShowApplicationError code %u lang \"%s\" caller 0x%llx\n  dialog: %.2048s\n  full screen: %.2048s\n", code, lang,
+                 (unsigned long long)c->x[30] - 4, dialog, full);
+    char path[MAX_PATH];
+    DWORD n = GetModuleFileNameA(NULL, path, MAX_PATH);
+    char *slash = n ? strrchr(path, '\\') : NULL;
+    if (slash && (size_t)(slash - path) + 20 < sizeof path) {
+        strcpy(slash + 1, "plugin_errors.txt");
+        FILE *f = fopen(path, "ab");
+        if (f) {
+            SYSTEMTIME t;
+            GetLocalTime(&t);
+            fprintf(f, "[%04u-%02u-%02u %02u:%02u:%02u] application error %u (caller 0x%llx)\n%.2048s\n---- full screen ----\n%.2048s\n\n", t.wYear, t.wMonth, t.wDay,
+                    t.wHour, t.wMinute, t.wSecond, code, (unsigned long long)c->x[30] - 4, dialog, full);
+            fclose(f);
+        }
+    }
+}
+
+/* nn::crypto::GenerateSha256Hash(void *out, size_t outSize, const void *data, size_t size): Windows CNG (bcrypt.dll), as
+ * nnro.c checks module hashes. The SDK asserts outSize >= 32; a smaller buffer gets the first outSize bytes. */
+static int sha256_bcrypt(const void *data, size_t size, uint8_t out[32]) {
+    typedef LONG (WINAPI *open_fn)(void **, const WCHAR *, const WCHAR *, ULONG);
+    typedef LONG (WINAPI *hash_fn)(void *, UCHAR *, ULONG, UCHAR *, ULONG, UCHAR *, ULONG);
+    static void *alg;
+    static hash_fn hash;
+    if (!hash) {
+        HMODULE m = LoadLibraryA("bcrypt.dll");
+        open_fn open = m ? (open_fn)(void *)GetProcAddress(m, "BCryptOpenAlgorithmProvider") : NULL;
+        hash_fn h = m ? (hash_fn)(void *)GetProcAddress(m, "BCryptHash") : NULL;
+        if (!open || !h || open(&alg, L"SHA256", NULL, 0) != 0) return 0;
+        hash = h;
+    }
+    if (size > 0x7fffffffu) return 0;
+    return hash(alg, NULL, 0, (UCHAR *)(uintptr_t)data, (ULONG)size, out, 32) == 0;
+}
+static void crypto_Sha256(Ctx *c) {
+    uint8_t digest[32];
+    if (!sha256_bcrypt((const void *)(uintptr_t)A2, (size_t)A3, digest)) fatal(c, "nn::crypto::GenerateSha256Hash: SHA-256 is not available (bcrypt.dll)");
+    memcpy((void *)(uintptr_t)A0, digest, A1 < sizeof digest ? (size_t)A1 : sizeof digest);
+}
+
+/* nn::sm::GetServiceHandle(svc::Handle *out, const char *name, size_t length) -> Result. No service of the system can be
+ * reached from here: sm NotRegistered (module 21, description 7). HDR asks for its "hid:hdr" sysmodule this way and
+ * shows its "not connected" warning page. */
+#define RESULT_SM_NOT_REGISTERED 0xe15u
+static void sm_GetServiceHandle(Ctx *c) {
+    char name[9] = {0};
+    if (A1) memcpy(name, (const void *)(uintptr_t)A1, A2 < 8 ? (size_t)A2 : 8);
+    if (A0) wr32(A0, 0);
+    printf("nn::sm::GetServiceHandle(\"%s\"): no such service here -> 0x%x (caller 0x%llx)\n", name, RESULT_SM_NOT_REGISTERED, (unsigned long long)c->x[30] - 4);
+    RET(RESULT_SM_NOT_REGISTERED);
+}
+/* nn::hid::detail::SetSupportedNpadIdType(const NpadIdType *, int count): the inline header form of the call the game makes
+ * as nn::hid::SetSupportedNpadIdType; every id is served by nnhid.c anyway. */
+static void hid_detail_SetSupportedNpadIdType(Ctx *c) { RET(0); }
+
+static const ImportDef plugin_imports[] = {
+    {"_ZN2nn2oe17GetDisplayVersionEPNS0_14DisplayVersionE", oe_GetDisplayVersion},
+    {"_ZN2nn2oe15ExitApplicationEv", oe_ExitApplication},
+    {"_ZN2nn3err19ApplicationErrorArgC1EjPKcS3_RKNS_8settings12LanguageCodeE", err_AppErrorArg_ctor},
+    {"_ZN2nn3err19ApplicationErrorArgC2EjPKcS3_RKNS_8settings12LanguageCodeE", err_AppErrorArg_ctor},
+    {"_ZN2nn3err19ApplicationErrorArgC1Ev", err_AppErrorArg_default}, {"_ZN2nn3err19ApplicationErrorArgC2Ev", err_AppErrorArg_default},
+    {"_ZN2nn3err20ShowApplicationErrorERKNS0_19ApplicationErrorArgE", err_ShowApplicationError},
+    {"_ZN2nn6crypto18GenerateSha256HashEPvmPKvm", crypto_Sha256},
+    {"_ZN2nn2sm16GetServiceHandleEPNS_3svc6HandleEPKcm", sm_GetServiceHandle},
+    {"_ZN2nn3hid6detail22SetSupportedNpadIdTypeEPKji", hid_detail_SetSupportedNpadIdType},
+};
+
 /* ---------------------------------------------------------------- registration */
 #define OE(n) "_ZN2nn2oe" n
 #define PR(n) "_ZN2nn5prepo10PlayReport" n
@@ -953,6 +1111,7 @@ void register_misc_imports(void) {
     InitializeCriticalSection(&g_oe_lock);
     InitializeCriticalSection(&g_md5_lock);
     register_imports(replace_imports, (int)(sizeof replace_imports / sizeof replace_imports[0]));
+    register_imports(plugin_imports, (int)(sizeof plugin_imports / sizeof plugin_imports[0]));
     int n = (int)(sizeof fill_imports / sizeof fill_imports[0]), added = 0;
     for (int i = 0; i < n; i++) {
         if (!import_data(fill_imports[i].name)) { printf("nnmisc: \"%s\" is not an import of the game (typo?)\n", fill_imports[i].name); continue; }

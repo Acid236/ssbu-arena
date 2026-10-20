@@ -256,6 +256,7 @@ Options are environment variables, set with `--env NAME=VALUE` (full list: comme
 `SSBU_RENDERER=vk|gl`, `SSBU_SHOW=1` (show the window of a test exe), `SSBU_STRICT=1|report|path` (list the host
 functions that are not the real behaviour), `SSBU_TRACE`, `SSBU_PAD_BACKEND=xinput`, `SSBU_FIXED_SEED=<n>`.
 Pad mapping file and tools: `ssbu_native.exe --pad-test`, `--pad-map <n>`, `--pad-list` (one `pad<TAB>GUID<TAB>name` line per device, for the launcher).
+Skyline plugins (ARCropolis, smashline and the mods built on them) that you install yourself: [docs/SKYLINE.md](docs/SKYLINE.md).
 
 ## GameCube controller adapter
 
@@ -277,7 +278,8 @@ A settings menu drawn over the game's picture (Dear ImGui, Vulkan renderer only)
 `SSBU_MENU=1` or `menu = on` in `config\graphics.ini` (`SSBU_MENU=0` wins over the file).
 
 - **F1**, or a controller's Home/Guide or Capture/Share button, opens and closes it; **+** or **Esc** also close it. Those
-  controller buttons never reach the game.
+  controller buttons never reach the game. A controller without a usable Home button (a Steam Deck, whose Steam button
+  belongs to Steam): hold **−** and **+** together for 1 second (the game sees them until the menu opens).
 - While it is open the game keeps running but gets no input from the pads and the keyboard.
 - Pages: Display, Graphics, Audio, Controls, Experimental, Add-on content, Language, Log (with **Export log**), About. Every
   control is marked **[live]** (acts at once) or **[restart]** (saved now, used at the next start).

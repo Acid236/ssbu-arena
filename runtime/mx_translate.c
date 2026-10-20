@@ -195,7 +195,9 @@ static const char *attr_in(Mx *e, unsigned a, int vertex_reg_ok) {
         unsigned n = (a - 0x80) >> 4;
         e->in_attr |= 1u << n;
         e->in_comp[n] |= (uint8_t)(1u << c);
-        if (st == MX_VERTEX && (e->in->int_attrs >> n & 1)) return S(e, "uint(in_attr%u[%u])", n, c);
+        if (st == MX_VERTEX && n < 16 && (e->in->int_attrs >> (16 + n) & 1))      /* 2026-10-20: A2B10G10R10 SNORM fetched as R32_UINT (no such vertex format on the GPU): decoded here as Maxwell does (/ 511, / 1, at least -1) */
+            return c < 3 ? S(e, "U(max(float(int(in_attr%u.x << %uu) >> 22) / 511.0, -1.0))", n, 22u - 10u * c) : S(e, "U(max(float(int(in_attr%u.x) >> 30), -1.0))", n);
+        if (st == MX_VERTEX && n < 16 && (e->in->int_attrs >> n & 1)) return S(e, "uint(in_attr%u[%u])", n, c);
         return S(e, "U(in_attr%u[%u])", n, c);
     }
     if (st == MX_FRAGMENT) {
@@ -1579,7 +1581,7 @@ int mx_translate(const MxIn *in, MxOut *out) {
                 if (vk && inv >= 2) emit(&h, "precise gl_Position;\nprecise mx_position;\n");
             }
             for (unsigned n = 0; n < 32; n++)
-                if (e->in_attr >> n & 1) emit(&h, "layout(location = %u) in %s in_attr%u;\n", n, in->int_attrs >> n & 1 ? (in->sint_attrs >> n & 1 ? "ivec4" : "uvec4") : "vec4", n);
+                if (e->in_attr >> n & 1) emit(&h, "layout(location = %u) in %s in_attr%u;\n", n, n < 16 && (in->int_attrs >> (16 + n) & 1) ? "uvec4" : n < 16 && (in->int_attrs >> n & 1) ? (in->sint_attrs >> n & 1 ? "ivec4" : "uvec4") : "vec4", n);
             for (unsigned n = 0; n < 32; n++) if (e->out_attr >> n & 1) emit(&h, "layout(location = %u) out vec4 out_attr%u;\n", n, n);
         } else if (in->stage == MX_FRAGMENT) {
             uint32_t omap;
@@ -1651,7 +1653,7 @@ int mx_translate(const MxIn *in, MxOut *out) {
     }
     out->glsl = res;
     out->cbufs = e->cbufs; out->in_attr = e->in_attr; out->out_attr = e->out_attr; out->tex_units = e->tex_units;
-    out->int_dep = in->stage == MX_VERTEX ? e->in_attr : e->tex_units;
+    out->int_dep = in->stage == MX_VERTEX ? (e->in_attr & 0xffffu) | (e->in_attr << 16) : e->tex_units;      /* vertex: bit 16 + n = attribute n's SNORM decode (int_attrs) */
     out->ssbos = e->ssbos; out->ssbo_written = e->uses_gstore ? e->ssbos : 0;
     out->images = e->images; out->images_read = e->images_read; out->images_written = e->images_written;
     memcpy(out->image_gl_format, e->image_fmt, sizeof out->image_gl_format);

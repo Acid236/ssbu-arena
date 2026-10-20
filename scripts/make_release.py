@@ -314,6 +314,10 @@ def main():
     if a.opus:
         shutil.copy2(a.opus, os.path.join(pkg, 'opus.dll'))
         files.append('opus.dll')
+        lic = os.path.join(os.path.dirname(os.path.abspath(a.opus)), 'LICENSE-opus.txt')     # BSD: its notice goes with it
+        if os.path.isfile(lic):
+            shutil.copy2(lic, os.path.join(pkg, 'LICENSE-opus.txt'))
+            files.append('LICENSE-opus.txt')
     licences = [(os.path.join(REPO, 'LICENSE'), 'LICENSE-ssbu-native.txt'),
                 (next((os.path.join(tools['sdl3'], n) for n in ('LICENSE.txt', 'COPYING.txt') if os.path.exists(os.path.join(tools['sdl3'], n))), None), 'LICENSE-SDL3.txt'),
                 (next((os.path.join(tools['glslang'], n) for n in ('LICENSE.txt', 'LICENSE') if os.path.exists(os.path.join(tools['glslang'], n))), None), 'LICENSE-glslang.txt')]

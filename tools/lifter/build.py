@@ -160,7 +160,11 @@ if TARGET_POSIX:
     LIBS = pkg('--libs') + ['-lGL', '-lm', '-ldl', '-lpthread']      # libGL: the OpenGL front end is linked (not used)
     if TARGET_MACOS:                                     # OpenGL is a system framework; dl / pthread are in libSystem
         LIBS = pkg('--libs') + ['-framework', 'OpenGL', '-lm']
-    HAVE_IMGUI, CXX_SOURCES = False, []                  # the settings menu (menu.cpp) is Win32 + D3D: menu_stub.c on Linux for now
+    # U2 (plan/phases/U2_menu_linux.md): the settings menu on Linux / macOS too: menu.cpp's own SDL branch, plat/windows.h
+    # (C++-safe), the same Vulkan pass; the C++ library for ImGui's static locals
+    CXX_FLAGS = CXX_FLAGS + PLAT_FLAGS + ['-I', os.path.join(HERE, 'plat')] + pkg('--cflags')
+    if HAVE_IMGUI:
+        LIBS += ['-lc++'] if TARGET_MACOS else ['-lstdc++']
 
 
 def debug_link_flags(out):
@@ -304,7 +308,8 @@ def cmd_link(host_only=False):
         src, obj = os.path.join(HERE, 'r1src' if r1 and n == 'nncxxrt.c' else '', n), os.path.join(objdir, n[:-2] + '.obj')
         objs.append(obj)
         if not os.path.exists(obj) or os.path.getmtime(obj) < max(os.path.getmtime(src), newest_dep, newest_vk if n == 'nvn_vk.c' else 0,
-                                                                       os.path.getmtime(os.path.join(HERE, 'plat_mf.c')) if n == 'mf_ffmpeg.c' else 0):   # mf_ffmpeg.c includes plat_mf.c
+                                                                       os.path.getmtime(os.path.join(HERE, 'plat_mf.c')) if n == 'mf_ffmpeg.c' else 0,   # mf_ffmpeg.c includes plat_mf.c
+                                                                       os.path.getmtime(os.path.join(HERE, 'skyline.c')) if n == 'nnro.c' else 0):   # nnro.c includes skyline.c
             jobs.append((src, obj))
     for src in CXX_SOURCES:                          # U1: the settings menu (C++); imgui's own files depend on their source and menu_imconfig.h only
         obj = os.path.join(objdir, os.path.splitext(os.path.basename(src))[0] + '_cxx.obj')

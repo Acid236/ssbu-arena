@@ -21,7 +21,8 @@ Tested on one PC: CachyOS (Arch-based, kernel 7.2), 24 threads, 31 GB RAM, NVIDI
 |---|---|
 | Build from the dump | works: game library, 98 script modules, executable; `check` step passes (SDK self-test, pad self-test 56/56, C++ runtime self-test 145/145, differential test 32,043 / 32,043; it runs only with `--full-check`) |
 | Opening movie, title, menus, character and stage select | work |
-| F1 settings menu, on-screen keyboard | not on Linux yet (both draw with Windows APIs). Text input, for example naming a Mii, opens a zenity or kdialog dialog instead |
+| F1 settings menu | built and drawn as on Windows (Dear ImGui over the Vulkan picture; keyboard, mouse and controller), see [Settings menu (F1)](#settings-menu-f1). **Compiles and links in CI; not yet tried on a real Linux desktop or a Steam Deck** |
+| On-screen keyboard | not on Linux (it draws with Windows APIs). Text input, for example naming a Mii, opens a zenity or kdialog dialog instead |
 | A whole Smash match (scripted input, 1v1 vs CPU) | works: steady 60 fps, sound, no audio underruns |
 | Keyboard | works (tested); controllers through SDL3 are the same code as on Windows but **not tested with a real pad on Linux** |
 | Album movie recording (the game's video capture to the album) | **not implemented** on Linux; the 7 self-test cases for it are accepted as known failures |
@@ -91,7 +92,11 @@ roughly 2 to 2.5 hours instead of 4.5 (an estimate from the job counts, not meas
 The FFmpeg must be able to decode VP9 and Vorbis (the game's movies). Every distribution's normal FFmpeg can;
 `setup.py` checks it.
 
-Optional: `zenity` or `kdialog`. The game's on-screen keyboard (naming a Mii, a ruleset, ...) opens a dialog with one of them.
+Optional: `zenity` or `kdialog`. The game's on-screen keyboard (naming a Mii, a ruleset, ...) and the settings menu's
+"Type in a dialog" buttons (your name, a room code) open a dialog with one of them.
+
+`install_deps.sh` also fetches Dear ImGui v1.91.9b (MIT) into `deps/imgui`: the in-game settings menu (F1). Without it the
+game builds without the menu (`setup.py` says so; `--imgui <folder>` or `IMGUI_ROOT` point to another copy).
 
 ## 2. Build
 
@@ -157,8 +162,31 @@ Remapping, player slots, dead zones and rumble: `build-linux/config/controllers.
 start, explains itself, and is re-read within a second of being saved. `build-linux/work/ssbu_native --pad-test` shows
 what a pad sends.
 
-Window: `build-linux/config/graphics.ini` (`window = windowed | borderless | fullscreen`, size, vsync). Only
-`windowed` was tested on Linux.
+Window: `build-linux/config/graphics.ini` (`window = windowed | borderless | fullscreen`, size, vsync), or F1 > Display.
+Only `windowed` was tested on Linux.
+
+### Settings menu (F1)
+
+The same menu as on Windows ([BUILDING.md, "In-game menu (F1)"](BUILDING.md#in-game-menu-f1)), drawn over the game.
+
+| To open or close it | |
+|---|---|
+| Keyboard | **F1** (F2: the stats overlay) |
+| Controller | the **Home / Guide** button or the **Capture / Share** button (when the system lets SDL see it) |
+| Any controller, Steam Deck | hold **− and + together for 1 second** (Xbox-style pads: View + Menu; Steam Deck: the two buttons left and right of the screen, View and Menu) |
+| Close | also **+** or **Esc**, or the Close button |
+
+Inside: d-pad / left stick move, A selects, B goes back, L / R switch pages; mouse and keyboard work too.
+
+**Steam Deck:** the Steam button and the "..." button belong to Steam, so use **View + Menu held for 1 s**. While you hold
+them the game sees − and + (a match may pause) until the menu opens; after that the game gets no input until you
+release every button. Another way: in the game's Steam Input layout, bind a back button (L4 / R4 / L5 / R5) to the
+keyboard key F1. Text boxes: in Desktop Mode use the keyboard or "Type in a dialog" (zenity / kdialog); in Game Mode,
+Steam's on-screen keyboard (Steam + X) types into the active box (SDL may also open it by itself when a box is
+selected; not verified).
+
+Not on Linux yet: **Online play** (the Experimental page saves the settings for later and says so), and the Log page
+shows the log only when the game's output goes to a file (`play.sh` does that).
 
 ## Fonts
 

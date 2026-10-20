@@ -22,6 +22,11 @@
 
 enum { ML_PROTO = 1, ML_JOIN = 1, ML_WELCOME, ML_REJECT, ML_PING, ML_PONG, ML_DATA, ML_LEAVE, ML_LIST, ML_LISTING,
        ML_LIST_END, ML_PEERS, ML_PUNCH, ML_DIRECT, ML_BCAST };
+enum { ML_ROOMS = 17, ML_ROOM_INFO, ML_ROOMS_END };     /* O1 room browser (net_relay.c head, ssbu_lobby.py on_rooms) */
+#define ML_MODS_MAX 32
+#define ML_MOD_NAME 31
+#define ML_MODS_BYTES (1 + ML_MODS_MAX * (5 + ML_MOD_NAME))
+#define ML_ROOMS_MAX 32
 enum { ML_M_ADVERTISE = 1, ML_M_JOIN, ML_M_ACCEPT, ML_M_REJECT, ML_M_KEEP, ML_M_LEAVE, ML_M_GONE, ML_M_KICK };
 #define ML_NAME_LEN 32
 #define ML_BUILD_LEN 40
@@ -65,6 +70,8 @@ typedef struct ml_client {
     uint32_t peers_version;
     int peers_valid, peers_len;
     uint8_t peers_sent[7 * ML_PEER_LEN];
+    int mods_len;             /* O1: its mod-set block (0: an older game that does not send it) */
+    uint8_t mods[ML_MODS_BYTES];
 } ml_client;
 
 struct ml_room {
@@ -299,6 +306,16 @@ static void ml_on_join(const uint8_t *p, int len, const struct sockaddr_in *at, 
                lan_port, direct ? "yes" : "no");
     }
     c->seen = now; c->lan_ip = lan_ip; c->lan_port = lan_port; c->direct = direct;
+    if (len > ML_JOIN_LEN + 2 && p[ML_JOIN_LEN] == 'M' && p[ML_JOIN_LEN + 1] == 'S') {      /* O1: the game's mods */
+        const uint8_t *m = p + ML_JOIN_LEN + 2;
+        int n = len - ML_JOIN_LEN - 2, o = 1, ok = n >= 1 && m[0] <= ML_MODS_MAX;
+        for (int i = 0; ok && i < m[0]; i++) {
+            if (o + 5 > n || m[o + 4] > ML_MOD_NAME || o + 5 + m[o + 4] > n) ok = 0;
+            else o += 5 + m[o + 4];
+        }
+        c->mods_len = ok ? o : 0;
+        if (ok) memcpy(c->mods, m, (size_t)o);
+    }
     uint8_t w[4 + 8 + 4 + 8], *q = ml_hdr(w, ML_WELCOME);
     memcpy(q, nonce, 8);
     q = ml_put64(ml_put32(q + 8, c->ip), c->cookie);
@@ -310,31 +327,67 @@ static int ml_room_rank(const ml_room *r) {   /* open rooms first, then fuller o
     return (open ? 0 : 1000) - r->info[ML_NI_NODE_COUNT];
 }
 
-static void ml_on_list(ml_client *c, const uint8_t *seq, ULONGLONG now) {
-    ml_room *sel[ML_LIST_MAX + 1];
+/* the rooms c may see, best first: other = 0 its own build only (the game's list of an older game), 1 every build of its
+ * lobby code (O1: a newer game's list, and the room browser), its own build's rooms first */
+static int ml_select(ml_client *c, ULONGLONG now, int other, int with_own, ml_room **sel, int max) {
     int n = 0;
     for (int i = 0; i < ML_MAX_ROOMS; i++) {
         ml_room *r = &ml_rooms[i];
-        if (!r->used || r->owner == c || !ml_same_part(r->owner, c) || now - r->updated > ML_LISTED_FOR) continue;
-        int k = n < ML_LIST_MAX ? n++ : ML_LIST_MAX;   /* insertion sort keeping the best ML_LIST_MAX */
+        if (!r->used || (r->owner == c && !with_own) || now - r->updated > ML_LISTED_FOR) continue;
+        if (other ? strcmp(r->owner->code, c->code) != 0 : !ml_same_part(r->owner, c)) continue;
+        int k = n < max ? n++ : max;   /* insertion sort keeping the best max */
         sel[k] = r;
-        while (k > 0 && (ml_room_rank(sel[k]) < ml_room_rank(sel[k - 1]) ||
-                         (ml_room_rank(sel[k]) == ml_room_rank(sel[k - 1]) && sel[k]->created < sel[k - 1]->created))) {
+        while (k > 0) {
+            int ra = ml_room_rank(sel[k]) + (ml_same_part(sel[k]->owner, c) ? 0 : 10000), rb = ml_room_rank(sel[k - 1]) + (ml_same_part(sel[k - 1]->owner, c) ? 0 : 10000);
+            if (!(ra < rb || (ra == rb && sel[k]->created < sel[k - 1]->created))) break;
             ml_room *t = sel[k]; sel[k] = sel[k - 1]; sel[k - 1] = t; k--;
         }
     }
+    return n;
+}
+
+static void ml_on_list(ml_client *c, const uint8_t *seq, ULONGLONG now, int other) {
+    ml_room *sel[ML_LIST_MAX + 1];
+    int n = ml_select(c, now, other, 0, sel, ML_LIST_MAX);
     for (int i = 0; i < n; i++) {
-        uint8_t pkt[4 + 4 + 4 + ML_NI_SIZE], *p = ml_hdr(pkt, ML_LISTING);
+        uint8_t pkt[4 + 4 + 4 + ML_NI_SIZE + ML_BUILD_LEN], *p = ml_hdr(pkt, ML_LISTING);
         memcpy(p, seq, 4);
         ml_put32(p + 4, sel[i]->owner->ip);
         memcpy(p + 8, sel[i]->info, ML_NI_SIZE);
-        ml_send(pkt, sizeof pkt, &c->at);
+        memset(p + 8 + ML_NI_SIZE, 0, ML_BUILD_LEN);       /* O1: the host's build (only asked with flag 1) */
+        memcpy(p + 8 + ML_NI_SIZE, sel[i]->owner->build, strlen(sel[i]->owner->build));
+        ml_send(pkt, other ? (int)sizeof pkt : (int)sizeof pkt - ML_BUILD_LEN, &c->at);
     }
     uint8_t end[4 + 4 + 1], *p = ml_hdr(end, ML_LIST_END);
     memcpy(p, seq, 4);
     p[4] = (uint8_t)n;
     ml_send(end, sizeof end, &c->at);
     if (n) ml_log("%s scanned: %d room(s)", c->name, n);
+}
+
+static void ml_on_rooms(ml_client *c, const uint8_t *seq, ULONGLONG now) {     /* O1: the room browser */
+    ml_room *sel[ML_ROOMS_MAX + 1];
+    int n = ml_select(c, now, 1, 1, sel, ML_ROOMS_MAX);
+    for (int i = 0; i < n; i++) {
+        ml_room *r = sel[i];
+        ml_client *o = r->owner;
+        uint8_t pkt[4 + 4 + 4 + 3 + ML_NAME_LEN + ML_BUILD_LEN + ML_MODS_BYTES], *p = ml_hdr(pkt, ML_ROOM_INFO);
+        int open = r->info[ML_NI_POLICY] != 1 && r->info[ML_NI_NODE_COUNT] < r->info[ML_NI_NODE_MAX];
+        memcpy(p, seq, 4);
+        ml_put32(p + 4, o->ip);
+        p[8] = r->info[ML_NI_NODE_COUNT]; p[9] = r->info[ML_NI_NODE_MAX];
+        p[10] = (uint8_t)((open ? 1 : 0) | (o == c ? 2 : 0) | (o->mods_len ? 4 : 0));
+        memset(p + 11, 0, ML_NAME_LEN + ML_BUILD_LEN);
+        memcpy(p + 11, o->name, strlen(o->name));
+        memcpy(p + 11 + ML_NAME_LEN, o->build, strlen(o->build));
+        uint8_t *m = p + 11 + ML_NAME_LEN + ML_BUILD_LEN;
+        if (o->mods_len) { memcpy(m, o->mods, (size_t)o->mods_len); m += o->mods_len; } else *m++ = 0;
+        ml_send(pkt, (int)(m - pkt), &c->at);
+    }
+    uint8_t end[4 + 4 + 1], *p = ml_hdr(end, ML_ROOMS_END);
+    memcpy(p, seq, 4);
+    p[4] = (uint8_t)n;
+    ml_send(end, sizeof end, &c->at);
 }
 
 /* NetworkInfo's station addresses (node 0 = owner) into out[]; -1 if it is not one a game makes */
@@ -478,7 +531,9 @@ static void ml_packet(const uint8_t *p, int len, const struct sockaddr_in *at, U
     } else if (kind == ML_LEAVE && len >= 12 && cookie_ok) {
         ml_drop(c, "left");
     } else if (kind == ML_LIST && len >= 16 && cookie_ok) {
-        ml_on_list(c, p + 12, now);
+        ml_on_list(c, p + 12, now, len >= 17 && (p[16] & 1));
+    } else if (kind == ML_ROOMS && len >= 16 && cookie_ok) {
+        ml_on_rooms(c, p + 12, now);
     } else if (kind == 16 && len > 16 && len <= 1500 && cookie_ok) {      /* R3: a rollback message (net_relay.c T_RB) to the other players of its lobby code */
         uint32_t dst = ml_get32(p + 12);
         static uint8_t out[1600];   /* (only used under ml_lock) */

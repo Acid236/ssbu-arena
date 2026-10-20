@@ -106,8 +106,8 @@ TOOLS = {   # checked 2026-10-19: SDL3 and glslang equal GitHub's own asset dige
 # The prebuilt runtime package of the GitHub Release of this version (scripts/make_release.py): (URL, SHA-256 of the zip).
 # (None, None) until the maintainer has uploaded the package made from this commit and written its hash here; the
 # download is refused when the hash does not match, and setup.py uses the package only with the tree it was built from.
-RUNTIME_RELEASE = ('https://github.com/Denkishi/ssbu-recomp/releases/download/runtime-eac10a1/ssbu-runtime-eac10a1d77.zip',
-                   'b98251c0e03a722b23a18570b0d8e78ccb97d7ad171cf3fceecc5d9b5e8f7b05')
+RUNTIME_RELEASE = ('https://github.com/Denkishi/ssbu-recomp/releases/download/runtime-1cc878a/ssbu-runtime-1cc878a571.zip',
+                   'f3584d1c931812c660d4fba6863d4630e19d1165bb955cd3a523c82f47ae2143')
 
 SETUP_STEPS = ['deps', 'stage', 'convert', 'modules', 'tables', 'lift', 'sdk', 'compile', 'nro', 'link', 'check']
 # expected seconds, measured 2026-10-19 on a PC with 12 jobs and 32 threads (compile and nro scale with 12 / jobs)
@@ -582,8 +582,18 @@ def step_dump(cx):
                    'Check that prod.keys belongs to the same console as the game files, and that base and update are the same game.')
     if os.path.isdir(out) and not dump_ok(out):
         os.replace(out, out + '.old_%d' % int(time.time()))      # an unfinished dump of an older run: kept aside, not deleted
+    rebuilt = False
+    if os.path.isdir(out) and dump_ok(out):
+        # a complete dump made from OTHER game files (the player chose another update, e.g. 13.0.5 -> 13.0.4): the installer
+        # made it, the new one replaces it, and the build is made again from the conversion on (a tester's switch to 13.0.4
+        # kept the 13.0.5 dump and game, 2026-10-20)
+        say('   the game files changed (%s): the old unpacked game is replaced and the game is built again' % os.path.basename(cx.update))
+        shutil.rmtree(out, ignore_errors=True)
+        rebuilt = True
     if not os.path.isdir(out):
         os.replace(part, out)
+    if rebuilt:
+        cx.setup_args += ['--from', 'convert']
     try:                                                         # what this dump was made from (Resume keeps it next time)
         with open(os.path.join(out, 'made_from.json'), 'w', encoding='utf-8') as f:
             json.dump({'key': made_from_key(cx.base, cx.update)}, f)
