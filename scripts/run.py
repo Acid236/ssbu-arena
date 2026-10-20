@@ -151,6 +151,15 @@ def main():
         romfs = os.path.join(a.build, 'dump', 'romfs')       # the folder was moved: state.json still names the old place
     env['SSBU_ROMFS'] = romfs
     env['SSBU_USERDATA'] = os.path.abspath(a.userdata)
+    if not (a.linux or a.mac) and not any(os.path.isfile(os.path.join(work, n)) for n in ('libopus-0.dll', 'opus.dll')):
+        # libopus decodes the game's music and most sounds (testers' log 2026-10-20: "libopus NOT FOUND", no sound): the
+        # copy install.py fetched into deps\opus is used when the one beside the exe is missing
+        dep = os.path.join(REPO, 'deps', 'opus', 'libopus-0.dll')
+        if os.path.isfile(dep):
+            env['SSBU_OPUS_DLL'] = dep
+        else:
+            print('WARNING: libopus-0.dll is missing (beside the game and in deps\\opus): the music and most sounds will be silent.\n'
+                  'Double-click "Install SSBU.bat" and press Resume: it downloads it again (an antivirus may have removed it).')
     for sub, var in (('fonts', 'SSBU_FONTS'), ('zoneinfo', 'SSBU_TZDIR')):
         p = os.path.join(a.build, 'sysdata', sub)
         if os.path.isdir(p):
