@@ -1144,8 +1144,28 @@ def step_check(cx):
         say('  WARNING: the differential test reports differences (see logs/check_difftest.log)')
 
 
+RB_EXE = 'ssbu_native_rb.exe'
+
+
+def link_rollback(cx):
+    """--rollback: the exe of the rollback pair beside ssbu_game_r1.dll (step compile). The prebuilt runtime package carries
+    it (copied by step_link with the rest); without the package it is linked here (RECOMP_R1=1: the C++ runtime that marks
+    its writes, importing ssbu_game_r1.dll). Play SSBU.bat starts this pair when F1 > Experimental > Rollback netcode is on."""
+    if not getattr(cx.a, 'rollback', False) or cx.linux or cx.mac:
+        return
+    if not os.path.exists(os.path.join(cx.work, 'ssbu_game_r1.dll')):
+        raise Fail('--rollback: ssbu_game_r1.dll is missing: run the compile step again with --rollback (setup.py --from compile --rollback)')
+    if not os.path.exists(os.path.join(cx.work, RB_EXE)):
+        if cx.runtime_dir:
+            raise Fail('--rollback: the prebuilt runtime package has no %s (an older package): update this folder (Update only)' % RB_EXE)
+        cx.run('link', [sys.executable, 'build.py', 'host'], env=cx.env(**dict({k: v for k, v in build_env(cx).items() if k != 'RECOMP_NRO_SUFFIX'},
+               RECOMP_R1='1', RECOMP_EXE=RB_EXE, RECOMP_DLL='ssbu_game_r1.dll')))
+    say('  rollback pair ready: %s + ssbu_game_r1.dll (F1 > Experimental > Rollback netcode)' % RB_EXE)
+
+
 RUNNERS = {'deps': step_deps, 'stage': step_stage, 'convert': step_convert, 'modules': step_modules, 'tables': step_tables,
-           'lift': step_lift, 'sdk': step_sdk, 'compile': step_compile, 'nro': step_nro, 'link': step_link, 'check': step_check}
+           'lift': step_lift, 'sdk': step_sdk, 'compile': step_compile, 'nro': step_nro,
+           'link': lambda cx: (step_link(cx), link_rollback(cx))[0], 'check': step_check}
 ALWAYS = {'deps', 'stage'}               # cheap, and they fill the in-memory context
 
 
@@ -1241,6 +1261,11 @@ def main():
                 'Protection history): it is made again' % (', '.join(gone), cx.work))
             for s in ('compile', 'link', 'check'):
                 done.pop(s, None)
+    if getattr(a, 'rollback', False) and not a.dry_run and 'compile' in done and not cx.linux and not cx.mac and \
+            not all(os.path.exists(os.path.join(cx.work, f)) for f in ('ssbu_game_r1.dll', RB_EXE)):
+        say('--rollback: the rollback pair is not built yet: compile (the marked game DLL) and link run again')
+        for s in ('compile', 'link'):
+            done.pop(s, None)
     t_all = time.time()
     for i, s in enumerate(STEPS):
         if s not in todo:

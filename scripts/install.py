@@ -888,6 +888,8 @@ def step_build(cx, P):
                 P.end(s, 'dry', 'would run scripts/setup.py step %s' % s)
         return
     cmd = [sys.executable, os.path.join(HERE, 'setup.py'), '--build', BUILD, '--dump', cx.dump] + cx.setup_args
+    if a.rollback:
+        cmd += ['--rollback']
     if a.jobs:
         cmd += ['--jobs', str(a.jobs)]
     if cx.rebuild_from and cx.rebuild_from in SETUP_STEPS:
@@ -1033,6 +1035,7 @@ def parse(argv):
                                         '.nsz decompression (about 25 GB; default <repo>\\build). Remembered in build_location.txt, '
                                         'so Resume, setup.py, run.py, Play SSBU.bat and the shortcuts use it too')
     ap.add_argument('--jobs', type=int, help='parallel compiler jobs')
+    ap.add_argument('--rollback', action='store_true', help='also build the rollback netcode pair (setup.py --rollback: a second game DLL, about as long as the first compile)')
     ap.add_argument('--prepare-only', action='store_true', help='stop before the build (steps 1-7 only)')
     ap.add_argument('--runtime', help='prebuilt runtime package (zip or folder) to use instead of the one of the GitHub Release')
     ap.add_argument('--no-runtime', action='store_true', help='build everything here, the exe too (needs the MSVC Build Tools)')

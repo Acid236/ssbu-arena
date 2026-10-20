@@ -31,6 +31,19 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import build_location  # noqa: E402
 
 
+def ini_on(path, key):
+    """`key = on` (or 1 / yes / true) in a graphics.ini; False when the file or the key is missing."""
+    try:
+        with open(path, encoding='utf-8-sig', errors='replace') as f:
+            for line in f:
+                k, sep, v = line.partition('=')
+                if sep and k.strip().lower() == key:
+                    return v.split('#')[0].split(';')[0].strip().lower() in ('on', '1', 'yes', 'true')
+    except OSError:
+        pass
+    return False
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--userdata', help='the save folder (required, except with --play)')
@@ -111,8 +124,17 @@ def main():
     with open(state_file) as f:
         state = json.load(f)
     work = os.path.join(a.build, 'work')
+    rollback = False
+    if a.play and a.exe == main_exe and not (a.linux or a.mac) and ini_on(os.path.join(a.build, 'config', 'graphics.ini'), 'rollback'):
+        # F1 > Experimental > Rollback netcode: the rollback pair (setup.py --rollback) instead of the normal exe
+        if all(os.path.isfile(os.path.join(work, f)) for f in ('ssbu_native_rb.exe', 'ssbu_game_r1.dll')):
+            a.exe, rollback = 'ssbu_native_rb.exe', True
+            print('Rollback netcode on: ssbu_native_rb.exe + ssbu_game_r1.dll')
+        else:
+            print('Rollback netcode is on in the settings menu, but the rollback build is not there: open Install SSBU.bat, tick\n'
+                  '"Rollback netcode", press Resume (about as long as the first compile). Starting the normal game now.')
     exe = os.path.join(work, a.exe)
-    native = os.path.join(work, main_exe)
+    native = os.path.join(work, 'ssbu_native_rb.exe' if rollback else main_exe)
     if not os.path.exists(exe):
         shutil.copy2(native, exe)
     elif exe != native and os.path.getmtime(exe) < os.path.getmtime(native):
@@ -138,6 +160,8 @@ def main():
             env['SSBU_SEQ'] = ' '.join(l.strip() for l in f if l.strip() and not l.startswith('#'))
     if a.seed:
         env['SSBU_FIXED_SEED'] = a.seed
+    if rollback and 'SSBU_RB_NET' not in env:
+        env['SSBU_RB_NET'] = 'net'                    # rollback over the online connection (net_relay); needs online play on
     for kv in a.env:
         k, _, v = kv.partition('=')
         env[k] = v

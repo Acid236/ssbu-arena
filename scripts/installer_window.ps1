@@ -1,4 +1,4 @@
-# The installer window of the Super Smash Bros. Ultimate native PC port (GPL-3.0). `Install SSBU.bat` -> scripts\bootstrap.ps1
+﻿# The installer window of the Super Smash Bros. Ultimate native PC port (GPL-3.0). `Install SSBU.bat` -> scripts\bootstrap.ps1
 # puts a private Python into deps\python and then starts this file:
 #   powershell -NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File scripts\installer_window.ps1
 # Windows PowerShell 5.1 + System.Windows.Forms only; no modules, nothing is installed, nothing is sent anywhere.
@@ -396,6 +396,7 @@ function New-Check([string]$text, [bool]$on) {
 $script:cbShort = New-Check 'Create desktop and Start menu shortcuts' $true
 $script:cbUpd = New-Check 'Check for updates first' $true
 $script:cbRuntime = New-Check 'Use the prebuilt runtime (no Visual Studio needed)' $true
+$script:cbRb = New-Check 'Rollback netcode for online play (experimental; the first build takes about twice as long)' $false
 $script:cbDry = New-Check 'Dry run (show what would happen, change nothing)' $false
 $fJobs = New-Object System.Windows.Forms.FlowLayoutPanel
 $fJobs.AutoSize = $true; $fJobs.WrapContents = $false
@@ -923,7 +924,7 @@ function Set-Buttons {
     $script:btnUpdate.Enabled = (-not $run) -and $ok
     foreach ($k in $script:F.Keys) { $script:F[$k].Box.Enabled = -not $run; foreach ($b in $script:F[$k].Buttons) { $b.Enabled = -not $run } }
     $script:dlcList.Enabled = -not $run; $script:btnDlcAdd.Enabled = -not $run; $script:btnDlcDel.Enabled = -not $run; $script:btnDlcClr.Enabled = -not $run
-    foreach ($c in @($script:cbShort, $script:cbUpd, $script:cbRuntime, $script:cbDry, $script:numJobs)) { $c.Enabled = -not $run }
+    foreach ($c in @($script:cbShort, $script:cbUpd, $script:cbRuntime, $script:cbRb, $script:cbDry, $script:numJobs)) { $c.Enabled = -not $run }
     $script:btnMsvc.Enabled = -not $run
     $loc = Get-ChosenBuild                # Play and Resume follow the install location shown in the window
     $script:btnPlay.Enabled = (-not $run) -and (Test-Path -LiteralPath ([IO.Path]::Combine($loc, 'work\ssbu_native.exe'))) -and (Same-Path $loc $buildDir)
@@ -955,6 +956,7 @@ function Build-InstallArgs([bool]$forceDry) {
     if ($forceDry -or $script:cbDry.Checked) { [void]$a.Add('--dry-run') }
     if (-not $script:cbRuntime.Checked) { [void]$a.Add('--no-runtime') }
     if (-not $script:cbShort.Checked) { [void]$a.Add('--no-shortcuts') }
+    if ($script:cbRb.Checked) { [void]$a.Add('--rollback') }
     if (-not $script:cbUpd.Checked) { [void]$a.Add('--no-self-update') }
     return ($a -join ' ')
 }

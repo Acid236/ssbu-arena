@@ -745,7 +745,26 @@ static void sec_experimental(void) {
     ImGui::SameLine(); ImGui::Text("Online play");
     tag(1, (O.mode != 0) != (O0.mode != 0));
     ImGui::SameLine(); ImGui::TextDisabled("play with others through the game's Local Wireless menu");
-    if (O.mode) sec_online();
+    if (O.mode) {
+        /* (4) rollback netcode over the online connection: Play SSBU.bat (scripts/run.py) starts ssbu_native_rb.exe with
+         * SSBU_RB_NET=net when graphics.ini has rollback = on; the pair is built by the installer's "Rollback netcode" */
+        static int rb_have = -1, rb_on = -1, rb_on0;
+        if (rb_have < 0) {
+            char exe[MAX_PATH], p[MAX_PATH + 32], v[16];
+            GetModuleFileNameA(NULL, exe, MAX_PATH); char *s = strrchr(exe, '\\'); if (s) *s = 0;
+            snprintf(p, sizeof p, "%s\\ssbu_game_r1.dll", exe);
+            rb_have = GetFileAttributesA(p) != INVALID_FILE_ATTRIBUTES;
+            rb_on = ini_read("rollback", v, sizeof v) && !off_word(v); rb_on0 = rb_on;
+        }
+        if (onoff("rb", rb_on != 0, rb_have || rb_on)) { rb_on = !rb_on; ini("rollback", rb_on ? "on" : "off"); }
+        ImGui::SameLine(); ImGui::Text("Rollback netcode");
+        tag(1, rb_on != rb_on0);
+        ImGui::SameLine();
+        if (rb_have) ImGui::TextDisabled("smooth online fights at high ping (experimental); both players need it on");
+        else ImGui::TextDisabled("needs the rollback build: Install SSBU.bat, tick \"Rollback netcode\", Resume");
+        if (getenv("SSBU_RB_NET")) ImGui::TextColored(ImVec4(0.45f, 0.9f, 0.45f, 1), "Rollback is active in this run (SSBU_RB_NET=%s).", getenv("SSBU_RB_NET"));
+        sec_online();
+    }
     if (online_differs() || S.runahead != S0.runahead || strcmp(pname, pname0)) {
         ImGui::Separator();
         ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1.0f), "Saved. These changes are used when the game starts again.");
