@@ -1603,6 +1603,7 @@ static struct { uintptr_t lo, hi; DWORD old; } g_cg[256];
 static volatile LONG64 g_cg_reads, g_cg_writes, g_cg_render;
 static uintptr_t g_cg_span_lo = ~(uintptr_t)0, g_cg_span_hi;
 static DWORD g_cg_render_tid;
+#ifdef _WIN32
 static LONG CALLBACK cg_veh(EXCEPTION_POINTERS *x) {
     if (x->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION || x->ExceptionRecord->NumberParameters < 2 || x->ExceptionRecord->ExceptionInformation[0] > 1) return EXCEPTION_CONTINUE_SEARCH;
     uintptr_t a = (uintptr_t)x->ExceptionRecord->ExceptionInformation[1];
@@ -1629,12 +1630,17 @@ static LONG CALLBACK cg_veh(EXCEPTION_POINTERS *x) {
     ReleaseSRWLockExclusive(&g_cg_lock);
     return res;
 }
+#endif
 static int cb_keep_mode(void) {
     if (g_cb_keep < 0) {
         const char *e = getenv("SSBU_VK_CBKEEP");
         g_cb_keep = e ? atoi(e) : VK_CBKEEP_DEFAULT;
         if (getenv("SSBU_COMPUTE_CMP") && atoi(getenv("SSBU_COMPUTE_CMP"))) g_cb_keep = 0;      /* that comparison reads compute's output from guest memory after every batch */
+#ifdef _WIN32
         if (g_cb_keep == 2) { AddVectoredExceptionHandler(1, cg_veh); printf("nvn_vk: SSBU_VK_CBKEEP=2: accesses to kept compute ranges are trapped and logged (test)\n"); }
+#else
+        if (g_cb_keep == 2) { g_cb_keep = 1; printf("nvn_vk: SSBU_VK_CBKEEP=2 (trapping accesses, a test) is not available in the Linux build: 1 is used\n"); }
+#endif
         g_cg_render_tid = GetCurrentThreadId();
     }
     return g_cb_keep;

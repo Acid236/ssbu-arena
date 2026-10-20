@@ -11,12 +11,24 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
 #include <windows.h>
+#else
+#include <pthread.h>                                     /* Linux build: ssbu_glslang.so against the system's glslang */
+#define __declspec(x) __attribute__((visibility("default")))
+#endif
 #include <glslang/Include/glslang_c_interface.h>
 #include <glslang/Public/resource_limits_c.h>
 
+#ifdef _WIN32
 static INIT_ONCE g_once = INIT_ONCE_STATIC_INIT;
 static BOOL CALLBACK init_once(PINIT_ONCE once, PVOID arg, PVOID *ctx) { (void)once; (void)arg; (void)ctx; return glslang_initialize_process() != 0; }
+#else
+static pthread_once_t g_once = PTHREAD_ONCE_INIT;
+static int g_init_ok;
+static void init_once_posix(void) { g_init_ok = glslang_initialize_process() != 0; }
+#define InitOnceExecuteOnce(o, f, a, c) (pthread_once((o), init_once_posix), g_init_ok)
+#endif
 
 __declspec(dllexport) void ssbu_spirv_free(uint32_t *words) { free(words); }
 

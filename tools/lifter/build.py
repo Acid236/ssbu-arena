@@ -19,7 +19,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 GEN = os.path.join(HERE, os.environ.get('RECOMP_GEN', 'gen_eh_o2'))      # side-by-side builds: RECOMP_GEN / RECOMP_OBJ / RECOMP_DLL / RECOMP_SHIM
 OBJ = os.path.join(HERE, os.environ.get('RECOMP_OBJ', 'obj_eh_o1'))
 CLANG = os.environ.get('RECOMP_CLANG', r'C:\llvm-8.0.0\bin\clang.exe')      # scripts\setup.py sets RECOMP_CLANG (LLVM/clang 9.0.0)
-CFLAGS = ['-c', '-O1', '-w', '-fno-strict-aliasing', '-I', HERE, '-I', GEN]
+# RECOMP_TARGET=linux: a native Linux build (ELF objects, the game and the modules as .so files, the exe linked with the
+# system's SDL3 / FreeType / OpenSSL). The Win32 calls of the host sources come from plat/windows.h + plat_posix.c.
+TARGET_LINUX = os.environ.get('RECOMP_TARGET') == 'linux'
+PLAT_FLAGS = ['-fPIC', '-fvisibility=hidden', '-include', os.path.join(HERE, 'plat', 'plat_pre.h')] if TARGET_LINUX else []
+CFLAGS = ['-c', '-O1', '-w', '-fno-strict-aliasing', '-I', HERE, '-I', GEN] + PLAT_FLAGS
 HOST_SOURCES = ['hostrt.c', 'boot.c', 'nnsdk.c', 'libcxx.c', 'os_threads.c', 'nvn_stub.c', 'nvn_gl.c', 'nvn_vk.c', 'mx_translate.c', 'tex_decode.c', 'nnfs.c', 'clib.c', 'nntime.c', 'nnhid.c', 'nnpad_sdl.c', 'display.c', 'nnpl.c', 'nnfontll.c', 'nnmovie.c', 'nnmisc.c', 'nnaudio.c', 'nnro.c', 'nnmovie_mf.c', 'nniostream.c', 'nncxxrt.c', 'nncxxlib.c', 'nnlibc2.c',
                 'sdklift_rt.c', 'nnsdk2.c', 'nnmii.c', 'nnapplet.c', 'nnalbum.c', 'nnnet.c', 'nnfsdir.c', 'nnunwind.c', 'nvn_sdk.c', 'nvn_c4.c', 'nvn_c5.c', 'hitch.c', 'gfx_options.c', 'debug_mode.c', 'r1_state.c',
                 'loose_host.c', 'osk.c', 'nnldn.c', 'net_relay.c', 'rb_net.c']    # the new fighters' file layer (loose_files.c): off unless SSBU_CHARACTERS / SSBU_LOOSE_FILES is set
@@ -107,6 +111,16 @@ CXX_SOURCES = ([os.path.join(HERE, 'menu.cpp')] + [os.path.join(IMGUI, n) for n 
                if HAVE_IMGUI else [])
 CXX_FLAGS = ['-x', 'c++', '-std=c++14', '-O1', '-g', '-w', '-fno-exceptions', '-fno-rtti', '-D_CRT_SECURE_NO_WARNINGS', '-DIMGUI_USER_CONFIG="menu_imconfig.h"', '-I', HERE, '-I', IMGUI]
 LIBS = ['-luser32', '-lgdi32', '-lwinmm', '-lmfplat', '-lmfreadwrite', '-lmfuuid', '-lole32', '-lshlwapi', '-lshell32']
+if TARGET_LINUX:
+    def pkg(*args):
+        return subprocess.run(['pkg-config'] + list(args) + ['sdl3', 'freetype2', 'openssl', 'libavformat', 'libavcodec', 'libswscale', 'libswresample', 'libavutil'], capture_output=True, text=True, check=True).stdout.split()
+    _sdl_inc = HOST_FLAGS.index('-I', HOST_FLAGS.index('-Ddyn_sym_count=(*game_dyn_sym_count_p)'))      # the SDL3 VC package: the system's SDL3 instead
+    HOST_FLAGS = HOST_FLAGS[:_sdl_inc] + HOST_FLAGS[_sdl_inc + 2:] + PLAT_FLAGS + ['-I', os.path.join(HERE, 'plat')] + pkg('--cflags')
+    # plat_mf.c: the Media Foundation subset nnmovie_mf.c uses, on FFmpeg. Not in the Linux build yet: online play
+    # (net_relay.c: Winsock extensions, COM UPnP; net_off.c answers "off", as with SSBU_ONLINE unset)
+    HOST_SOURCES = [n for n in HOST_SOURCES if n != 'net_relay.c'] + ['plat_posix.c', 'plat_mf.c', 'net_off.c']
+    LIBS = pkg('--libs') + ['-lGL', '-lm', '-ldl', '-lpthread']      # libGL: the OpenGL front end is linked (not used)
+    HAVE_IMGUI, CXX_SOURCES = False, []                  # the settings menu (menu.cpp) is Win32 + D3D: menu_stub.c on Linux for now
 
 
 def debug_link_flags(out):
@@ -149,6 +163,8 @@ def link_dll(objs, dll, rsp, implib=True, fltused=False):
         objs = list(objs) + [nocrt_fltused(libdir)]
     with open(rsp, 'w') as f:
         f.write('\n'.join('"%s"' % o.replace('\\', '/') for o in objs))
+    if TARGET_LINUX:          # a .so: -z now resolves everything at load, as a DLL is
+        return subprocess.run([CLANG, '-shared', '@' + rsp, '-o', dll] + PLAT_FLAGS + ['-lm', '-Wl,-soname,' + os.path.basename(dll), '-Wl,-z,now'], capture_output=True, text=True, errors='replace')
     if not NOCRT:
         return subprocess.run([CLANG, '-shared', '@' + rsp, '-o', dll], capture_output=True, text=True, errors='replace')
     os.makedirs(libdir, exist_ok=True)
@@ -161,7 +177,7 @@ def compile_game_data(objdir, shim):
     """The DLL's shim and GAME_DATA_SOURCES (the dump-derived host tables and the lifted SDK code) -> objects."""
     os.makedirs(objdir, exist_ok=True)
     newest_h = max([os.path.getmtime(os.path.join(HERE, h)) for h in os.listdir(HERE) if h.endswith('.h')] + [os.path.getmtime(os.path.abspath(__file__))])
-    flags = ['-c', '-O1', '-w', '-fno-strict-aliasing', '-DSDKLIFT_GEN', '-I', HERE, '-I', GEN] + NOCRT_FLAGS + os.environ.get('RECOMP_DATA_CFLAGS', '').split()
+    flags = ['-c', '-O1', '-w', '-fno-strict-aliasing', '-DSDKLIFT_GEN', '-I', HERE, '-I', GEN] + NOCRT_FLAGS + PLAT_FLAGS + os.environ.get('RECOMP_DATA_CFLAGS', '').split()
     jobs, objs = [], []
     for src in [shim] + [os.path.join(HERE, n) for n in GAME_DATA_SOURCES]:
         if not os.path.exists(src):
@@ -182,7 +198,7 @@ def compile_game_data(objdir, shim):
 
 def build_game_dll():
     dll = os.path.join(HERE, GAME_DLL)
-    lib = dll[:-4] + '.lib'
+    lib = dll if TARGET_LINUX else dll[:-4] + '.lib'          # Linux: the exe links against the .so itself
     shim = os.path.join(HERE, os.environ.get('RECOMP_SHIM', 'game_shim_eh.c'))
     data_dir = OBJ + '_data'                 # beside OBJ, not in it (cmd_compile removes what it does not know there)
     data_objs = compile_game_data(data_dir, shim)
@@ -255,8 +271,11 @@ def cmd_link(host_only=False):
                 print('FAILED %s\n%s' % (os.path.basename(src), err))
     if failed:
         return 1
-    r = subprocess.run([CLANG] + objs + [game_import_lib(objdir), os.path.join(SDL_DIR, 'SDL3.lib')] + LIBS + debug_link_flags(out) + ['-o', out], capture_output=True, text=True, errors='replace')
-    if r.returncode == 0:
+    if TARGET_LINUX:
+        r = subprocess.run([CLANG] + objs + ['-L', HERE, '-l:' + GAME_DLL, '-Wl,-rpath,$ORIGIN'] + LIBS + ['-o', out], capture_output=True, text=True, errors='replace')
+    else:
+        r = subprocess.run([CLANG] + objs + [game_import_lib(objdir), os.path.join(SDL_DIR, 'SDL3.lib')] + LIBS + debug_link_flags(out) + ['-o', out], capture_output=True, text=True, errors='replace')
+    if r.returncode == 0 and not TARGET_LINUX:
         import shutil
         try:
             shutil.copy2(os.path.join(SDL_DIR, 'SDL3.dll'), os.path.join(HERE, 'SDL3.dll'))

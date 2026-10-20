@@ -138,6 +138,7 @@ static void parse_match(const char *s) {
 static void match_player_hook(Ctx *c, void *user);
 static ImportFn g_orig_player_record;
 static volatile LONG g_dm_setups;                      /* match set-ups seen (player 1's record built) */
+#ifdef _WIN32
 static LONG CALLBACK watch_veh(EXCEPTION_POINTERS *ep) {
     static volatile LONG shown;
     if (ep->ExceptionRecord->ExceptionCode != EXCEPTION_SINGLE_STEP) return EXCEPTION_CONTINUE_SEARCH;
@@ -200,6 +201,12 @@ static void watch_set(const uint64_t *addrs, int n) {
     CloseHandle(snap);
     printf("debug watch: %d watchpoints on %d threads\n", n, set); fflush(stdout);
 }
+#else
+static void watch_set(const uint64_t *addrs, int n) {      /* Linux build: no debug registers from user space without ptrace */
+    (void)addrs;
+    printf("debug watch: %d watchpoints requested: not available in the Linux build\n", n); fflush(stdout);
+}
+#endif
 
 /* research (R3, SSBU_RB_NET_WATCH=1 only): write watchpoints on up to 4 addresses from another file (fighter_host.c) */
 static uint64_t g_dw_a[4]; static int g_dw_n;

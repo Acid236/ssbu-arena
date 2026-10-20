@@ -70,8 +70,10 @@ static void vsync_test_key(void);
  *     its present and the next frame's (0 = replaced before it was shown). Histogram in the report and per 600 frames
  *     with SSBU_PACESTAT=1. This is the compositor model "the last picture presented before a vblank is what the next
  *     refresh shows" on MEASURED vblank times; it is not a camera. */
+#ifdef _WIN32
 typedef struct { HDC hDc; UINT hAdapter; LUID AdapterLuid; UINT VidPnSourceId; } KmtOpenAdapterFromHdc;
 typedef struct { UINT hAdapter; UINT hDevice; UINT VidPnSourceId; } KmtWaitVblank;
+#endif
 static SRWLOCK g_vb_lock = SRWLOCK_INIT;
 static CONDITION_VARIABLE g_vb_cv = CONDITION_VARIABLE_INIT;
 static volatile LONG64 g_vb_count, g_vb_qpc;           /* vblanks seen, time of the last one (under g_vb_lock for a consistent pair) */
@@ -105,6 +107,7 @@ static ULONG g_pc_ids[128];
 static int g_pc_n = -1, g_pc_on = 1;
 static uint8_t g_cpu_class[256], g_class_max;
 static volatile LONG64 g_pc_frames, g_pc_frames_slow;
+#ifdef _WIN32
 static void pcore_init(void) {
     ULONG len = 0;
     const char *e = getenv("SSBU_PCORES");
@@ -136,10 +139,16 @@ static void pcore_init(void) {
         SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &st, sizeof st);
     }
 }
+#else
+/* Linux build: CPU sets and ProcessPowerThrottling are Windows calls; the scheduler is left to choose the cores */
+static void pcore_init(void) { g_pc_n = 0; printf("display: CPU: the cores are left to the system (performance-core pinning is a Windows feature of this build)%c", 10); }
+#endif
 /* the calling thread: performance cores only (once per thread is enough; cheap to repeat) */
 void display_perf_thread(void) {
     if (g_pc_n < 0) pcore_init();
+#ifdef _WIN32
     if (g_pc_on && g_pc_n > 0) SetThreadSelectedCpuSets(GetCurrentThread(), g_pc_ids, (ULONG)g_pc_n);
+#endif
 }
 static void precise_wait_until(LONGLONG target, HANDLE timer) {
     LARGE_INTEGER now, due;
@@ -150,6 +159,16 @@ static void precise_wait_until(LONGLONG target, HANDLE timer) {
     if (due.QuadPart < 0) { if (timer && SetWaitableTimer(timer, &due, 0, NULL, NULL, FALSE)) WaitForSingleObject(timer, 100); else Sleep((DWORD)(left * 1000 / g_freq.QuadPart)); }
     for (QueryPerformanceCounter(&now); now.QuadPart < target; QueryPerformanceCounter(&now)) YieldProcessor();
 }
+#ifndef _WIN32
+/* Linux build: no vblank source yet (D3DKMT is Windows); vsync = auto / display then run on our own 60 Hz clock, as on a
+ * Windows PC without one */
+static DWORD WINAPI vblank_thread(LPVOID arg) {
+    (void)arg;
+    printf("display: no vblank source in the Linux build: the refresh clock stays our own 60 Hz clock, on-screen times are not measured%c", 10);
+    InterlockedExchange(&g_vb_state, -1);
+    return 0;
+}
+#else
 static DWORD WINAPI vblank_thread(LPVOID arg) {
     (void)arg;
     HMODULE gdi = LoadLibraryA("gdi32.dll");
@@ -202,6 +221,7 @@ static DWORD WINAPI vblank_thread(LPVOID arg) {
         WakeAllConditionVariable(&g_vb_cv);
     }
 }
+#endif
 static void pace_options(void) {
     if (g_pace_want >= 0) return;
     const char *e = getenv("SSBU_PACE"), *h = getenv("SSBU_PACE_HOLD"), *p = getenv("SSBU_PACE_PHASE");
@@ -260,6 +280,7 @@ void display_fit(int sw, int sh, int dw, int dh, int out[4]) {      /* the large
         if (memcmp(last, out, sizeof last) && said++ < 20) { memcpy(last, out, sizeof last); printf("display: picture %dx%d at %d,%d in %dx%d\n", out[2], out[3], out[0], out[1], dw, dh); fflush(stdout); }
     }
 }
+#ifdef _WIN32
 static void sizing_keep_aspect(HWND h, WPARAM edge, RECT *r) {
     RECT frame = {0, 0, 0, 0};
     AdjustWindowRectEx(&frame, (DWORD)GetWindowLongPtrA(h, GWL_STYLE), FALSE, (DWORD)GetWindowLongPtrA(h, GWL_EXSTYLE));
@@ -410,6 +431,53 @@ static DWORD WINAPI window_thread(LPVOID arg) {
     return 0;
 }
 
+#else
+/* Linux build: an SDL3 window (X11 or Wayland) made and serviced by its own thread, as the Win32 one is. Vulkan draws
+ * into it (nvn_vk.c makes the surface with SDL). The keyboard state that nnhid.c reads (GetAsyncKeyState, plat_posix.c)
+ * is SDL's, which this thread's event pumping keeps current; nnpad_sdl.c flushes the queue on its own thread, so the
+ * close request is caught by an event watch rather than read from the queue. */
+#include <SDL3/SDL.h>
+int oe_exit_request(void);                            /* nnmisc.c */
+static char g_title[96];
+static bool SDLCALL close_watch(void *user, SDL_Event *e) {
+    (void)user;
+    if (e->type == SDL_EVENT_WINDOW_CLOSE_REQUESTED || e->type == SDL_EVENT_QUIT) {
+        static volatile LONG once;
+        if (InterlockedExchange(&once, 1)) return true;
+        printf("\nwindow closed by the user after %lld frames\n", (long long)g_frames);
+        if (!oe_exit_request()) report_and_exit(0);
+    }
+    return true;
+}
+static DWORD WINAPI window_thread(LPVOID arg) {
+    (void)arg;
+    SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, "1");
+    SDL_SetHint(SDL_HINT_VIDEO_ALLOW_SCREENSAVER, "1");
+    if (!SDL_InitSubSystem(SDL_INIT_VIDEO)) { printf("display: SDL video cannot start: %s\n", SDL_GetError()); fflush(stdout); ExitProcess(5); }
+    const GfxOptions *go = gfx_options();
+    int cw = go->width, ch = go->height;
+    SDL_WindowFlags flags = SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE;
+    if (go->window_mode) {
+        const SDL_DisplayMode *dm = SDL_GetDesktopDisplayMode(SDL_GetPrimaryDisplay());
+        if (dm) { cw = dm->w; ch = dm->h; }
+        flags |= go->window_mode == 2 ? SDL_WINDOW_FULLSCREEN : SDL_WINDOW_BORDERLESS;
+    }
+    printf("display: window %s, client %dx%d (graphics.ini), SDL video driver %s\n", go->window_mode == 2 ? "fullscreen" : go->window_mode ? "borderless" : "windowed", cw, ch, SDL_GetCurrentVideoDriver());
+    snprintf(g_title, sizeof g_title, "%s", getenv("SSBU_TITLE") ? getenv("SSBU_TITLE") : "SSBU native (study build)");
+    SDL_Window *w = SDL_CreateWindow(g_title, cw, ch, flags);
+    if (!w) { printf("display: SDL_CreateWindow failed: %s\n", SDL_GetError()); fflush(stdout); ExitProcess(5); }
+    SDL_AddEventWatch(close_watch, NULL);
+    g_hwnd = (HWND)w;
+    plat_game_window = (HWND)w;
+    InterlockedExchange(&g_ready, 1);
+    for (;;) {
+        SDL_Event e;
+        if (SDL_WaitEventTimeout(&e, 8)) { while (SDL_PollEvent(&e)) {} }       /* the watch saw them; the keyboard state is current */
+        plat_window_service();
+    }
+    return 0;
+}
+#endif
 /* Signals the guest's vsync event 60 times per second. */
 static DWORD WINAPI vsync_thread(LPVOID arg) {
     (void)arg;
@@ -483,6 +551,10 @@ static DWORD WINAPI vsync_thread(LPVOID arg) {
     }
 }
 static void vsync_test_key(void) {
+#ifndef _WIN32
+    {   static int said; if (!said && getenv("SSBU_AUTOKEY")) { said = 1; printf("display: SSBU_AUTOKEY is not available in the Linux build (use SSBU_SEQ)\n"); } }
+    return;
+#endif
     {
         /* Test aid: SSBU_AUTOKEY=<letter>,<first second>,<every n seconds> presses a key now and then, so a run without a person can get
          * past "press any button". Only while this window is the foreground window, so the key never reaches another program. */

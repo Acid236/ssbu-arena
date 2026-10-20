@@ -16,6 +16,9 @@
  * It only reads: nothing is unblocked or killed. Threads are suspended one at a time for the few microseconds of the unwind;
  * nothing is printed or allocated while one is suspended. */
 #include <tlhelp32.h>
+#ifndef _WIN32
+#include <dirent.h>
+#endif
 const char *guest_thread_name_of(DWORD tid);       /* os_threads.c */
 int diag_report_path(char *out, size_t size, const char *suffix);     /* hostrt.c */
 int diag_minidump(EXCEPTION_POINTERS *ep, const char *why);
@@ -35,6 +38,7 @@ static void wdp(const char *fmt, ...) {
     if (g_wd_fp) fputs(b, g_wd_fp);
 }
 static int wd_sym_cmp(const void *a, const void *b) { const WdSym *x = a, *y = b; return x->rva < y->rva ? -1 : x->rva > y->rva; }
+#ifdef _WIN32
 static void wd_map_load(void) {                    /* the linker's map of this exe, if it is there: "<exe without .exe>.map" */
     char path[MAX_PATH + 8], ln[1024], t1[64], t2[512], t3[64];
     unsigned long long base = 0x140000000ull;
@@ -116,6 +120,7 @@ static int wd_walk(CONTEXT *ctx, uint64_t *pcs, int max) {
     } __except (1) { }
     return n;
 }
+#endif
 static const char *wd_tname(DWORD tid, char *buf, size_t n) {
     const char *g = tid == g_render_tid ? "render (host)" : tid == g_wd_main_tid ? "the process's first thread (boot.c main: waits for the game)" : guest_thread_name_of(tid);
     if (g) return g;
@@ -125,8 +130,13 @@ static const char *wd_tname(DWORD tid, char *buf, size_t n) {
 }
 static void wd_owner(const char *name, CRITICAL_SECTION *cs) {
     char tb[48];
+#ifdef _WIN32
     DWORD o = (DWORD)(uintptr_t)cs->OwningThread;
     if (o) wdp("  lock %s: OWNED by thread %lu (%s), recursion %ld, lock count %ld\n", name, (unsigned long)o, wd_tname(o, tb, sizeof tb), (long)cs->RecursionCount, (long)cs->LockCount);
+#else
+    DWORD o = (DWORD)cs->__data.__owner;                                   /* glibc: the owner's tid */
+    if (o) wdp("  lock %s: OWNED by thread %lu (%s), recursion %ld\n", name, (unsigned long)o, wd_tname(o, tb, sizeof tb), (long)cs->__data.__count);
+#endif
     else wdp("  lock %s: free\n", name);
 }
 unsigned long nvn_front_present_tid(void);         /* nvn_gl.c */
@@ -158,6 +168,7 @@ static void wd_dump(double stall_s, LONG64 tries_since) {
         }
         if (!any) wdp("  waits of ours (stage / library / pipeline being made by another thread, queues): none entered\n");
     }
+#ifdef _WIN32
     for (int pass = 0; pass < 2; pass++) {         /* CPU time of every thread, twice, 300 ms apart: who is running and who is blocked */
         HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
         THREADENTRY32 te;
@@ -220,6 +231,44 @@ static void wd_dump(double stall_s, LONG64 tries_since) {
             CloseHandle(h);
         }
     }
+#else
+    /* Linux build: every thread from /proc/self/task, its name, state and CPU time used in 300 ms (no call stacks) */
+    {
+        long hz = sysconf(_SC_CLK_TCK);
+        for (int pass = 0; pass < 2; pass++) {
+            DIR *d = opendir("/proc/self/task");
+            struct dirent *de;
+            if (!d) break;
+            while ((de = readdir(d))) {
+                DWORD tid = (DWORD)strtoul(de->d_name, NULL, 10);
+                if (!tid || tid == me) continue;
+                char sp[96], buf[512];
+                snprintf(sp, sizeof sp, "/proc/self/task/%lu/stat", (unsigned long)tid);
+                FILE *f = fopen(sp, "r");
+                if (!f) continue;
+                size_t k = fread(buf, 1, sizeof buf - 1, f); fclose(f); buf[k] = 0;
+                const char *rp = strrchr(buf, ')');
+                unsigned long long ut = 0, st2 = 0; char state = '?'; int prio = 0;
+                if (rp) sscanf(rp + 2, "%c %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u %llu %llu %*d %*d %d", &state, &ut, &st2, &prio);
+                ULONGLONG cpu = (ut + st2) * 10000000ull / (ULONGLONG)(hz > 0 ? hz : 100);
+                int i;
+                for (i = 0; i < nt && th[i].tid != tid; i++) {}
+                if (i == nt) { if (pass || nt == 400) continue; th[nt].tid = tid; th[nt].nfr = 0; nt++; th[i].cpu0 = th[i].cpu1 = cpu; }
+                else th[i].cpu1 = cpu;
+                th[i].prio = state;
+            }
+            closedir(d);
+            if (!pass) Sleep(300);
+        }
+        wdp("  threads: %d (the watchdog's own not listed); \"cpu\" = CPU time used in 300 ms: 0.0 means blocked or idle; no call stacks in the Linux build\n", nt);
+        for (int i = 0; i < nt; i++) wdp("  thread %lu  %s  state %c  cpu %.1f ms of 300\n", (unsigned long)th[i].tid, wd_tname(th[i].tid, tb, sizeof tb), (char)th[i].prio, (double)(th[i].cpu1 - th[i].cpu0) / 10000.0);
+        (void)ab;
+        {   void os_wait_report(FILE *out);           /* os_threads.c: what each game thread waits on (no call stacks here) */
+            os_wait_report(stdout);
+            if (g_wd_fp) os_wait_report(g_wd_fp);
+        }
+    }
+#endif
     wdp("nvn_vk_watchdog: ======== end of the report%s%s ========\n\n", g_wd_fp ? "; also appended to " : "", g_wd_fp ? path : "");
     fflush(stdout);
     if (g_wd_fp) { fclose(g_wd_fp); g_wd_fp = NULL; }
@@ -232,6 +281,9 @@ static void wd_dump(double stall_s, LONG64 tries_since) {
  * length, where the render thread was in its present, whether a fight was near, the workers' queues, the page faults
  * and the CPU time of the process during the gap. Gaps while the window is minimised are not written. */
 unsigned long nvn_front_present_tid(void);         /* nvn_gl.c */
+#ifndef _WIN32
+static void wd_stall_sample(char *out, size_t cap) { snprintf(out, cap, "    (no call stacks in the Linux build)\n"); }
+#else
 static void wd_stall_sample(char *out, size_t cap) {
     DWORD tids[2] = {(DWORD)nvn_front_present_tid(), g_render_tid};
     size_t at = 0;
@@ -253,6 +305,7 @@ static void wd_stall_sample(char *out, size_t cap) {
         if (at + 2 < cap) { out[at++] = '\n'; out[at] = 0; }
     }
 }
+#endif
 static void wd_stall_write(double ms, LONG64 frame, const char *sample, int where, int fight, DWORD faults, double cpu_ms, LONG64 holds) {
     static int lines;
     char path[MAX_PATH + 16];

@@ -10,6 +10,12 @@
  * put in afterwards from the linker's map (tests\prof15_report.py). CPU ms per thread over the window is printed so
  * that sample shares can be turned into ms: a sample of a thread that is waiting has its innermost frame in ntdll /
  * win32u and is told apart there. No game content in this file. */
+#ifndef _WIN32
+#include <stdio.h>
+#include <stdlib.h>
+/* Linux build: the sampler suspends threads and reads their contexts with Windows calls; perf does this job here */
+void prof15_start(void) { if (getenv("SSBU_PROF15")) printf("prof15: SSBU_PROF15 is not available in the Linux build (use perf record -g -p <pid>)\n"); }
+#else
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -223,3 +229,5 @@ void prof15_start(void) {
     const char *spec = getenv("SSBU_PROF15");
     if (spec && *spec) CloseHandle(CreateThread(NULL, 0, p15_thread, (LPVOID)spec, 0, NULL));
 }
+
+#endif

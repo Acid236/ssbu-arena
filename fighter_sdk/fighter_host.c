@@ -725,6 +725,7 @@ static void __declspec(noinline) fs_compare(Ctx *c, FsFiber *ff, int partial) {
  * abandoned frames are lifted code or source without resources): during the ORIGINAL's run the function cannot be
  * tested on the made-up agent (reported as such), during the SOURCE's run it is a difference. */
 static FsFiber *g_fs_guard_ff; static int g_fs_guard_phase;      /* 1 = the original runs, 2 = the source runs */
+#ifdef _WIN32      /* Linux build: no fault guard; a fault in the offline test ends the run */
 static void fs_guard_resume(CONTEXT *x, jmp_buf jb, int value) {
     _JUMP_BUFFER *j = (_JUMP_BUFFER *)jb;
     x->Rbx = j->Rbx; x->Rsp = j->Rsp; x->Rbp = j->Rbp; x->Rsi = j->Rsi; x->Rdi = j->Rdi;
@@ -741,10 +742,13 @@ static LONG CALLBACK fs_guard(EXCEPTION_POINTERS *ep) {
     else { if (!ff->bad) snprintf(ff->why, sizeof ff->why, "the source faults (reads or writes address %llx) where the original does not", (unsigned long long)ep->ExceptionRecord->ExceptionInformation[1]); ff->bad = 1; fs_guard_resume(ep->ContextRecord, ff->jb, 1); }
     return EXCEPTION_CONTINUE_EXECUTION;
 }
+#endif
 
 static void fighter_synth(Ctx *c, NroModule *m, FsMod *fm, FsFiber *ff) {
     Ctx saved = *c;
+#ifdef _WIN32
     if (g_fs_offline && !g_fs_guard_ff) { g_fs_guard_ff = ff; AddVectoredExceptionHandler(1, fs_guard); }
+#endif
     if (!ff->ev) ff->ev = malloc(sizeof(FsEvent) * FS_MAX_EVENTS);
     for (int i = 0; i < fm->ovr_count; i++) {
         ImportFn lifted = fs_lifted(m, m->info->base + fm->ovr[i].off);

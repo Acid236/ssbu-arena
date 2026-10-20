@@ -162,6 +162,7 @@ void cxxrt_guest_delete(Ctx *c, uint64_t p) {            /* the game's own opera
     c->x[0] = x0;
 }
 void cxxrt_print_guest_stack(void) {
+#ifdef _WIN32
     CONTEXT ctx;
     RtlCaptureContext(&ctx);
     printf("guest call stack (innermost first):\n");
@@ -176,6 +177,16 @@ void cxxrt_print_guest_stack(void) {
         RtlVirtualUnwind(UNW_FLAG_NHANDLER, base, ctx.Rip, rf, &ctx, &hd, &est, NULL);
         if (!ctx.Rip) break;
     }
+#else
+    uintptr_t pcs[600];
+    int n = plat_backtrace(pcs, 600);
+    printf("guest call stack (innermost first):\n");
+    uint64_t last = 0;
+    for (int i = 0, shown = 0; i < n && shown < 48; i++) {
+        uint64_t g = guest_function_of(pcs[i]);
+        if (g && g != last) { printf("  f_%llx\n", (unsigned long long)g); trace_printf("  f_%llx\n", (unsigned long long)g); shown++; last = g; }
+    }
+#endif
 }
 static void fatal(Ctx *c, const char *fmt, ...) {
     char msg[768];

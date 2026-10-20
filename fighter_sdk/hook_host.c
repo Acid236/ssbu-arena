@@ -263,7 +263,11 @@ static int hk_attach(int id, uint64_t addr) {
     uint64_t head; memcpy(&head, s->head, 8);
     l->site = s; l->mem = m; l->data = d; l->addr = addr; l->orig = (ImportFn)(void *)(uintptr_t)head;
     /* data: fn +0, user +8, calls +16.  code: +0 inc qword [calls]; +7 mov rdx,[user]; +14 jmp [fn] */
+#ifdef _WIN32
     static const uint8_t code[24] = {0x48, 0xFF, 0x05, 0, 0, 0, 0,  0x48, 0x8B, 0x15, 0, 0, 0, 0,  0xFF, 0x25, 0, 0, 0, 0,  0xCC, 0xCC, 0xCC, 0xCC};
+#else       /* Linux build: the second argument (user) goes in rsi (System V), not rdx: +7 is mov rsi,[user] */
+    static const uint8_t code[24] = {0x48, 0xFF, 0x05, 0, 0, 0, 0,  0x48, 0x8B, 0x35, 0, 0, 0, 0,  0xFF, 0x25, 0, 0, 0, 0,  0xCC, 0xCC, 0xCC, 0xCC};
+#endif
     memcpy(m, code, 24);
     int32_t r1 = (int32_t)(d + 16 - (m + 7)), r2 = (int32_t)(d + 8 - (m + 14)), r3 = (int32_t)(d - (m + 20));
     memcpy(m + 3, &r1, 4); memcpy(m + 10, &r2, 4); memcpy(m + 16, &r3, 4);
