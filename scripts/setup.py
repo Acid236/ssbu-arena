@@ -943,6 +943,9 @@ def step_check(cx):
         say('  WARNING: the C++ runtime self-test reports failures (logs/check_cxxrt.log)')
     # the lifter's differential test against the Unicorn emulator, on a sample of the instruction shapes of main
     py, w = sys.executable, cx.work
+    if not getattr(cx.a, 'full_check', False):
+        say('  differential test of the translator: skipped (it is the same on every PC; --full-check runs it)')
+        return
     if not cx.tools.get('msvc', True):
         say('  differential test: skipped (it needs the MSVC Build Tools and the Windows SDK, which this PC does not have)')
         return
@@ -1001,6 +1004,8 @@ def main():
     ap.add_argument('--nocrt', action='store_true', help='build the game libraries with LLVM alone (the exe is still built here)')
     ap.add_argument('--redo', help='repeat this step')
     ap.add_argument('--from', dest='from_step', help='repeat this step and all after it')
+    ap.add_argument('--full-check', action='store_true', help='the check step also runs the lifter\'s differential test against '
+                    'Unicorn (minutes on a fast PC, up to an hour on a weak one; it tests the translator, the same everywhere)')
     ap.add_argument('--only', help='run only this step')
     ap.add_argument('--dry-run', action='store_true', help='check the tools and the dump (step deps), then list what would run')
     ap.add_argument('--status', action='store_true'), ap.add_argument('--steps', action='store_true'), ap.add_argument('--run', action='store_true')

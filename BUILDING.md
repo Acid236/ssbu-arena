@@ -208,7 +208,7 @@ fix the cause and run the same command again.
 | compile (1,161 files, 511 MB DLL) | 27 min 22 s |
 | nro (98 modules) | 15 min 20 s |
 | link (glslang shim + 44 host files) | 34 s |
-| check (SDK self-test 0 failures, pad self-test 49/49, differential test 32,043/32,043 identical) | about 1 min |
+| check (SDK self-test 0 failures, pad self-test 49/49, C++ runtime self-test; the differential test of the translator only with `--full-check`) | under 1 min |
 | **Total** | **about 45 min** |
 
 Disk: `build/` is about 7 GB (generated C 3.8 GB, objects 1.6 GB, libraries 1.2 GB), plus shader caches that grow as you
