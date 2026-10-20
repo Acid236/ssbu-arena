@@ -593,16 +593,37 @@ void report_and_exit(int code) {
     ExitProcess((UINT)code);
 }
 
+#ifndef _WIN32
+/* Linux build: the guest functions on the host stack of this thread (plat_backtrace), innermost first. */
+static void print_host_guest_stack(void) {
+    uintptr_t pcs[400];
+    int n = plat_backtrace(pcs, 400);
+    uint64_t last = 0;
+    printf("guest call stack (innermost first):\n");
+    for (int i = 0, shown = 0; i < n && shown < 40; i++) {
+        uint64_t g = guest_function_of(pcs[i]);
+        if (g && g != last) { printf("  f_%llx\n", (unsigned long long)g); shown++; last = g; }
+    }
+}
+#endif
 void guest_trap(const char *what, uint64_t addr) {
     printf("\nGUEST TRAP: %s (0x%llx)\n", what, (unsigned long long)addr);
     trace_printf("GUEST TRAP: %s (0x%llx)\n", what, (unsigned long long)addr);
+#ifdef _WIN32
     RaiseException(0xE0000001, 0, 0, NULL);
+#else
+    print_host_guest_stack();
+#endif
     report_and_exit(2);
 }
 void guest_unimpl(uint64_t pc, uint32_t insn, const char *what) {
     printf("\nUNTRANSLATED INSTRUCTION at 0x%llx: %08x (%s)\n", (unsigned long long)pc, insn, what);
     trace_printf("UNTRANSLATED INSTRUCTION at 0x%llx: %08x (%s)\n", (unsigned long long)pc, insn, what);
+#ifdef _WIN32
     RaiseException(0xE0000002, 0, 0, NULL);
+#else
+    print_host_guest_stack();
+#endif
     report_and_exit(3);
 }
 void guest_svc(Ctx *c, uint32_t number) { (void)c; guest_trap("svc (direct kernel call)", number); }
@@ -615,13 +636,22 @@ int diag_report_path(char *out, size_t size, const char *suffix) {
     char exe[MAX_PATH];
     DWORD n = GetModuleFileNameA(NULL, exe, MAX_PATH);
     if (n <= 4 || n >= MAX_PATH) return 0;
+#ifdef _WIN32
     exe[n - 4] = 0;                                 /* without ".exe" */
+#else
+    if (!_stricmp(exe + n - 4, ".exe")) exe[n - 4] = 0;      /* Linux build: the exe has no ".exe" */
+#endif
     const char *dir = getenv("SSBU_REPORT_DIR"), *base = strrchr(exe, '\\');
     int k = dir && dir[0] ? snprintf(out, size, "%s\\%s%s", dir, base ? base + 1 : exe, suffix) : snprintf(out, size, "%s%s", exe, suffix);
     return k > 0 && (size_t)k < size;
 }
+#ifdef _WIN32
 static const char *base_name(const char *path) { const char *s = strrchr(path, '\\'); return s ? s + 1 : path; }     /* the reports name files, not folders: logs get posted */
+#else
+static const char *base_name(const char *path) { const char *s = strrchr(path, '/'); return s ? s + 1 : path; }      /* Linux build: '/' separates folders */
+#endif
 
+#ifdef _WIN32
 /* SSBU_MINIDUMP: not set = a minidump when the game crashes; 0 = none at all; "freeze" = also when the freeze watchdog
  * reports a stall of 5 s or more (never for the 1 s reports: the start-up white screen and the opening movie trip those on a
  * normal start); "full" = the whole memory instead of the stacks and what they point to (several GB). Joined: freeze,full. */
@@ -835,6 +865,131 @@ static LONG WINAPI crash_filter(EXCEPTION_POINTERS *ep) {
     report_and_exit(4);
     return EXCEPTION_EXECUTE_HANDLER;
 }
+#else
+#include <signal.h>
+#include <ucontext.h>
+void plat_symbolize(uintptr_t pc, char *out, size_t n);
+int plat_current_fiber_stack(uintptr_t *lo, uintptr_t *hi);     /* plat_posix.c: host stack of the running fiber, 0 = thread stack */
+/* Linux build: no minidump (a Windows format; dbghelp does not exist here). The text report (_crash.txt, _freeze.txt) is
+ * written as on Windows; for a debugger, run the game under gdb or let the system keep a core dump (coredumpctl). */
+int diag_minidump(EXCEPTION_POINTERS *ep, const char *why) {
+    (void)ep;
+    const char *v = getenv("SSBU_MINIDUMP");
+    if ((v && v[0] == '0') || (!strcmp(why, "freeze") && !(v && strstr(v, "freeze")))) return 0;
+    static int said;
+    if (!said++) { printf("minidump: not written: minidumps are Windows-only; the text report has the state (for a debugger: gdb, or coredumpctl)\n"); fflush(stdout); }
+    return 0;
+}
+int diag_dump_helper(int argc, char **argv) { (void)argc; (void)argv; return 2; }
+/* The modules of the process with their address ranges, from /proc/self/maps (file names only, no folders). */
+static void diag_modules(FILE *f) {
+    FILE *m = fopen("/proc/self/maps", "r");
+    if (!m) return;
+    char line[600], last[300] = "";
+    fprintf(f, "modules:\n");
+    while (fgets(line, sizeof line, m)) {
+        unsigned long a, b, off; char perm[8], path[512] = "";
+        if (sscanf(line, "%lx-%lx %7s %lx %*s %*s %511s", &a, &b, perm, &off, path) < 4 || path[0] != '/' || perm[2] != 'x') continue;
+        const char *bn = base_name(path);
+        if (!strcmp(bn, last)) continue;
+        snprintf(last, sizeof last, "%s", bn);
+        fprintf(f, "  %016lx-%016lx  %s\n", a - off, b, bn);
+    }
+    fclose(m);
+}
+/* The crash report also goes to <exe name>_crash.txt next to the exe (appended; SSBU_REPORT_DIR: there), as on Windows.
+ * Register numbers of mcontext_t.gregs on x86-64 (sys/ucontext.h names them only with _GNU_SOURCE). */
+enum { G_R8, G_R9, G_R10, G_R11, G_R12, G_R13, G_R14, G_R15, G_RDI, G_RSI, G_RBP, G_RBX, G_RDX, G_RAX, G_RCX, G_RSP, G_RIP, G_EFL, G_CSGSFS, G_ERR };
+static void crash_file_report(int sig, siginfo_t *si, ucontext_t *u) {
+    char path[2 * MAX_PATH];
+    if (!diag_report_path(path, sizeof path, "_crash.txt")) return;
+    FILE *f = fopen(path, "ab");
+    if (!f) return;
+    const greg_t *g = u->uc_mcontext.gregs;
+    SYSTEMTIME st; GetLocalTime(&st);
+    DWORD tid = GetCurrentThreadId();
+    const char *tn = guest_thread_name_of(tid);
+    char sym[400];
+    plat_symbolize((uintptr_t)g[G_RIP], sym, sizeof sym);
+    fprintf(f, "=== %04d-%02d-%02d %02d:%02d:%02d  HOST SIGNAL %d (%s) at %p (%s)\n", st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond,
+            sig, strsignal(sig), (void *)g[G_RIP], sym);
+    if (sig == SIGSEGV || sig == SIGBUS) fprintf(f, "  %s address %p\n", (g[G_ERR] & 2) ? "writing" : "reading", si->si_addr);
+    fprintf(f, "thread %lu (%s), on logical processor %lu\n", (unsigned long)tid, tn ? tn : "not a guest thread, or the main thread", (unsigned long)GetCurrentProcessorNumber());
+    fprintf(f, "host registers: rax %016llx rbx %016llx rcx %016llx rdx %016llx\n                rsi %016llx rdi %016llx rbp %016llx rsp %016llx\n"
+               "                r8  %016llx r9  %016llx r10 %016llx r11 %016llx\n                r12 %016llx r13 %016llx r14 %016llx r15 %016llx\n",
+            g[G_RAX], g[G_RBX], g[G_RCX], g[G_RDX], g[G_RSI], g[G_RDI], g[G_RBP], g[G_RSP],
+            g[G_R8], g[G_R9], g[G_R10], g[G_R11], g[G_R12], g[G_R13], g[G_R14], g[G_R15]);
+    MEMORY_BASIC_INFORMATION mbi;       /* a stack overflow leaves rsp on a guard page: reading it would fault again */
+    uintptr_t rsp = (uintptr_t)g[G_RSP];
+    if (VirtualQuery((void *)(rsp - 0x40), &mbi, sizeof mbi) && mbi.State == MEM_COMMIT && !(mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS))) {
+        fprintf(f, "host stack from rsp-0x40:\n");
+        const uint64_t *s = (const uint64_t *)(rsp - 0x40);
+        uintptr_t end = (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
+        for (int i = 0; i < 48 && (uintptr_t)(s + i + 1) <= end; i++)
+            fprintf(f, "  rsp%+4d  %016llx%s", (i - 8) * 8, (unsigned long long)s[i], i % 2 ? "\n" : "");
+        fprintf(f, "\n");
+    }
+    Ctx *c = t_cur_ctx;
+    if (c) {
+        fprintf(f, "last guest function entered: f_%llx\nguest registers:\n", (unsigned long long)c->fn);
+        for (int i = 0; i < 31; i++) fprintf(f, "  x%-2d %016llx%s", i, (unsigned long long)c->x[i], i % 3 == 2 ? "\n" : "");
+        fprintf(f, "  sp  %016llx\n", (unsigned long long)c->x[31]);
+    }
+    fprintf(f, "guest call stack (innermost first):\n");
+    uintptr_t pcs[400];
+    int n = plat_backtrace(pcs, 400);
+    uint64_t last = 0;
+    for (int i = 0, shown = 0; i < n && shown < 40; i++) {
+        uint64_t gf = guest_function_of(pcs[i]);
+        if (gf && gf != last) { fprintf(f, "  f_%llx\n", (unsigned long long)gf); shown++; last = gf; }
+    }
+    diag_modules(f);
+    fprintf(f, "\n");
+    fclose(f);
+}
+static void crash_signal(int sig, siginfo_t *si, void *uc) {
+    ucontext_t *u = uc;
+    uintptr_t rip = (uintptr_t)u->uc_mcontext.gregs[16 /* REG_RIP */], rsp = (uintptr_t)u->uc_mcontext.gregs[15 /* REG_RSP */], bad = (uintptr_t)si->si_addr;
+    printf("\nHOST SIGNAL %d (%s) at address %p\n", sig, sig == SIGSEGV ? "segmentation fault" : sig == SIGBUS ? "bus error" : sig == SIGILL ? "illegal instruction" : sig == SIGFPE ? "arithmetic" : "?", si->si_addr);
+    {   char sym[400];
+        plat_symbolize(rip, sym, sizeof sym);
+        printf("  host instruction %p in %s; host stack pointer %p, thread %lu\n", (void *)rip, sym, (void *)rsp, (unsigned long)GetCurrentThreadId());
+        uintptr_t lo = 0, hi = 0;
+        if (plat_current_fiber_stack(&lo, &hi)) printf("  running on a host FIBER stack %p..%p (fault %s it, stack pointer %s it)\n", (void *)lo, (void *)hi,
+                                                        bad >= lo && bad < hi ? "inside" : "outside", rsp >= lo && rsp < hi ? "inside" : "OUTSIDE");
+        else printf("  running on the thread's own stack\n");
+        FILE *m = fopen("/proc/self/maps", "r");          /* the mappings around the fault address */
+        char line[512], prev[512] = "";
+        int shown = 0;
+        while (m && fgets(line, sizeof line, m)) {
+            unsigned long a, b;
+            if (sscanf(line, "%lx-%lx", &a, &b) != 2) continue;
+            if (b > bad && !shown) {
+                printf("  mapping before the fault: %s", prev[0] ? prev : "(none)\n");
+                printf("  %s %s", a <= bad ? "fault INSIDE:" : "next mapping: ", line);
+                shown = 1;
+            }
+            snprintf(prev, sizeof prev, "%s", line);
+        }
+        if (m) fclose(m);
+        if (!shown) printf("  the fault address is above every mapping\n");
+    }
+    dump_guest_registers();
+    print_host_guest_stack();
+    fflush(stdout);
+    crash_file_report(sig, si, u);                  /* the console report is out: a fault in what follows cannot take it away */
+    diag_minidump(NULL, "crash");
+    report_and_exit(4);
+}
+static void install_crash_handler(void) {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_sigaction = crash_signal;
+    sa.sa_flags = SA_SIGINFO | SA_RESETHAND;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGSEGV, &sa, NULL); sigaction(SIGBUS, &sa, NULL); sigaction(SIGILL, &sa, NULL); sigaction(SIGFPE, &sa, NULL);
+}
+#endif
 
 /* ---------------------------------------------------------------- loader */
 void runtime_init(const char *elf, const char *trace_path) {
@@ -854,8 +1009,12 @@ void runtime_init(const char *elf, const char *trace_path) {
                (void *)g_by_host[0].fn, (void *)g_by_host[fn_table_count - 1].fn);
     }
     g_trace = fopen(trace_path, "w");
+#ifdef _WIN32
     SetUnhandledExceptionFilter(crash_filter);
     (void)minidump_mode();                          /* read SSBU_MINIDUMP now: the crash path should not have to */
+#else
+    install_crash_handler();
+#endif
 
     void *mem = VirtualAlloc((void *)GUEST_BASE, IMAGE_SIZE, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
     if (mem != (void *)GUEST_BASE) { fprintf(stderr, "cannot map guest image at 0x%llx\n", GUEST_BASE); exit(1); }
@@ -1021,7 +1180,11 @@ static void audit_hostfn(const char *name, ImportFn fn) {
 
 static void audit_write(const char *path, int with_counts) {
     FILE *f = fopen(path, "w");
+#ifdef _WIN32
     uintptr_t base = (uintptr_t)GetModuleHandleA(NULL);
+#else
+    uintptr_t base = plat_module_base(NULL);
+#endif
     if (!f) { printf("audit: cannot write %s\n", path); return; }
     fprintf(f, "# list\tname\tcalls\thandler_rva\tkind\tx0\tdata_redirect\n");
     for (int i = 0; i < dyn_sym_count; i++) {

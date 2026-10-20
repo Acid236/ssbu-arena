@@ -60,6 +60,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <windows.h>
+#ifndef _WIN32
+#include <sys/wait.h>
+#endif
 #include "sdklift.h"
 
 #define A0 (c->x[0])
@@ -187,6 +190,7 @@ typedef struct {
     wchar_t text[SWKBD_MAX_CHARS + 2];
 } KbdDialog;
 
+#ifdef _WIN32
 #define IDC_EDIT 1001
 #define IDC_INFO 1002
 static INT_PTR CALLBACK kbd_proc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) {
@@ -250,6 +254,43 @@ static int kbd_run_dialog(KbdDialog *k) {
     if (r == -1) { printf("nn::swkbd: the text dialog could not be created (error %lu); answered as cancelled\n", GetLastError()); return 0; }
     return (int)r;
 }
+#else
+/* Linux build: the desktop's own text prompt (kdialog, else zenity), run as a child process. No prompt program, or
+ * closed without OK: cancelled. */
+static int kbd_run_dialog(KbdDialog *k) {
+    char info[1800], init[1600], cmd[4096], out[2048];
+    char hdr[600], sub[600], guide[600];
+    WideCharToMultiByte(CP_UTF8, 0, k->header, -1, hdr, sizeof hdr, NULL, NULL);
+    WideCharToMultiByte(CP_UTF8, 0, k->sub, -1, sub, sizeof sub, NULL, NULL);
+    WideCharToMultiByte(CP_UTF8, 0, k->guide, -1, guide, sizeof guide, NULL, NULL);
+    WideCharToMultiByte(CP_UTF8, 0, k->initial, -1, init, sizeof init, NULL, NULL);
+    snprintf(info, sizeof info, "%s%s%s%s%s", hdr, hdr[0] && sub[0] ? "\n" : "", sub, (hdr[0] || sub[0]) && guide[0] ? "\n" : "", guide);
+    if (!info[0]) snprintf(info, sizeof info, "Enter text");
+    /* single quotes around each argument; a quote inside becomes '\'' */
+    char qi[3700], qt[3300];
+    char *d = qi; for (const char *p = info; *p && d < qi + sizeof qi - 6; p++) { if (*p == '\'') { memcpy(d, "'\\''", 4); d += 4; } else *d++ = *p; } *d = 0;
+    d = qt; for (const char *p = init; *p && d < qt + sizeof qt - 6; p++) { if (*p == '\'') { memcpy(d, "'\\''", 4); d += 4; } else *d++ = *p; } *d = 0;
+    int kd = system("command -v kdialog >/dev/null 2>&1") == 0, zn = !kd && system("command -v zenity >/dev/null 2>&1") == 0;
+    if (kd) snprintf(cmd, sizeof cmd, "kdialog --title 'Software keyboard (SSBU native)' %s '%s' '%s'", k->password ? "--password" : "--inputbox", qi, k->password ? "" : qt);
+    else if (zn) snprintf(cmd, sizeof cmd, "zenity --entry --title='Software keyboard (SSBU native)' --text='%s' --entry-text='%s' %s", qi, qt, k->password ? "--hide-text" : "");
+    if (kd || zn) for (;;) {
+        FILE *f = popen(cmd, "r");
+        if (!f) return 0;
+        size_t n = fread(out, 1, sizeof out - 1, f);
+        int st = pclose(f);
+        out[n] = 0;
+        if (n && out[n - 1] == '\n') out[--n] = 0;
+        if (st == -1 || !WIFEXITED(st) || WEXITSTATUS(st) != 0) return 0;      /* cancelled or closed */
+        k->text[0] = 0;
+        MultiByteToWideChar(CP_UTF8, 0, out, -1, k->text, SWKBD_MAX_CHARS + 1);
+        k->text[SWKBD_MAX_CHARS] = 0;
+        if (k->max_len > 0 && (int)wcslen(k->text) > k->max_len) k->text[k->max_len] = 0;
+        if ((int)wcslen(k->text) >= k->min_len) return 1;
+    }
+    printf("nn::swkbd: no text prompt program (kdialog or zenity): answered as cancelled (SSBU_SWKBD=text:<answer> answers without one)\n");
+    return 0;
+}
+#endif
 static void copy_w(wchar_t *dst, uint64_t src, int max) {
     int i = 0;
     for (; i < max; i++) { uint16_t ch = rd16(src + (uint64_t)i * 2); if (!ch) break; dst[i] = ch; }
@@ -455,6 +496,7 @@ static ImportFn h(const char *name) {
     return f;
 }
 static int guard_ok(const uint8_t *p, size_t from, size_t to, uint8_t v) { for (size_t i = from; i < to; i++) if (p[i] != v) return 0; return 1; }
+#ifdef _WIN32
 static volatile int g_kbd_test_initial_seen;
 static DWORD WINAPI kbd_test_driver(LPVOID arg) {
     (void)arg;
@@ -475,6 +517,7 @@ static DWORD WINAPI kbd_test_driver(LPVOID arg) {
     }
     return 0;
 }
+#endif
 int nnapplet_selftest(Ctx *c) {
     int bad = 0, ok;
     uint8_t *buf = malloc(0x8000), *buf2 = malloc(0x8000);
@@ -540,6 +583,7 @@ int nnapplet_selftest(Ctx *c) {
     _putenv("SSBU_SWKBD=cancel");
     c->x[0] = P(string); c->x[1] = P(buf); swkbd_ShowKeyboard(c);
     ok = ok && c->x[0] == SWKBD_RESULT_CANCELED;
+#ifdef _WIN32
     /* the real dialog: a helper thread types into it and presses OK, then a second run is cancelled */
     _putenv("SSBU_SWKBD=dialog");
     HANDLE helper = CreateThread(NULL, 0, kbd_test_driver, NULL, 0, NULL);
@@ -552,6 +596,7 @@ int nnapplet_selftest(Ctx *c) {
     CloseHandle(helper);
     printf("  swkbd: Win32 dialog shows the initial text \"Mario\", returns typed text \"Z\" + U+30BC on OK and 0x29f on Cancel: %s\n", dialog_ok ? "ok" : "FAILED");
     bad += !dialog_ok;
+#endif
     _putenv("SSBU_SWKBD=");
     printf("  swkbd: sizes work 0x%llx string 0x%llx; SetInitialText in the work buffer; scripted answer \"Kirby\" (UTF-16) and cancel (0x29f): %s\n",
            (unsigned long long)work_size, (unsigned long long)string_size, ok ? "ok" : "FAILED");

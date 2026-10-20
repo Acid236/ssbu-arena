@@ -24,9 +24,15 @@
 #include <string.h>
 #include <windows.h>
 /* Session 2: the Khronos headers (reference\upstream\Vulkan-Headers\include, -I in build.py) replace our own vk_min.h subset. */
+#ifdef _WIN32
 #define VK_USE_PLATFORM_WIN32_KHR
+#endif
 #define VK_NO_PROTOTYPES
 #include <vulkan/vulkan.h>
+#ifndef _WIN32
+#include <SDL3/SDL.h>
+#include <SDL3/SDL_vulkan.h>                         /* Linux build: the window is an SDL window; SDL makes the surface */
+#endif
 #include "nvn_front.h"
 #include "gfx_options.h"
 #define P(a) ((void *)(uintptr_t)(a))                     /* guest addresses are host addresses (as in nvn_gl.c) */
@@ -46,6 +52,11 @@ int display_wait_refresh(void);
 void display_before_present(void);
 
 /* ---------------------------------------------------------------- the loader's functions */
+#ifdef _WIN32
+#define VKF_SURFACE(X) X(VkResult, vkCreateWin32SurfaceKHR, (VkInstance, const VkWin32SurfaceCreateInfoKHR *, const VkAllocationCallbacks *, VkSurfaceKHR *))
+#else
+#define VKF_SURFACE(X)
+#endif
 #define VKF(X) \
     X(VkResult, vkEnumerateInstanceLayerProperties, (uint32_t *, VkLayerProperties *)) \
     X(VkResult, vkEnumerateInstanceExtensionProperties, (const char *, uint32_t *, VkExtensionProperties *)) \
@@ -56,7 +67,7 @@ void display_before_present(void);
     X(void, vkGetPhysicalDeviceProperties, (VkPhysicalDevice, VkPhysicalDeviceProperties *)) \
     X(void, vkGetPhysicalDeviceQueueFamilyProperties, (VkPhysicalDevice, uint32_t *, VkQueueFamilyProperties *)) \
     X(VkResult, vkEnumerateDeviceExtensionProperties, (VkPhysicalDevice, const char *, uint32_t *, VkExtensionProperties *)) \
-    X(VkResult, vkCreateWin32SurfaceKHR, (VkInstance, const VkWin32SurfaceCreateInfoKHR *, const VkAllocationCallbacks *, VkSurfaceKHR *)) \
+    VKF_SURFACE(X) \
     X(void, vkDestroySurfaceKHR, (VkInstance, VkSurfaceKHR, const VkAllocationCallbacks *)) \
     X(VkResult, vkGetPhysicalDeviceSurfaceSupportKHR, (VkPhysicalDevice, uint32_t, VkSurfaceKHR, VkBool32 *)) \
     X(VkResult, vkGetPhysicalDeviceSurfaceCapabilitiesKHR, (VkPhysicalDevice, VkSurfaceKHR, VkSurfaceCapabilitiesKHR *)) \
@@ -194,7 +205,11 @@ static int swapchain_create(void) {
     VkResult r = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(V.gpu, V.surface, &caps);
     if (r != VK_SUCCESS) vk_fatal("vkGetPhysicalDeviceSurfaceCapabilitiesKHR", r);
     VkExtent2D ext = caps.currentExtent;
+#ifdef _WIN32
     if (ext.width == 0xffffffffu) { RECT rc; GetClientRect(V.hwnd, &rc); ext.width = (uint32_t)rc.right; ext.height = (uint32_t)rc.bottom; }
+#else
+    if (ext.width == 0xffffffffu) { int w = 0, h = 0; SDL_GetWindowSizeInPixels((SDL_Window *)V.hwnd, &w, &h); ext.width = (uint32_t)w; ext.height = (uint32_t)h; }   /* Wayland leaves the size to us */
+#endif
     if (ext.width < caps.minImageExtent.width) ext.width = caps.minImageExtent.width;
     if (ext.height < caps.minImageExtent.height) ext.height = caps.minImageExtent.height;
     if (caps.maxImageExtent.width && ext.width > caps.maxImageExtent.width) ext.width = caps.maxImageExtent.width;
@@ -256,10 +271,26 @@ int nvn_vk_init(void *hwnd) {
     uint32_t niext = 128;
     r = vkEnumerateInstanceExtensionProperties(NULL, &niext, iext);
     if (r != VK_SUCCESS && r != VK_INCOMPLETE) vk_fatal("vkEnumerateInstanceExtensionProperties", r);
+#ifdef _WIN32
     const char *exts[4], *layers[1];
+#else
+    const char *exts[12], *layers[1];                 /* Linux build: SDL may name several surface extensions */
+#endif
     uint32_t next = 0, nlayers = 0;
+#ifdef _WIN32
     exts[next++] = "VK_KHR_surface"; exts[next++] = "VK_KHR_win32_surface";
     if (!has_name(iext, niext, "VK_KHR_surface") || !has_name(iext, niext, "VK_KHR_win32_surface")) { printf("nvn_vk: the Vulkan loader has no VK_KHR_surface / VK_KHR_win32_surface\n"); fflush(stdout); ExitProcess(5); }
+#else
+    {   /* the surface extensions of SDL's video driver (X11 or Wayland) */
+        Uint32 n = 0;
+        const char *const *se = SDL_Vulkan_GetInstanceExtensions(&n);
+        if (!se || !n) { printf("nvn_vk: SDL names no Vulkan surface extensions (%s)\n", SDL_GetError()); fflush(stdout); ExitProcess(5); }
+        for (Uint32 i = 0; i < n && next < 10; i++) {
+            if (!has_name(iext, niext, se[i])) { printf("nvn_vk: the Vulkan loader has no %s\n", se[i]); fflush(stdout); ExitProcess(5); }
+            exts[next++] = se[i];
+        }
+    }
+#endif
     { const char *e = getenv("SSBU_VK_VALIDATE"); V.validate = e && atoi(e) != 0; }
     if (V.validate) {
         static VkLayerProperties lp[64];
@@ -292,11 +323,15 @@ int nvn_vk_init(void *hwnd) {
         printf("nvn_vk: validation layer on (VK_LAYER_KHRONOS_validation); messages are printed as vk-validation:\n");
     }
 
+#ifdef _WIN32
     VkWin32SurfaceCreateInfoKHR si;
     memset(&si, 0, sizeof si);
     si.sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR; si.hinstance = GetModuleHandleA(NULL); si.hwnd = hwnd;
     r = vkCreateWin32SurfaceKHR(V.instance, &si, NULL, &V.surface);
     if (r != VK_SUCCESS) vk_fatal("vkCreateWin32SurfaceKHR", r);
+#else
+    if (!SDL_Vulkan_CreateSurface((SDL_Window *)hwnd, V.instance, NULL, &V.surface)) { printf("nvn_vk: SDL_Vulkan_CreateSurface failed: %s\n", SDL_GetError()); fflush(stdout); ExitProcess(5); }
+#endif
 
     /* device: discrete > integrated > virtual > other; needs one queue family with graphics + compute that can present to the window */
     VkPhysicalDevice gpus[16];

@@ -2,6 +2,8 @@
 """One entry point: from a fresh clone and your own dump to a runnable native build of the game.
 
     python scripts/setup.py --dump <folder> [--jobs N] [tool locations ...]
+    python scripts/setup.py --target linux --dump <folder> [--jobs N]      a native Linux build, in <repo>/build-linux
+                                                                            (BUILDING_LINUX.md; scripts/linux/install_deps.sh first)
 
 <folder> holds what you dumped from YOUR console (see BUILDING.md):
     <folder>/exefs/    the title's ExeFS files: main  sdk  (rtld, subsdk0, main.npdm are not used), update applied
@@ -59,6 +61,15 @@ STAGE_PLAN = [('runtime', '', None), ('tools/lifter', '', None), ('tools/nro', '
 # files the build writes that may sit in a source folder of an in-tree build (all ignored by git): not part of the tree
 GENERATED_NAMES = {'sdklift_gen.c', 'sdkdata.c', 'sdklift_install.h', 'zstd_gen.c', 'nro_registry.c', 'fake_whitelist.h', 'fake_openlist.h',
                    'difftest_gen.c', 'eh_tests.h', 'quad_tests.h', 'sdktest_data.h', 'imports_all.txt', 'sdklift_report.txt'}
+LINUX_EXE = 'ssbu_native'
+
+
+def exe_name(cx):
+    return LINUX_EXE if cx.linux else EXE
+
+
+def game_lib(cx):
+    return 'ssbu_game_eh_o1.so' if cx.linux else 'ssbu_game_eh_o1.dll'
 
 
 # ---------------------------------------------------------------------------------------------- helpers
@@ -85,11 +96,26 @@ def disk_mb(path):
     return total / 1048576.0
 
 
+def default_jobs():
+    """min(24, cpus); off Windows also one compiler job per 4 GB of RAM: a machine that runs out is not slowed down but has
+    processes killed (seen with 22 jobs on 31 GB). build_opt.py also limits each compiler's memory on Linux."""
+    jobs = min(24, os.cpu_count() or 8)
+    try:
+        with open('/proc/meminfo') as f:
+            kb = next(int(l.split()[1]) for l in f if l.startswith('MemTotal:'))
+        jobs = max(1, min(jobs, kb // (4 << 20)))
+    except (OSError, StopIteration, ValueError):
+        pass
+    return jobs
+
+
 class Ctx:
     def __init__(self, a):
         self.a = a
-        # --build, else the install location chosen in the installer window (build_location.txt), else <repo>/build
-        self.build = os.path.abspath(a.build or build_location.get())
+        self.linux = getattr(a, 'target', 'windows') == 'linux'
+        # --build, else the install location chosen in the installer window (build_location.txt), else <repo>/build;
+        # --target linux: <repo>/build-linux
+        self.build = os.path.abspath(a.build or (os.path.join(REPO, 'build-linux') if self.linux else build_location.get()))
         self.work = os.path.join(self.build, 'work')
         self.logs = os.path.join(self.build, 'logs')
         self.state_file = os.path.join(self.build, 'state.json')
@@ -97,7 +123,7 @@ class Ctx:
         if os.path.exists(self.state_file):
             with open(self.state_file) as f:
                 self.state = json.load(f)
-        self.jobs = a.jobs or min(24, os.cpu_count() or 8)
+        self.jobs = a.jobs or default_jobs()
         self.tools = {}                          # located tools, filled by deps
         self.runtime_dir = None                  # the checked runtime package (load_runtime), or None: the exe is built here
         self.nocrt = bool(a.nocrt or a.runtime)  # the game libraries with LLVM alone (tools/lifter/build.py RECOMP_NOCRT)
@@ -135,7 +161,8 @@ class Ctx:
         return env
 
     def run(self, step, argv, cwd=None, env=None, log=None, ok=(0,)):
-        """Run a child, its output to logs/<log or step>.log; returns the output text. Raises Fail on a bad exit code."""
+        """Run a child, its output to logs/<log or step>.log; returns this run's output (its last 256 KB). Raises Fail on a
+        bad exit code."""
         os.makedirs(self.logs, exist_ok=True)
         path = os.path.join(self.logs, (log or step) + '.log')
         t0 = time.time()
@@ -145,7 +172,7 @@ class Ctx:
             start = f.tell()                     # the log is appended to: only what this child wrote is returned, or a
             p = subprocess.run(argv, cwd=cwd or self.work, env=env or self.env(), stdout=f, stderr=subprocess.STDOUT)      # caller's check reads the result of an earlier, failed run
         with open(path, 'rb') as f:
-            f.seek(max(start, os.path.getsize(path) - 6000))
+            f.seek(max(start, os.path.getsize(path) - (256 << 10)))
             tail = f.read().decode('utf-8', 'replace')
         if p.returncode not in ok:
             raise Fail('%s failed (exit %s) after %s; see %s\n%s' % (' '.join(argv[:3]), p.returncode, fmt(time.time() - t0), path, tail[-1500:]))
@@ -353,6 +380,8 @@ def find_first(cands, probe):
 def step_deps(cx):
     a = cx.a
     say('  python %s' % sys.version.split()[0])
+    if cx.linux:
+        return deps_linux(cx)
     if a.runtime:
         m = load_runtime(cx, a.runtime)
         say('  runtime package: %s (commit %s, built %s): the exe is not built here' % (cx.runtime_dir, str(m.get('source_commit'))[:10], m.get('built')))
@@ -510,6 +539,98 @@ def probe_nocrt(clang, probe):
 
 def dump_checks(cx, a):
     # the dump
+    check_dump(cx)
+
+
+LINUX_PKGS = (('sdl3', 'SDL3'), ('freetype2', 'FreeType'), ('openssl', 'OpenSSL'), ('libavformat', 'FFmpeg'), ('libavcodec', 'FFmpeg'),
+              ('libswscale', 'FFmpeg'), ('libswresample', 'FFmpeg'), ('libavutil', 'FFmpeg'))
+GLSLANG_LIBS = (['-lglslang', '-lglslang-default-resource-limits'],          # shared glslang (Arch, Fedora)
+                ['-lglslang', '-lglslang-default-resource-limits', '-lSPIRV', '-lMachineIndependent', '-lGenericCodeGen',
+                 '-lOSDependent', '-lSPIRV-Tools-opt', '-lSPIRV-Tools', '-lstdc++', '-lpthread'])      # static glslang (Debian)
+LINUX_HINT = '\n(scripts/linux/install_deps.sh installs everything the Linux build needs; see BUILDING_LINUX.md)'
+
+
+def deps_linux(cx):
+    """--target linux: the system's clang and the development packages of SDL3, FreeType, OpenSSL, FFmpeg, glslang, Vulkan
+    and OpenGL; the Opus and Vulkan libraries the game loads at run time. scripts/linux/install_deps.sh installs them."""
+    a = cx.a
+    missing = []
+    for mod, pkg in (('numpy', 'numpy'), ('lz4.block', 'lz4'), ('zstandard', 'zstandard'), ('PIL', 'Pillow'), ('unicorn', 'unicorn')):
+        try:
+            __import__(mod)
+        except ImportError:
+            missing.append(pkg)
+    if missing:
+        raise Fail('missing Python packages: %s (run setup.py with deps/venv/bin/python)%s' % (', '.join(missing), LINUX_HINT))
+    say('  python packages: numpy lz4 zstandard Pillow unicorn: ok')
+    clang = os.path.join(a.llvm, 'bin', 'clang') if a.llvm else shutil.which('clang')
+    if not clang or not os.path.exists(clang):
+        raise Fail('clang not found (install clang, or --llvm <folder with bin/clang>)' + LINUX_HINT)
+    ver = subprocess.run([clang, '--version'], capture_output=True, text=True).stdout.splitlines()[0]
+    say('  clang: %s   [%s]' % (ver, clang))
+    try:
+        major = int(ver.split('version ')[1].split('.')[0])
+    except (IndexError, ValueError):
+        major = 0
+    if major and major < 19:
+        raise Fail('clang %d is too old: the Linux build needs clang 19 or newer (C23 typeof_unqual)' % major)
+    cx.tools['clang'] = clang
+    if not shutil.which('pkg-config'):
+        raise Fail('pkg-config not found' + LINUX_HINT)
+    for pc, name in LINUX_PKGS:
+        r = subprocess.run(['pkg-config', '--modversion', pc], capture_output=True, text=True)
+        if r.returncode:
+            raise Fail('development files of %s (%s) not found by pkg-config%s' % (name, pc, LINUX_HINT))
+        say('  %-13s %s' % (pc, r.stdout.strip()))
+    for h, name in (('/usr/include/glslang/Include/glslang_c_interface.h', 'glslang'), ('/usr/include/GL/gl.h', 'OpenGL (libGL)')):
+        if not os.path.exists(h):
+            raise Fail('%s headers not found (%s)%s' % (name, h, LINUX_HINT))
+    # one program linked against every library of the build, and run: a missing library shows here, not after an hour
+    probe = os.path.join(cx.build, 'probe')
+    os.makedirs(probe, exist_ok=True)
+    with open(os.path.join(probe, 'p.c'), 'w') as f:
+        f.write('#include <stdio.h>\n#include <SDL3/SDL.h>\n#include <ft2build.h>\n#include FT_FREETYPE_H\n#include <openssl/evp.h>\n'
+                '#include <libavcodec/avcodec.h>\n#include <glslang/Include/glslang_c_interface.h>\n#include <GL/gl.h>\n'
+                'int main(void) {\n    FT_Library ft;\n    if (FT_Init_FreeType(&ft)) return 1;\n'
+                '    printf("%d %p %p %p\\n", SDL_GetVersion(), (void *)EVP_sha256, (void *)glslang_initialize_process, (void *)glGetString);\n'
+                '    if (!avcodec_find_decoder(AV_CODEC_ID_VP9)) { puts("noVP9"); return 0; }\n'
+                '    if (!avcodec_find_decoder(AV_CODEC_ID_VORBIS)) { puts("noVorbis"); return 0; }\n'
+                '    puts("ok");\n    return 0;\n}\n')
+    flags = subprocess.run(['pkg-config', '--cflags', '--libs'] + [p for p, _ in LINUX_PKGS], capture_output=True, text=True).stdout.split()
+    err = ''
+    for libs in GLSLANG_LIBS:
+        r = subprocess.run([clang, os.path.join(probe, 'p.c'), '-o', os.path.join(probe, 'p')] + flags + libs + ['-lGL', '-lm'], capture_output=True, text=True)
+        if not r.returncode:
+            cx.tools['glslang_libs'] = libs
+            break
+        err = r.stderr
+    else:
+        raise Fail('a test program using SDL3, FreeType, OpenSSL, FFmpeg, glslang and OpenGL does not build:\n%s%s' % (err[-1200:], LINUX_HINT))
+    out = subprocess.run([os.path.join(probe, 'p')], capture_output=True, text=True).stdout.strip().splitlines()
+    if out and out[-1].startswith('no'):
+        raise Fail('this FFmpeg has no %s decoder: the game\'s movies are VP9 video with Vorbis audio (install the full FFmpeg of your distribution)' % out[-1][2:])
+    if not out or out[-1] != 'ok':
+        raise Fail('the test program built against the libraries does not run (output %r)' % out)
+    say('  test program with SDL3, FreeType, OpenSSL, FFmpeg (VP9 + Vorbis), glslang, OpenGL: builds and runs')
+    import ctypes.util
+    for lib, name in (('vulkan', 'the Vulkan loader (libvulkan.so.1)'), ('opus', 'the Opus library (libopus.so.0)')):
+        if not ctypes.util.find_library(lib):
+            raise Fail('%s not found: the game loads it at run time%s' % (name, LINUX_HINT))
+    say('  run-time libraries: libvulkan, libopus: ok')
+    deps = os.path.join(REPO, 'deps')
+    for key, opt, envv, sub, probe_rel in (
+            ('vulkan', a.vulkan_headers, 'VULKAN_HEADERS', 'Vulkan-Headers', os.path.join('include', 'vulkan', 'vulkan.h')),
+            ('suyu', a.suyu, 'SUYU_ROOT', 'suyu', os.path.join('src', 'core', 'hle', 'service', 'mii', 'types', 'raw_data.cpp'))):
+        found = find_first([opt, os.environ.get(envv), os.path.join(deps, sub), '/usr' if key == 'vulkan' else None], lambda d, p=probe_rel: os.path.exists(os.path.join(d, p)))
+        if not found:
+            raise Fail('%s not found (--%s <folder containing %s>)%s' % (sub, {'vulkan': 'vulkan-headers', 'suyu': 'suyu'}[key], probe_rel, LINUX_HINT))
+        cx.tools[key] = found
+        say('  %-13s %s' % (sub, found))
+    check_dump(cx)
+
+
+def check_dump(cx):
+    a = cx.a
     dump = a.dump
     exefs = a.exefs or (os.path.join(dump, 'exefs') if dump else None)
     romfs = a.romfs or (os.path.join(dump, 'romfs') if dump else None)
@@ -691,13 +812,15 @@ def step_sdk(cx):
 
 
 def build_env(cx):
+    if cx.linux:
+        return cx.env(RECOMP_GEN='gen_eh_o2', RECOMP_OBJ='obj_eh_o1', RECOMP_DLL=game_lib(cx), RECOMP_NRO_SUFFIX='_eh_o2', RECOMP_TARGET='linux')
     return cx.env(RECOMP_GEN='gen_eh_o2', RECOMP_OBJ='obj_eh_o1', RECOMP_DLL='ssbu_game_eh_o1.dll', RECOMP_NRO_SUFFIX='_eh_o2')
 
 
 def step_compile(cx):
     cx.run('compile', [sys.executable, 'build_opt.py', 'main', str(cx.jobs)], env=build_env(cx))
-    dll = os.path.join(cx.work, 'ssbu_game_eh_o1.dll')
-    say('  ssbu_game_eh_o1.dll %.0f MB; objects %.0f MB' % (os.path.getsize(dll) / 1048576.0, disk_mb(os.path.join(cx.work, 'obj_eh_o1'))))
+    dll = os.path.join(cx.work, game_lib(cx))
+    say('  %s %.0f MB; objects %.0f MB' % (game_lib(cx), os.path.getsize(dll) / 1048576.0, disk_mb(os.path.join(cx.work, 'obj_eh_o1'))))
 
 
 def step_nro(cx):
@@ -705,10 +828,12 @@ def step_nro(cx):
     argv = [sys.executable, 'build_opt.py', 'nro', str(cx.jobs)] + ([] if mods == ['all'] else mods)
     cx.run('nro', argv, env=build_env(cx))
     d = os.path.join(cx.work, 'nro_bin_eh_o2')
-    say('  %d module libraries in nro_bin_eh_o2 (%.0f MB)' % (len([f for f in os.listdir(d) if f.endswith('.dll')]), disk_mb(d)))
+    say('  %d module libraries in nro_bin_eh_o2 (%.0f MB)' % (len([f for f in os.listdir(d) if f.endswith('.so' if cx.linux else '.dll')]), disk_mb(d)))
 
 
 def step_link(cx):
+    if cx.linux:
+        return link_linux(cx)
     if cx.runtime_dir:                        # the prebuilt runtime: copied and checked; only the game DLL is linked here
         cx.run('link', [sys.executable, 'build.py', 'gamedll'], env=cx.env(**{k: v for k, v in build_env(cx).items() if k != 'RECOMP_NRO_SUFFIX'}))
         with open(os.path.join(cx.runtime_dir, 'manifest.json')) as f:
@@ -747,6 +872,15 @@ def step_link(cx):
         say('  WARNING: no libopus: music and the other Opus sounds will be silent (deps step above; BUILDING.md)')
 
 
+def link_linux(cx):
+    cx.run('link', [cx.tools['clang'], '-O2', '-shared', '-fPIC', 'vk_glslang_shim.c', '-o', 'ssbu_glslang.so'] + cx.tools.get('glslang_libs', GLSLANG_LIBS[0]))
+    cx.run('link', [sys.executable, 'build.py', 'link'], env=cx.env(**{k: v for k, v in build_env(cx).items() if k != 'RECOMP_NRO_SUFFIX'}, RECOMP_EXE=LINUX_EXE))
+    for f in (LINUX_EXE, 'ssbu_glslang.so', game_lib(cx)):
+        if not os.path.exists(os.path.join(cx.work, f)):
+            raise Fail('%s was not produced' % f)
+    say('  %s %.1f MB, ssbu_glslang.so, %s beside it' % (LINUX_EXE, os.path.getsize(os.path.join(cx.work, LINUX_EXE)) / 1048576.0, game_lib(cx)))
+
+
 def game_env(cx, **extra):
     d = cx.state['dump']
     e = cx.env(SSBU_ROMFS=d['romfs'], **extra)
@@ -758,16 +892,21 @@ def game_env(cx, **extra):
 
 
 def step_check(cx):
-    exe = os.path.join(cx.work, EXE)
+    exe = os.path.join(cx.work, exe_name(cx))
     main_elf = os.path.join(cx.bin, 'main.elf')
     scratch = os.path.join(cx.build, 'selftest_userdata')
     shutil.rmtree(scratch, ignore_errors=True)
     os.makedirs(scratch)
-    out = cx.run('check', [exe, main_elf, '60'], env=game_env(cx, SSBU_SDK_SELFTEST='1', SSBU_USERDATA=scratch), log='check_sdk', ok=(0,))
-    line = next((l for l in out.splitlines() if 'SDK self-test' in l), '')
-    if '0 failure(s)' not in line:
+    # the self-test exits with its number of failures (a crash is a negative exit code: a signal)
+    out = cx.run('check', [exe, main_elf, '60'], env=game_env(cx, SSBU_SDK_SELFTEST='1', SSBU_USERDATA=scratch), log='check_sdk', ok=tuple(range(256)))
+    line = next((l for l in reversed(out.splitlines()) if l.startswith('SDK self-test:')), '')
+    failed = [l.strip() for l in out.splitlines() if l.rstrip().endswith('FAILED')]
+    known = [l for l in failed if cx.linux and l.startswith('album:')]     # recording movies to the album: not on Linux yet
+    if '0 failure(s)' not in line and not (failed and len(known) == len(failed) and ('%d failure(s)' % len(failed)) in line):
         raise Fail('SSBU_SDK_SELFTEST: ' + (line or 'no result line'))
     say('  SSBU_SDK_SELFTEST: ' + line.strip())
+    if known:
+        say('  (the %d failures are all album movie recording, which the Linux build does not have yet: accepted)' % len(known))
     out = cx.run('check', [exe, main_elf, '5'], env=game_env(cx, SSBU_PAD_SELFTEST='1', SSBU_USERDATA=scratch), log='check_pad')
     line = next((l for l in reversed(out.splitlines()) if 'pad' in l.lower() and '/' in l), out.strip().splitlines()[-1] if out.strip() else '')
     say('  SSBU_PAD_SELFTEST: ' + line.strip())
@@ -784,8 +923,9 @@ def step_check(cx):
         return
     cx.run('check', [py, 'difftest.py', 'sample'], log='check_difftest')
     cx.run('check', [py, 'difftest.py', 'gen'], log='check_difftest')
-    cx.run('check', [cx.tools['clang'], '-O0', '-w', '-fno-strict-aliasing', '-I', '.', 'difftest_gen.c', 'difftest_host.c', '-o', 'difftest.exe'], log='check_difftest')
-    out = cx.run('check', [py, 'difftest.py', 'check'], env=cx.env(DIFFTEST_EXE=os.path.join(w, 'difftest.exe')), log='check_difftest')
+    dt = 'difftest' if cx.linux else 'difftest.exe'
+    cx.run('check', [cx.tools['clang'], '-O0', '-w', '-fno-strict-aliasing', '-I', '.', 'difftest_gen.c', 'difftest_host.c', '-o', dt] + (['-lm'] if cx.linux else []), log='check_difftest')
+    out = cx.run('check', [py, 'difftest.py', 'check'], env=cx.env(DIFFTEST_EXE=os.path.join(w, dt)), log='check_difftest')
     line = next((l for l in out.splitlines() if l.startswith('tests:')), '')
     if not line:
         raise Fail('difftest printed no result')
@@ -803,6 +943,12 @@ def how_to_run(cx):
     d = cx.state.get('dump', {})
     say('')
     say('Start the game (from a shell; the window opens at once, the first run compiles shaders and is slow):')
+    if cx.linux:
+        say('  deps/venv/bin/python scripts/run.py --linux        (saves in ~/.local/share/ssbu-recomp/userdata)')
+        say('  scripts/linux/install_desktop.sh                   adds a launcher to your application menu')
+        say('or by hand:   cd %s   and run   ./%s ../binaries/%s/main.elf 0' % (cx.work, LINUX_EXE, cx.state.get('game_version', '13.0.4')))
+        say('with the environment variables SSBU_ROMFS=%s  SSBU_USERDATA=<saves>' % d.get('romfs', '<romfs>'))
+        return
     say('  python scripts/run.py --userdata <a folder for your saves> [--seconds 0]')
     say('or by hand:   cd build\\work   and run   %s ..\\binaries\\%s\\main.elf 0' % (EXE, cx.state.get('game_version', '13.0.4')))
     say('with the environment variables SSBU_ROMFS=%s  SSBU_USERDATA=<saves>  (options: BUILDING.md)' % d.get('romfs', '<romfs>'))
@@ -812,8 +958,9 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--dump', help='folder with exefs\\ and romfs\\ (and optionally sysdata\\) dumped from your console')
     ap.add_argument('--exefs'), ap.add_argument('--romfs'), ap.add_argument('--sysdata')
-    ap.add_argument('--build', help='build folder (default: the install location of build_location.txt, else <repo>/build)')
-    ap.add_argument('--jobs', type=int, help='parallel compiler jobs (default min(24, cpus))')
+    ap.add_argument('--target', choices=('windows', 'linux'), default='windows', help='windows (default: the Windows exe) or linux (a native Linux build: BUILDING_LINUX.md)')
+    ap.add_argument('--build', help='build folder (default: the install location of build_location.txt, else <repo>/build; <repo>/build-linux for --target linux)')
+    ap.add_argument('--jobs', type=int, help='parallel compiler jobs (default min(24, cpus); off Windows also at most one per 4 GB of RAM)')
     ap.add_argument('--llvm', help='LLVM 9.0.0 folder (bin\\clang.exe)')
     ap.add_argument('--sdl3', help='SDL3 development package (VC) folder: include\\, lib\\x64\\')
     ap.add_argument('--vulkan-headers', help='Khronos Vulkan-Headers folder (include\\vulkan\\)')

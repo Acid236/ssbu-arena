@@ -274,7 +274,12 @@ static void audio_OpenDefaultAudioOut(Ctx *c) {       /* (AudioOut *, nn::os::Sy
             GetModuleFileNameA(NULL, exe, sizeof exe);
             const char *base = strrchr(exe, '\\') ? strrchr(exe, '\\') + 1 : exe, *vol = getenv("SSBU_VOLUME");
             int gfx_volume(void);                     /* U1: graphics.ini volume = auto | 0..100, for the copies a person plays only (gfx_options.c) */
+#ifdef _WIN32
             int person = !_stricmp(base, "ssbu_native.exe") || !_stricmp(base, "ssbu_user.exe");
+#else
+            if (strrchr(base, '/')) base = strrchr(base, '/') + 1;
+            int person = !strcmp(base, "ssbu_native") || !strcmp(base, "ssbu_user");      /* Linux build: no ".exe" */
+#endif
             int percent = vol ? atoi(vol) : person ? (gfx_volume() >= 0 ? gfx_volume() : 100) : 0;
             if (percent < 0) percent = 0;
             if (percent > 100) percent = 100;
@@ -462,13 +467,16 @@ static void audio_CloseAudioOut(Ctx *c) {             /* (AudioOut *) */
  * service object is created, i.e. it arrives signalled, and again whenever the output device changes.
  * Here: the output device is the Windows default render endpoint; IMMNotificationClient::OnDefaultDeviceChanged
  * (render, console role) signals the event. */
+#ifdef _WIN32
 typedef struct NotifyClient { const void *const *vtbl; } NotifyClient;
 typedef struct { const void *const *vtbl; } ComObj;
 static const GUID k_clsid_enumerator = {0xbcde0395, 0xe52f, 0x467c, {0x8e, 0x3d, 0xc4, 0x57, 0x92, 0x91, 0x69, 0x2e}};
 static const GUID k_iid_enumerator = {0xa95664d2, 0x9614, 0x4f35, {0xa7, 0x46, 0xde, 0x8d, 0xb6, 0x36, 0x17, 0xe6}};
 static const GUID k_iid_notify = {0x7991eec9, 0x7e89, 0x4d85, {0x83, 0x90, 0x6c, 0x70, 0x3c, 0xec, 0x60, 0xc0}};
 static const GUID k_iid_unknown = {0, 0, 0, {0xc0, 0, 0, 0, 0, 0, 0, 0x46}};
+#endif
 static volatile LONG g_device_acquired, g_device_changes;
+#ifdef _WIN32
 static HRESULT STDMETHODCALLTYPE nc_query(NotifyClient *self, const GUID *iid, void **out) {
     if (!memcmp(iid, &k_iid_notify, sizeof *iid) || !memcmp(iid, &k_iid_unknown, sizeof *iid)) { *out = self; return S_OK; }
     *out = NULL; return E_NOINTERFACE;
@@ -501,6 +509,9 @@ static DWORD WINAPI device_watch_thread(void *arg) {
     Sleep(INFINITE);                                          /* keeps the apartment and the registration alive */
     return 0;
 }
+#else
+static DWORD WINAPI device_watch_thread(void *arg) { (void)arg; (void)g_device_changes; return 0; }     /* Linux build: device changes are not reported */
+#endif
 #define AUDIO_DEVICE_NOTIFICATION_ALREADY_ACQUIRED 0x499u
 static void audio_AcquireAudioDeviceNotificationForOutput(Ctx *c) {   /* (nn::os::SystemEvent *) -> Result */
     if (InterlockedCompareExchange(&g_device_acquired, 1, 0) != 0) { RET(AUDIO_DEVICE_NOTIFICATION_ALREADY_ACQUIRED); return; }
@@ -546,7 +557,11 @@ static void opus_load(void) {
     if (g_opus_tried) return;
     g_opus_tried = 1;
     const char *env = getenv("SSBU_OPUS_DLL");
+#ifdef _WIN32
     const char *const tries[] = { env, "libopus-0.dll", "opus.dll", "C:\\msys64\\ucrt64\\bin\\libopus-0.dll", "C:\\msys64\\mingw64\\bin\\libopus-0.dll", "C:\\msys64\\clang64\\bin\\libopus-0.dll" };
+#else
+    const char *const tries[] = { env, "libopus-0.dll" };      /* plat_posix.c maps it to libopus.so.0 */
+#endif
     const char *used = NULL;
     for (unsigned i = 0; i < sizeof tries / sizeof tries[0] && !g_opus_dll; i++) {
         if (!tries[i]) continue;

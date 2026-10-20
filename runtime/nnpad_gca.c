@@ -24,6 +24,15 @@
  *
  * SSBU_GCA=0 turns the whole thing off. SSBU_GCA_STATS=1 logs every 2 s the report rate, the delay from a finished read to
  * the SDL state (apply) and the age of the state at the moment the game samples it. */
+#ifndef _WIN32
+/* Linux build (plat/): no WinUSB here; SDL3 on Linux reads the adapter itself when it has libusb. Nothing to do. */
+#include <SDL3/SDL.h>
+#include "nnpad.h"
+int gca_start(void) { return 0; }
+int gca_port_of(unsigned joy_id) { (void)joy_id; return -1; }
+void gca_sample(unsigned joy_id) { (void)joy_id; }
+unsigned gca_seq(void) { return 0; }
+#else
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -374,3 +383,4 @@ void gca_sample(unsigned joy_id) {
     InterlockedIncrement64(&g_age_n);
     while (age > (cur = g_age_max)) if (InterlockedCompareExchange64(&g_age_max, age, cur) == cur) break;
 }
+#endif

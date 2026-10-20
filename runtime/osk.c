@@ -16,6 +16,20 @@
 #include <string.h>
 #include <wchar.h>
 
+#ifndef _WIN32
+/* Linux build: the keyboard is drawn with GDI, which Linux does not have. Every entry answers "not available here", so
+ * nnapplet.c uses its other path (a desktop text dialog). */
+int osk_key(UINT msg, WPARAM w) { (void)msg; (void)w; return 0; }
+int osk_active(void) { return 0; }
+int osk_take(uint32_t *dst, LONG *seen) { (void)dst; (void)seen; return 0; }
+void osk_size(int *w, int *h) { *w = 1920; *h = 1080; }
+void osk_test_start(void) {}
+int osk_message(const wchar_t *msg, int question) { (void)msg; (void)question; return -1; }
+int osk_run(const wchar_t *header, const wchar_t *guide, const wchar_t *initial, int max_len, int min_len, int password, wchar_t *out) {
+    (void)header; (void)guide; (void)initial; (void)max_len; (void)min_len; (void)password; (void)out; return -1;
+}
+#else
+
 #define OSK_W 1920
 #define OSK_H 1080
 #define OSK_MAX 500
@@ -406,3 +420,4 @@ int osk_run(const wchar_t *header, const wchar_t *guide, const wchar_t *initial,
     fflush(stdout);
     return result;
 }
+#endif

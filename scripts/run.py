@@ -7,6 +7,10 @@
                                                                            the window stays off-screen and muted when the exe
                                                                            is not named ssbu_native.exe / ssbu_user.exe
 
+--linux runs the native Linux build (scripts/setup.py --target linux): build folder build-linux, exe ssbu_native. On Linux
+it is the default when build-linux exists and build (a Windows cross build) does not; --userdata then defaults to
+$XDG_DATA_HOME/ssbu-recomp/userdata (~/.local/share/ssbu-recomp/userdata).
+
 --userdata must be a folder you can lose: the game writes its save data there (use a copy when testing).
 Options go to the game as environment variables (listed in BUILDING.md); --env NAME=VALUE adds one.
 """
@@ -28,47 +32,61 @@ def main():
     ap.add_argument('--userdata', help='the save folder (required, except with --play)')
     ap.add_argument('--play', action='store_true', help='what "Play SSBU.bat" does: the saves in <build>\\saves, until you quit; '
                                                         'a plain message when the game is not built yet')
-    ap.add_argument('--build', default=None, help='build folder (default: the install location of build_location.txt, else <repo>/build)')
+    ap.add_argument('--build', default=None, help='build folder (default: the install location of build_location.txt, else <repo>/build; <repo>/build-linux with --linux)')
+    ap.add_argument('--linux', action='store_true', help='the native Linux build (default build folder build-linux, exe ssbu_native, '
+                                                        'saves in ~/.local/share/ssbu-recomp/userdata unless --userdata)')
     ap.add_argument('--seconds', type=int, default=0, help='stop after this many seconds (0 = play until you quit)')
     ap.add_argument('--seq', help='input sequence file (tests/seq_*.txt): lines starting with # are comments')
-    ap.add_argument('--exe', default='ssbu_native.exe', help='exe name inside build/work; a copy of ssbu_native.exe is made if missing')
+    ap.add_argument('--exe', help='exe name inside build/work (default ssbu_native.exe, ssbu_native with --linux); a copy of it is made if missing')
     ap.add_argument('--refresh', action='store_true', help='copy ssbu_native.exe over --exe again when the copy is older than it')
     ap.add_argument('--seed', help='SSBU_FIXED_SEED value (deterministic random numbers)')
     ap.add_argument('--log', help='write the game output to this file instead of the console')
     ap.add_argument('--env', action='append', default=[], help='NAME=VALUE, may be repeated')
     a = ap.parse_args()
-    a.build = os.path.abspath(a.build or build_location.get())   # the game runs in build\work: a relative --build would point elsewhere there
-    if a.play:
-        a.userdata = a.userdata or os.path.join(a.build, 'saves')
-        if not (os.path.isfile(os.path.join(a.build, 'work', 'ssbu_native.exe')) and os.path.isfile(os.path.join(a.build, 'state.json'))):
-            print('The game is not built yet (looked in %s): double-click "Install SSBU.bat" first.' % a.build)
+    if sys.platform.startswith('linux') and not a.linux and not a.build and not os.path.exists(os.path.join(REPO, 'build', 'state.json')):
+        a.linux = True
+    if a.linux:
+        a.build = os.path.abspath(a.build or os.path.join(REPO, 'build-linux'))
+        if not a.userdata:
+            a.userdata = os.path.join(os.environ.get('XDG_DATA_HOME') or os.path.expanduser('~/.local/share'), 'ssbu-recomp', 'userdata')
+        if not os.path.exists(os.path.join(a.build, 'state.json')):
+            print('no build in %s: run scripts/setup.py --target linux first (BUILDING_LINUX.md)' % a.build)
             return 1
-        gone = [f for f in ('ssbu_game_eh_o1.dll', 'SDL3.dll', 'ssbu_glslang.dll') if not os.path.isfile(os.path.join(a.build, 'work', f))]
-        if gone:
-            print('The game files are incomplete: %s missing in %s.\n'
-                  'Usually an antivirus removed it (Windows Security > Virus & threat protection > Protection history: restore it\n'
-                  'and allow it), or the installation stopped before the end. Double-click "Install SSBU.bat" and press Resume:\n'
-                  'it makes the missing files again in a few minutes.' % (', '.join(gone), os.path.join(a.build, 'work')))
-            return 1
-        if not a.log:                             # the game's output to a file, not the console: a console that keeps
-            logs = os.path.join(a.build, 'logs')  # scrolling costs frames (testers, 2026-10-20); F1 > Log shows the file
-            os.makedirs(logs, exist_ok=True)
-            a.log = os.path.join(logs, time.strftime('game_%Y%m%d_%H%M%S.log'))
-            old = sorted(n for n in os.listdir(logs) if n.startswith('game_') and n.endswith('.log'))
-            for n in old[:-9]:                    # keep the last 10 game logs
-                try:
-                    os.remove(os.path.join(logs, n))
-                except OSError:
-                    pass
-            print('Playing. The game log goes to %s (F1 > Log shows it). This window can stay minimised.' % a.log)
-    if not a.userdata:
-        ap.error('--userdata is required (or --play)')
+    else:
+        a.build = os.path.abspath(a.build or build_location.get())   # the game runs in build\work: a relative --build would point elsewhere there
+        if a.play:
+            a.userdata = a.userdata or os.path.join(a.build, 'saves')
+            if not (os.path.isfile(os.path.join(a.build, 'work', 'ssbu_native.exe')) and os.path.isfile(os.path.join(a.build, 'state.json'))):
+                print('The game is not built yet (looked in %s): double-click "Install SSBU.bat" first.' % a.build)
+                return 1
+            gone = [f for f in ('ssbu_game_eh_o1.dll', 'SDL3.dll', 'ssbu_glslang.dll') if not os.path.isfile(os.path.join(a.build, 'work', f))]
+            if gone:
+                print('The game files are incomplete: %s missing in %s.\n'
+                      'Usually an antivirus removed it (Windows Security > Virus & threat protection > Protection history: restore it\n'
+                      'and allow it), or the installation stopped before the end. Double-click "Install SSBU.bat" and press Resume:\n'
+                      'it makes the missing files again in a few minutes.' % (', '.join(gone), os.path.join(a.build, 'work')))
+                return 1
+            if not a.log:                             # the game's output to a file, not the console: a console that keeps
+                logs = os.path.join(a.build, 'logs')  # scrolling costs frames (testers, 2026-10-20); F1 > Log shows the file
+                os.makedirs(logs, exist_ok=True)
+                a.log = os.path.join(logs, time.strftime('game_%Y%m%d_%H%M%S.log'))
+                old = sorted(n for n in os.listdir(logs) if n.startswith('game_') and n.endswith('.log'))
+                for n in old[:-9]:                    # keep the last 10 game logs
+                    try:
+                        os.remove(os.path.join(logs, n))
+                    except OSError:
+                        pass
+                print('Playing. The game log goes to %s (F1 > Log shows it). This window can stay minimised.' % a.log)
+        if not a.userdata:
+            ap.error('--userdata is required (or --play)')
+    main_exe = 'ssbu_native' if a.linux else 'ssbu_native.exe'
+    a.exe = a.exe or main_exe
     state_file = os.path.join(a.build, 'state.json')
     with open(state_file) as f:
         state = json.load(f)
     work = os.path.join(a.build, 'work')
     exe = os.path.join(work, a.exe)
-    native = os.path.join(work, 'ssbu_native.exe')
+    native = os.path.join(work, main_exe)
     if not os.path.exists(exe):
         shutil.copy2(native, exe)
     elif exe != native and os.path.getmtime(exe) < os.path.getmtime(native):
@@ -76,9 +94,9 @@ def main():
         # (RECOMP_EXE) is older too, so it is only replaced when asked
         if a.refresh:
             shutil.copy2(native, exe)
-            print('%s was older than ssbu_native.exe: copied again' % a.exe)
+            print('%s was older than %s: copied again' % (a.exe, main_exe))
         else:
-            print('note: %s is older than ssbu_native.exe and may run an older runtime (--refresh copies it again)' % a.exe)
+            print('note: %s is older than %s and may run an older runtime (--refresh copies it again)' % (a.exe, main_exe))
     env = {k: v for k, v in os.environ.items() if not k.startswith(('RECOMP_', 'SSBU_'))}
     env['SSBU_ROMFS'] = state['dump']['romfs']
     env['SSBU_USERDATA'] = os.path.abspath(a.userdata)

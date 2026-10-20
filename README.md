@@ -89,7 +89,7 @@ by default; **In progress**; **Planned**.
 | Freeze watchdog: a report with the stack of every thread | Done |
 | Fixed 60 fps in every mode | In progress |
 | Items and stages as source | Planned |
-| Linux / Steam Deck | Planned |
+| Native Linux build ([BUILDING_LINUX.md](BUILDING_LINUX.md)): movies, menus, a whole match at 60 fps with sound on one PC (CachyOS, NVIDIA, Wayland); no F1 menu or online play there yet; Steam Deck not tested | In progress |
 
 ### Game modes (measured on the development PC)
 
@@ -181,7 +181,7 @@ per-frame logs against the lifted version (2,010 fight frames each). More: [docs
 | 5 | Fixed 60 fps in every mode; every mode playable start to end | In progress |
 | 6 | Single-file fighter packages (drop one file in the characters folder) | In progress |
 | 7 | Controllers confirmed on physical pads | In progress |
-| 8 | Linux / Steam Deck (the runtime is Windows-only today) | Planned |
+| 8 | Linux / Steam Deck (a native Linux build runs on one tested PC: [BUILDING_LINUX.md](BUILDING_LINUX.md)) | In progress |
 
 ## FAQ
 

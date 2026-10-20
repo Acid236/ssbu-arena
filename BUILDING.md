@@ -87,6 +87,9 @@ Making the package (maintainers; needs the MSVC Build Tools and the tools of the
 names only the runtime's own objects; no path or name of the PC; with `--against <build\work>` none of a dump build's
 tables is in any file), writes `dist/ssbu-runtime-<commit>.zip` and prints its SHA-256 for `RUNTIME_RELEASE`.
 
+**On Linux**, see [BUILDING_LINUX.md](BUILDING_LINUX.md): a native build with `scripts/linux/install_deps.sh` and
+`setup.py --target linux`. This file describes the Windows build.
+
 ## What you need
 
 | Requirement | Version tested | Where from |
