@@ -322,6 +322,7 @@ void r1_ring_release(void) {                              /* every slot dropped:
     g_rg_count = 0; g_rg_head = 0;
 }
 int r1_ring_capture(long long frame, Ctx *c) {
+    R1_CTR("capture (frame)", frame, 0);
     double t0 = now_ms(); int seg_was = g_rgp_seg; g_rgp_seg = 4;
     if (!g_rg_ready) {                                    /* the first time: r1's full save (shadow filled, marks on: one hitch), the ring's base */
         g_rgp_seg = seg_was;
@@ -509,22 +510,40 @@ static void rgc_before(void) {                          /* threads held, before 
     if (!g_rgc_fix || !g_catch_addr) return;
     memcpy(g_rgc_now, (void *)(uintptr_t)g_catch_addr, sizeof g_rgc_now);
 }
+void nnunwind_catch_reinsert(uint64_t cfa, uint64_t jb); void nnunwind_catch_free(unsigned i);   /* nnunwind.c (hs15: its hash and probing) */
+/* (hs15) after a load: the host fiber stacks still in use (some guest fiber's host fiber, a thread's current fiber, a stack a
+ * thread's stack pointer is on); a catch record on any other host fiber stack ever made is dead (the coroutine there was made
+ * again on a new host fiber, or the fiber exists only in states thrown away): dropped instead of kept for ever. These dead
+ * records piled up at the same CFA (h15e0: 25 of one frame) and, with the old hash, overwrote live ones (pp3h). */
+static uint64_t g_rgc_live[2048]; static int g_rgc_nlive; static long long g_rgc_dead;
+static void rgc_live_cb(uint64_t key, Ctx *c, uint64_t stack, uint64_t size, void *fiber) {
+    (void)key; (void)c; (void)stack; (void)size;
+    if (fiber && g_rgc_nlive < 2048) g_rgc_live[g_rgc_nlive++] = *(uint64_t *)((uint8_t *)fiber + 0x20);
+}
+static int rgc_dead(uint64_t jb) {                     /* jb on a host fiber stack that nothing uses now */
+    size_t i; for (i = 0; i < g_nbf; i++) if (jb >= g_bf_lo[i] && jb < g_bf_hi[i]) break;
+    if (i == g_nbf) return 0;                           /* not a fiber stack made by os_threads.c (a thread's own stack): kept */
+    uint64_t lo = g_bf_lo[i], hi = g_bf_hi[i];
+    for (int k = 0; k < g_rgc_nlive; k++) if (g_rgc_live[k] == lo) return 0;
+    for (int k = 0; k < g_nlive; k++) if (g_live_rsp[k] >= lo && g_live_rsp[k] < hi) return 0;     /* (live_rsps of fibers_restore_all: a thread is on it) */
+    return 1;
+}
 static void rgc_after(void) {                           /* after the copies and fibers_restore_all (g_rest_lo / g_rest_hi: the stacks copied back) */
     if (!g_rgc_fix || !g_catch_addr) return;
     RgCatch *t = (RgCatch *)(uintptr_t)g_catch_addr; long long dropped = 0, kept = 0;
-    for (int i = 0; i < 8192; i++) if (t[i].cfa > 1 && !rest_stack(t[i].jb)) { t[i].cfa = 1; t[i].jb = 0; dropped++; }
+    static int deadfix = -1; if (deadfix < 0) { const char *e = getenv("SSBU_R1_CATCHDEAD"); deadfix = !(e && e[0] == '0'); }
+    if (deadfix) { g_rgc_nlive = 0; os_r1_fibers(rgc_live_cb); AcquireSRWLockShared(&g_bf_lock); }
+    static int tr = -1; if (tr < 0) tr = getenv("SSBU_UNWIND_TRACE") != NULL;
+    if (tr) { void nnunwind_trace_note(const char *what, uint64_t cfa, uint64_t jb);
+              for (int i = 0; i < 8192; i++) if (t[i].cfa > 1) nnunwind_trace_note(rest_stack(t[i].jb) ? "load: restored record kept (its stack copied back)" : "load: restored record dropped", t[i].cfa, t[i].jb);
+              for (int k = 0; k < 8192; k++) if (g_rgc_now[k].cfa > 1) nnunwind_trace_note(rest_stack(g_rgc_now[k].jb) ? "load: present record not kept (its stack copied back)" : deadfix && rgc_dead(g_rgc_now[k].jb) ? "load: present record dead" : "load: present record kept", g_rgc_now[k].cfa, g_rgc_now[k].jb); }
+    for (int i = 0; i < 8192; i++) if (t[i].cfa > 1 && !rest_stack(t[i].jb)) { nnunwind_catch_free((unsigned)i); dropped++; }
     for (int k = 0; k < 8192; k++) {                    /* nnunwind.c catch_put, without its lock (every guest thread is held) */
         if (g_rgc_now[k].cfa <= 1 || !g_rgc_now[k].jb || rest_stack(g_rgc_now[k].jb)) continue;
-        uint64_t cfa = g_rgc_now[k].cfa; unsigned h = (unsigned)((cfa >> 4) * 2654435761u) & 8191u, ff = 8192;
-        for (unsigned n = 0; n < 64; n++) {
-            unsigned i = (h + n) & 8191u;
-            if (t[i].cfa == cfa && t[i].jb == g_rgc_now[k].jb) { ff = i; break; }      /* (the records are per host stack: nnunwind.c catch_here) */
-            if (t[i].cfa <= 1 && ff == 8192) ff = i;
-            if (t[i].cfa == 0) break;
-        }
-        if (ff == 8192) ff = h;
-        t[ff] = g_rgc_now[k]; kept++;
+        if (deadfix && rgc_dead(g_rgc_now[k].jb)) { g_rgc_dead++; continue; }
+        nnunwind_catch_reinsert(g_rgc_now[k].cfa, g_rgc_now[k].jb); kept++;     /* (the records are per host stack: nnunwind.c catch_here) */
     }
+    if (deadfix) ReleaseSRWLockShared(&g_bf_lock);
     g_rgc_dropped += dropped; g_rgc_kept += kept; if (dropped || kept) g_rgc_loads_changed++;
 }
 int r1_ring_load(long long frame, Ctx *c) {
@@ -555,6 +574,7 @@ int r1_ring_load(long long frame, Ctx *c) {
         SwitchToThread();
     }
     double t1 = now_ms();
+    R1_CTR("load (state of frame)", frame, 0);
     rgc_before();
     g_rg_ntl = 0;
     if (g_rgs_on > 0) rgv_before(si, r1_ring_newest());

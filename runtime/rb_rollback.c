@@ -92,6 +92,14 @@ static int rbg_rollback(Ctx *c, long long i, int m) {
     if (g_rbg_rb <= 20 || g_rbg_rb % 200 == 0 || g_rbg_detail > 0) LOG("r1: RB NET: rollback %lld at frame %lld: wrong guess at %d, state of frame %lld loaded in %.3f ms, %d frames again\n", g_rbg_rb, i, m, best, now_ms() - t0, k);
     return 1;
 }
+/* (hs15, TEST ONLY) SSBU_RB_NET_TEST_SCHED=<frame>:<state>,... : at the real safe point of that frame, a rollback that loads
+ * that state (same pads), taken like a wrong guess: replays a pair's rollback schedule in one loop game */
+static int rbg_sched(long long i, int m) {
+    static int sn = -1; static long long sf[64], sl[64];
+    if (sn < 0) { sn = 0; const char *e = getenv("SSBU_RB_NET_TEST_SCHED"); while (e && *e && sn < 64) { long long a, b; if (sscanf(e, "%lld:%lld", &a, &b) != 2) break; sf[sn] = a; sl[sn] = b; sn++; e = strchr(e, ','); if (e) e++; } }
+    for (int q = 0; q < sn; q++) if (sf[q] == i) { sf[q] = -1; LOG("r1: RB NET TEST_SCHED: rollback at frame %lld to the state of frame %lld\n", i, sl[q]); if (m <= 0 || m > sl[q] + 1) m = (int)(sl[q] + 1); }
+    return m;
+}
 /* at the safe point (H2) of every pass while the fight runs (r1_ring.c rgs_step) */
 static void rbg_step_body(Ctx *c) {
     long long i = g_rgs_next;
@@ -146,6 +154,7 @@ static void rbg_step_body(Ctx *c) {
         return;
     }
     rbn_pass_hash(i);
+    { extern volatile long long g_unwind_trace_frame; g_unwind_trace_frame = i + 1; }      /* (hs15) the frame the next pass simulates, for SSBU_UNWIND_TRACE */
     { static int tr = -1; if (tr < 0) tr = getenv("SSBU_RB_NET_TRACE") ? atoi(getenv("SSBU_RB_NET_TRACE")) : 0;
       if (tr > 0 && i <= tr) LOG("r1: RB NET trace: safe point after pass %lld, phase %d, left %d, remote pads up to %lld, %.3f ms\n", i, g_ra_phase, g_rgs_left, rbn_confirmed(), now_ms()); }
     if (g_ra_phase == 2) {                              /* a re-run pass ended: its state is needed only from the newest frame with every pad known on */
@@ -170,7 +179,7 @@ static void rbg_step_body(Ctx *c) {
     } else {                                            /* a real pass ended */
         g_rgs_next = i + 1; g_rbg_real++;
         rbn_drain(i);
-        int m = rbn_take_mismatch();
+        int m = rbg_sched(i, rbn_take_mismatch());
         if (m > 0 && m <= i) {
             /* captured anyway, with the threads kept held for the load that follows (R2 round 2: load hold 3.5 -> 0.2 ms);
              * SSBU_RB_NET_KEEP=0: no capture, the load holds the threads itself */
@@ -188,6 +197,24 @@ static void rbg_step_body(Ctx *c) {
             double ts = now_ms(); rbg_wait_until(ts + g_rbg_test_ms);
             LOG("r1: RB NET TEST: stalled %.0f ms at frame %lld (watchdog releases so far %lld, workers held %d); rollback of %d frames\n", now_ms() - ts, i, g_ra_wd_fired, (int)g_ra_wh_on, g_rbg_test_k);
             if (g_rbg_test_k > 0 && rbg_rollback(c, i, (int)(i - g_rbg_test_k + 1))) return;
+        }
+        {   /* (hs15, TEST ONLY) SSBU_RB_NET_TEST_EH=<k>[,<from frame>]: after a real pass in which a C++ throw or the entry of a
+             * catch frame happened (lua2cpp coroutines: nnunwind.c), a rollback of k frames (k 0: 1..6 in turn) with the same pads:
+             * the throw / entry runs again in the re-run passes (pp3h crashed at such a throw); the timeline must not change */
+            static int eh_k = -2; static long long eh_from; static long eh_last; static int eh_turn; static long long eh_n;
+            long nnunwind_events(void);
+            if (eh_k == -2) { const char *e = getenv("SSBU_RB_NET_TEST_EH"); eh_k = -1; if (e && *e) { eh_from = 8; sscanf(e, "%d,%lld", &eh_k, &eh_from); } eh_last = nnunwind_events(); }
+            if (eh_k >= 0 && !g_rbg_noring) {
+                long ev = nnunwind_events();
+                if (ev != eh_last && i >= eh_from) {
+                    int k = eh_k > 0 ? eh_k : 1 + (eh_turn++ % 6);
+                    if (k > i - 1) k = (int)(i - 1);
+                    eh_last = ev; eh_n++;
+                    if (eh_n <= 20 || eh_n % 100 == 0) LOG("r1: RB NET TEST_EH: %lld: throws / catch entries at frame %lld: rollback of %d frames\n", eh_n, i, k);
+                    if (k > 0 && rbg_rollback(c, i, (int)(i - k + 1))) return;
+                }
+                eh_last = ev;
+            }
         }
     }
     /* the next pass is a real one (frame i + 1): pending wrong guesses first, then the other player, then the tick */
@@ -324,6 +351,8 @@ static void rbg_report(void) {
     LOG("r1: RB NET report: task-worker watchdog releases %lld (since the process start), rollbacks with the workers not held %lld (watchdog paused at H2: %s)\n", g_ra_wd_fired, g_rbg_rb_unheld, g_rbg_wdfix ? "yes" : "NO");
     LOG("r1: RB NET report: loads that took the sound thread at another wait after 5 ms %lld; threads not at their wait after 500 ms %d (last load)\n", g_th_audio_other, g_th_mismatch);
     LOG("r1: RB NET report: fiber host stacks in use at a load (not copied back) %lld, seen %lld; fibers found running by their thread (TEB) at a capture %lld; catch table at loads: entries dropped %lld, live entries put back %lld, loads changed %lld (hs13)\n", g_fib_live_skip, g_fib_live_seen, g_fib_teb_running, g_rgc_dropped, g_rgc_kept, g_rgc_loads_changed);
+    { void nnunwind_catch_stats(long long *, long long *, long long *, long long *, long long *); long long l, d, cr, fu, mp; nnunwind_catch_stats(&l, &d, &cr, &fu, &mp);
+      LOG("r1: RB NET report: catch table (hs15): %lld live records, %lld removed slots, %lld puts found no free slot in their window, %lld table full, longest probe %lld; dead records dropped at loads %lld (host fiber stacks known %zu)\n", l, d, cr, fu, mp, g_rgc_dead, g_nbf); }
     LOG("r1: RB NET report: host stack pages inside the guest windows left out of the state %lld (%lld ranges, %lld from fibers made later)\n", g_hs_pages, g_hs_ranges, g_hs_fibers_later);
     if (g_rbg_rb) LOG("r1: RB NET report: rollback parts (ms per rollback): before the load %.3f (keep mode %d), load %.3f, re-run passes %.3f (%.2f per rollback, %.3f each), re-run captures %.3f (%.2f per rollback, recap mode %d)\n",
         g_rbg_t_pre / g_rbg_rb, g_rbg_keep, g_rbg_t_load / g_rbg_rb, g_rbg_t_rerun / g_rbg_rb, (double)g_rbg_n_rerun / g_rbg_rb, g_rbg_n_rerun ? g_rbg_t_rerun / g_rbg_n_rerun : 0.0, g_rbg_t_recap / g_rbg_rb, (double)g_rbg_n_recap / g_rbg_rb, g_rbg_recap);

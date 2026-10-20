@@ -151,7 +151,10 @@ int rbn_handshake_wanted(void) {
         w = e && e[0] && e[0] != '0' && _strnicmp(e, "loop", 4) && !(h && h[0] == '0'); }
     return w;
 }
-uint64_t rbn_match_seed(void) { return g_hs_seed; }
+uint64_t rbn_match_seed(void) {
+    if (g_loop && !g_hs_seed) { const char *e = getenv("SSBU_RB_NET_LOOP_SEED"); if (e && *e) return strtoull(e, NULL, 0); }   /* (hs15, test) the loop game's generators from a seed */
+    return g_hs_seed;
+}
 int rbn_match_cancelled(void) { return g_hs_cancelled != 0; }
 static void hs_head(RbhMsg *m, int type) { memset(m, 0, sizeof *m); m->type = (uint8_t)type; m->proto = RBH_PROTO; m->game_build = (int16_t)g_game_build; m->exe_stamp = exe_stamp(); m->nonce = g_hs_nonce; }
 static void hs_send(const void *p, int n) { if (net_rb_send(p, n)) g_hs_tx++; }
@@ -545,12 +548,29 @@ static void on_check(long long cf, uint32_t ck) {
     if (mine == ck) g_check_ok++;
     else { g_desync++; if (g_desync_first < 0) { g_desync_first = cf; printf("[rbnet] DESYNC: frame %lld checksum here %08x, the other game %08x\n", cf, mine, ck); fflush(stdout); } }
 }
+/* (hs15, test) SSBU_RB_NET_LOOP_BOT2=<seed>: the loop test's other player is the bot of that seed (11 = the joiner of a pair) */
+static unsigned loop_bot2(void) {
+    static int on = -1; static unsigned seed;
+    if (on < 0) { const char *e = getenv("SSBU_RB_NET_LOOP_BOT2"); on = e && *e; if (on) seed = (unsigned)strtoul(e, NULL, 0); }
+    return on ? seed : g_bot_seed ^ 0x5bd1e995u;
+}
+static RbPad loop_remote_pad(long long f) {             /* with SSBU_RB_NET_LOOP_BOT2: exactly what that bot sends as a pair's other game (its input delay applied) */
+    if (!getenv("SSBU_RB_NET_LOOP_BOT2")) return bot_pad(loop_bot2(), f);
+    RbPad z; memset(&z, 0, sizeof z);
+    return f <= g_delay ? z : rb_pad_rest(bot_pad(loop_bot2(), f - g_delay));
+}
 /* main thread, at the safe point: the messages received since the last call */
 void rbn_drain(long long cur) {
     InterlockedExchange64(&g_cur, cur);
     if (g_loop && g_started) {                          /* loop test: the bot's pad of frame f arrives at frame f + delay - lat */
-        long long upto = cur + g_delay - g_loop_lat;
-        for (long long f = rb_input_remote_latest(g_remote) + 1; f <= upto; f++) rb_input_remote_put(g_remote, (int)f, bot_pad(g_bot_seed ^ 0x5bd1e995u, f));
+        static long long lat2_from = -2; static int lat2;          /* (hs15, test) SSBU_RB_NET_LOOP_LAT2=<frame>,<lat>: the lateness changes at that frame */
+        if (lat2_from == -2) { const char *e = getenv("SSBU_RB_NET_LOOP_LAT2"); lat2_from = -1; if (e && *e) sscanf(e, "%lld,%d", &lat2_from, &lat2); }
+        static int jit = -2; static unsigned jseed;                /* (hs15, test) SSBU_RB_NET_LOOP_JIT=<seed>: lateness g_loop_lat or one less, changing every 4..20 frames */
+        if (jit == -2) { const char *e = getenv("SSBU_RB_NET_LOOP_JIT"); jit = e && *e; if (jit) jseed = (unsigned)strtoul(e, NULL, 0); }
+        int lat = lat2_from >= 0 && cur >= lat2_from ? lat2 : g_loop_lat;
+        if (jit) { uint32_t h = mix32(jseed * 0x9E3779B9u ^ (uint32_t)(cur / (4 + (mix32(jseed) % 17))) * 0x85EBCA6Bu); lat -= (int)(h & 1); }
+        long long upto = cur + g_delay - lat;
+        for (long long f = rb_input_remote_latest(g_remote) + 1; f <= upto; f++) rb_input_remote_put(g_remote, (int)f, loop_remote_pad(f));
         return;
     }
     if (rbn_handshake_wanted()) hs_block_compare();
@@ -590,8 +610,31 @@ void rbn_hash_add(const void *p, size_t n) {
     g_hlines++;
 }
 /* the safe point after pass f: the lines since the last call belong to frame f (a re-run pass overwrites the value) */
+/* (hs15, pp4: a frame simulated with a wrong pad can leave the fighters' frame lines unchanged, e.g. a button during an
+ * animation that ignores it) the frame's checksum also folds the pads the pass gave the game (the last read of each
+ * player, whether the reads varied) and the extra fighter fields of rbn_hash_extra: a frame whose final simulation got a
+ * wrong pad now differs from the other game's. SSBU_RB_NET_CKPADS=0 = the old checksum (test). */
+static int g_ckpads = -1;
+int rbn_hash_wanted(void) { return g_on > 0; }
+void rbn_hash_extra(const void *p, size_t n) {          /* folded into the frame's checksum only (not a "d" line field) */
+    if (g_on <= 0) return;
+    if (g_ckpads < 0) { const char *e = getenv("SSBU_RB_NET_CKPADS"); g_ckpads = !(e && e[0] == '0'); }
+    if (!g_ckpads) return;
+    const uint8_t *b = p; while (n--) { g_hacc ^= *b++; g_hacc *= 0x100000001b3ull; }
+}
+static uint64_t hash_pads(uint64_t h) {
+    if (g_ckpads < 0) { const char *e = getenv("SSBU_RB_NET_CKPADS"); g_ckpads = !(e && e[0] == '0'); }
+    if (!g_ckpads) return h;
+    for (int q = 0; q < 2; q++) {
+        struct { uint64_t buttons; int16_t lx, ly, rx, ry; uint32_t read, varied; } r;
+        memset(&r, 0, sizeof r);
+        if (g_acc_n[q]) { r.buttons = g_acc_pad[q].buttons; r.lx = g_acc_pad[q].lx; r.ly = g_acc_pad[q].ly; r.rx = g_acc_pad[q].rx; r.ry = g_acc_pad[q].ry; r.read = 1; r.varied = (uint32_t)g_acc_var[q]; }
+        const uint8_t *b = (const uint8_t *)&r; for (size_t n = 0; n < sizeof r; n++) { h ^= b[n]; h *= 0x100000001b3ull; }
+    }
+    return h;
+}
 void rbn_pass_hash(long long f) {
-    if (g_hlines && f > 0) { g_hash[f % HR] = g_hacc; g_hframe[f % HR] = f; }
+    if (g_hlines && f > 0) { g_hash[f % HR] = hash_pads(g_hacc); g_hframe[f % HR] = f; }
     if (f > 0) { int x = (int)(f % HR2);
         for (int q = 0; q < 2; q++) { g_upad[x][q] = g_acc_pad[q]; g_un[x][q] = g_acc_n[q]; g_uvar[x][q] = g_acc_var[q]; }
         memcpy(g_ulines[x], g_lacc, sizeof g_lacc); g_unl[x] = g_lacc_n; }

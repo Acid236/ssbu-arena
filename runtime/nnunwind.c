@@ -194,30 +194,111 @@ static int catch_here(const jmp_buf *jb) {            /* jb is on the stack this
 #endif
     return a >= lo && a < hi;
 }
-static void catch_put(uint64_t cfa, jmp_buf *jb) {
-    unsigned h = (unsigned)((cfa >> 4) * 2654435761u) & (CATCH_SLOTS - 1), first_free = CATCH_SLOTS;
-    AcquireSRWLockExclusive(&g_catch_lock);
-    for (unsigned n = 0; n < 64; n++) {
+/* (R3 hs15, pp3h: "f_720052e2f0 handled an exception but was not entered through nro_catch_call" after a rollback) the old
+ * hash used bits 4..16 of the CFA only, and every lua2cpp coroutine's entry frame sits at the same offset below the top of
+ * its 64 KB-aligned guest stack: all of them fell into one or two buckets and shared ONE 64-slot probe window. Records of
+ * host stacks a rollback abandoned (the coroutine made again on a new host fiber) stay in the table; once the window was
+ * full a new record overwrote the slot at the bucket, i.e. a live record of another coroutine: its throw later found no
+ * frame. Now (SSBU_UNWIND_CATCHFIX=0 = the old way, test): a mixing hash, the whole table is probed, a removed record next
+ * to an empty slot becomes empty again (chains do not grow for ever), and a live record is never overwritten.
+ * SSBU_UNWIND_TEST_PROBES=<n> (test only): the probe window is n slots (the old way's crowding, reached sooner). */
+static int g_cfix = 1, g_cprobes;
+static volatile LONG g_c_crowded, g_c_full, g_c_maxprobe;
+static unsigned catch_hash(uint64_t cfa) {
+    if (!g_cfix) return (unsigned)((cfa >> 4) * 2654435761u) & (CATCH_SLOTS - 1);
+    uint64_t x = cfa >> 4; x ^= x >> 33; x *= 0xff51afd7ed558ccdull; x ^= x >> 33; x *= 0xc4ceb9fe1a85ec53ull; x ^= x >> 33;
+    return (unsigned)x & (CATCH_SLOTS - 1);
+}
+static unsigned catch_window(void) { return g_cprobes > 0 ? (unsigned)g_cprobes : g_cfix ? CATCH_SLOTS : 64; }
+static void catch_free_slot(unsigned i) {                                     /* lock held: record i removed */
+    g_catch[i].cfa = 1; g_catch[i].jb = NULL;
+    if (!g_cfix || g_catch[(i + 1) & (CATCH_SLOTS - 1)].cfa != 0) return;
+    for (unsigned n = 0; n < CATCH_SLOTS && g_catch[i].cfa == 1; n++) { g_catch[i].cfa = 0; i = (i - 1) & (CATCH_SLOTS - 1); }
+}
+/* lock held (or every guest thread held: r1_ring.c rgc_after). here: compare only records on this thread's stack. */
+static void catch_insert(uint64_t cfa, jmp_buf *jb, int here) {
+    unsigned h = catch_hash(cfa), first_free = CATCH_SLOTS, win = catch_window(), n;
+    for (n = 0; n < win; n++) {
         unsigned i = (h + n) & (CATCH_SLOTS - 1);
-        if (g_catch[i].cfa == cfa && catch_here(g_catch[i].jb)) { first_free = i; break; }   /* a frame at the same guest stack address ON THIS STACK replaces a stale one */
+        if (g_catch[i].cfa == cfa && (here ? catch_here(g_catch[i].jb) : g_catch[i].jb == jb)) { first_free = i; break; }   /* a frame at the same guest stack address ON THIS STACK replaces a stale one */
         if (g_catch[i].cfa <= 1 && first_free == CATCH_SLOTS) first_free = i;
         if (g_catch[i].cfa == 0) break;
     }
-    if (first_free == CATCH_SLOTS) first_free = h;                            /* crowded by records of abandoned stacks: reuse */
+    if ((LONG)n > g_c_maxprobe) g_c_maxprobe = (LONG)n;
+    if (first_free == CATCH_SLOTS) {                                          /* no free slot in the window */
+        InterlockedIncrement(&g_c_crowded);
+        if (!g_cfix || g_cprobes > 0) first_free = h;                         /* the old way: the slot at the bucket is overwritten (a live record lost) */
+        else { InterlockedIncrement(&g_c_full); first_free = h; }             /* the whole table is full of live records (never seen) */
+    }
     g_catch[first_free].cfa = cfa; g_catch[first_free].jb = jb;
+}
+static volatile LONG g_c_puts;
+volatile long long g_unwind_trace_frame;                   /* (hs15) rb_rollback.c: the frame being simulated */
+static int g_ctrace;                                       /* SSBU_UNWIND_TRACE=1: every put / take of a catch record kept in memory, printed at a failure (diagnosis) */
+typedef struct { long long f; const char *what; uint64_t cfa; const void *jb; uint64_t stk; void *fiber; DWORD tid; int found; } CTr;
+static CTr *g_ctr; static volatile LONG g_nctr;          /* 1 << 20 events, allocated when the trace is on */
+static void ctrace(const char *what, uint64_t cfa, const void *jb, int found) {
+    if (!g_ctrace || !g_ctr || g_unwind_trace_frame <= 0) return;
+#ifdef _WIN32                                              /* (the trace is a Windows diagnosis: the rollback ring is Windows only) */
+    NT_TIB *tib = (NT_TIB *)NtCurrentTeb();
+    LONG n = InterlockedIncrement(&g_nctr) - 1; CTr *t = &g_ctr[n & ((1 << 20) - 1)];
+    t->f = g_unwind_trace_frame; t->what = what; t->cfa = cfa; t->jb = jb; t->stk = *(uint64_t *)((uint8_t *)tib + 0x1478); t->fiber = GetCurrentFiber(); t->tid = GetCurrentThreadId(); t->found = found;
+#else
+    (void)what; (void)cfa; (void)jb; (void)found;
+#endif
+}
+void nnunwind_trace_note(const char *what, uint64_t cfa, uint64_t jb) { ctrace(what, cfa, (const void *)(uintptr_t)jb, 1); }   /* r1_ring.c: what a load did to a record */
+static void ctrace_dump(uint64_t cfa) {
+    if (!g_ctrace || !g_ctr) return;
+#ifndef _WIN32
+    (void)cfa;
+#else
+    NT_TIB *tib = (NT_TIB *)NtCurrentTeb(); uint64_t lo = *(uint64_t *)((uint8_t *)tib + 0x1478), hi = (uint64_t)(uintptr_t)tib->StackBase;
+    LONG n = g_nctr, from = n > (1 << 20) ? n - (1 << 20) : 0;
+    long long ff = g_unwind_trace_frame - 60;
+    printf("unwind-trace: events of frame %llx, of this stack %llx..%llx, and captures / loads / restores of this stack from frame %lld (%ld events kept):\n", (unsigned long long)cfa, (unsigned long long)lo, (unsigned long long)hi, ff, (long)(n - from));
+    for (LONG i = from; i < n; i++) { CTr *t = &g_ctr[i & ((1 << 20) - 1)];
+        uint64_t j = (uint64_t)(uintptr_t)t->jb;
+        int mine = t->cfa == cfa || (j >= lo && j < hi) || t->stk == lo;
+        int frame_ev = t->f >= ff && (!strncmp(t->what, "load (", 6) || !strncmp(t->what, "capture", 7));
+        if (!mine && !frame_ev) continue;
+        printf("unwind-trace:   f %lld %s %llx jb %p %s stack %llx fiber %p thread %lu\n", t->f, t->what, (unsigned long long)t->cfa, t->jb, t->found ? "ok" : "NONE", (unsigned long long)t->stk, t->fiber, (unsigned long)t->tid); }
+#endif
+}
+long nnunwind_events(void) { return g_throws + g_c_puts; }        /* (hs15, test switch SSBU_RB_NET_TEST_EH) throws + entries of catch frames so far */
+static void catch_put(uint64_t cfa, jmp_buf *jb) {
+    InterlockedIncrement(&g_c_puts);
+    AcquireSRWLockExclusive(&g_catch_lock);
+    catch_insert(cfa, jb, 1);
     ReleaseSRWLockExclusive(&g_catch_lock);
+    ctrace("put", cfa, jb, 1);
+}
+/* r1_ring.c (a ring load, every guest thread held): put a record back as it was */
+void nnunwind_catch_reinsert(uint64_t cfa, uint64_t jb) { catch_insert(cfa, (jmp_buf *)(uintptr_t)jb, 0); }
+void nnunwind_catch_free(unsigned i) { if (i < CATCH_SLOTS) catch_free_slot(i); }
+void nnunwind_catch_stats(long long *live, long long *dead, long long *crowded, long long *full, long long *maxprobe) {
+    long long l = 0, d = 0; for (unsigned i = 0; i < CATCH_SLOTS; i++) { if (g_catch[i].cfa > 1) l++; else if (g_catch[i].cfa == 1) d++; }
+    *live = l; *dead = d; *crowded = g_c_crowded; *full = g_c_full; *maxprobe = g_c_maxprobe;
 }
 static jmp_buf *catch_take(uint64_t cfa, jmp_buf *only) {                     /* removes the record; only != NULL: remove if it is that one */
-    unsigned h = (unsigned)((cfa >> 4) * 2654435761u) & (CATCH_SLOTS - 1);
+    unsigned h = catch_hash(cfa), win = catch_window();
     jmp_buf *jb = NULL;
     AcquireSRWLockExclusive(&g_catch_lock);
-    for (unsigned n = 0; n < 64; n++) {
+    for (unsigned n = 0; n < win; n++) {
         unsigned i = (h + n) & (CATCH_SLOTS - 1);
-        if (g_catch[i].cfa == cfa && catch_here(g_catch[i].jb)) { if (!only || g_catch[i].jb == only) { jb = g_catch[i].jb; g_catch[i].cfa = 1; g_catch[i].jb = NULL; } break; }
+        if (g_catch[i].cfa == cfa && catch_here(g_catch[i].jb)) { if (!only || g_catch[i].jb == only) { jb = g_catch[i].jb; catch_free_slot(i); } break; }
         if (g_catch[i].cfa == 0) break;
     }
     ReleaseSRWLockExclusive(&g_catch_lock);
+    ctrace(only ? "take(return)" : "take(handler)", cfa, only ? (const void *)only : (const void *)jb, jb != NULL);
     return jb;
+}
+static void catch_diag(uint64_t cfa) {                                        /* (hs15) the "not entered" report: what the table holds */
+    long long l, d, cr, fu, mp; int same = 0, here = 0;
+    for (unsigned i = 0; i < CATCH_SLOTS; i++) if (g_catch[i].cfa == cfa) { same++; if (catch_here(g_catch[i].jb)) here++; }
+    nnunwind_catch_stats(&l, &d, &cr, &fu, &mp);
+    printf("unwind: catch table: %d records of this frame (%d on this stack), %lld live records, %lld removed, %lld puts found no free slot in their window, %lld table full, longest probe %lld (fix %s, window %u)\n",
+           same, here, l, d, cr, fu, mp, g_cfix ? "on" : "OFF", catch_window());
 }
 
 /* Entry of every lifted function whose LSDA has a catch clause (generated code: `nro_catch_call(c, u_<fn>)`). */
@@ -328,6 +409,7 @@ static void eh_raise(Ctx *c, int reason) {
         jmp_buf *jb = catch_take(cfa, NULL);
         if (!jb) {
             printf("\nunwind: f_%llx handled an exception but was not entered through nro_catch_call (frame %llx)\n", (unsigned long long)pad.function.start, (unsigned long long)cfa);
+            catch_diag(cfa); ctrace_dump(cfa); fflush(stdout);
             eh_terminate(c, "no host frame to return to");
         }
         {   /* (R3 hs13, diagnosis) the jmp_buf must be on the stack this thread runs on now (its TEB limits): a longjmp across
@@ -356,5 +438,14 @@ void unwind_report(FILE *out) {
 
 void register_unwind_imports(void) {
     g_log = getenv("SSBU_UNWIND_LOG") != NULL;
+    /* (hs15, the pp3h crash) every page of the catch table written once now: an image's .bss page that was never written is
+     * copy-on-write, and r1_state.c's state collection takes only read-write pages, so the part of the table not yet used at
+     * the ring's full save (48 of its 128 KB in every run: "extra ... + 80 KB") was never captured nor restored: a load put the
+     * coroutines' stacks back but left those records as they were (a record of a coroutine that had ended since was missing:
+     * "handled an exception but was not entered through nro_catch_call"). SSBU_UNWIND_TOUCH=0: the old way (test). */
+    { const char *e = getenv("SSBU_UNWIND_TOUCH");
+      if (!(e && e[0] == '0')) for (unsigned i = 0; i < CATCH_SLOTS; i += 4096 / sizeof(CatchSlot)) ((volatile CatchSlot *)g_catch)[i].cfa = 0;
+      if (!(e && e[0] == '0')) { volatile uint8_t *last = (volatile uint8_t *)&g_catch[CATCH_SLOTS - 1]; *last = *last; ((volatile CatchSlot *)g_catch)[CATCH_SLOTS - 1].cfa = 0; } }
+    { const char *e = getenv("SSBU_UNWIND_CATCHFIX"); g_cfix = !(e && e[0] == '0'); e = getenv("SSBU_UNWIND_TEST_PROBES"); g_cprobes = e ? atoi(e) : 0; g_ctrace = getenv("SSBU_UNWIND_TRACE") != NULL; if (g_ctrace) g_ctr = VirtualAlloc(NULL, sizeof(CTr) << 20, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE); }
     eh_set_unwinder(eh_raise);
 }
