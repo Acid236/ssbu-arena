@@ -82,6 +82,188 @@ static RbPad bot_pad(unsigned seed, long long f) {
 }
 int rbn_bot_on(void) { return g_bot; }
 
+/* ---------------------------------------------------------------- the match handshake (before the match; rb_hs.h)
+ * Over the same channel as the pads (packet type 16), message types 0x48.. (the pad messages are 1..4):
+ *   CHOICE  joiner -> host, every 100 ms from its match set-up: its own player-1 choice (fighter, colour, controls)
+ *   PROPOSE host -> joiner, every 100 ms once the host is at its set-up and has the joiner's CHOICE: the whole match
+ *           (player 1 = the host's choice, player 2 = the joiner's, the host's stage / items / stocks, a new seed)
+ *   ACCEPT  joiner -> host (answered on the receive thread to every PROPOSE: a lost ACCEPT is made good)
+ *   REFUSE  either way: protocol / game build differ (the reason is printed on both sides)
+ *   BLOCK   both, at the match start: the game's match block (rules + the two player records) in chunks; each game
+ *           compares it with its own and prints the differing ranges (a check, nothing is changed)
+ * Header of every message: type, protocol, game build, exe link stamp (a different stamp is only reported), round. */
+#include "rb_hs.h"
+#define RBH_PROTO 1
+enum { RBH_CHOICE = 0x48, RBH_PROPOSE = 0x49, RBH_ACCEPT = 0x4a, RBH_REFUSE = 0x4b, RBH_BLOCK = 0x4c };
+#pragma pack(push, 1)
+typedef struct { uint8_t type, proto; int16_t game_build; uint32_t exe_stamp; uint32_t round; RbhMatch m; } RbhMsg;
+typedef struct { uint8_t type, proto; int16_t game_build; uint32_t exe_stamp; uint32_t round; uint16_t off, len, total; uint8_t data[768]; } RbhBlock;
+#pragma pack(pop)
+extern int g_game_build;                                /* hostrt.c */
+uint64_t ga(uint64_t addr_13_0_4);                      /* hostrt.c (GA) */
+void host_fixed_random_reseed(uint64_t seed);           /* os_threads.c: nn::os::GenerateRandomBytes from the agreed seed on */
+static SRWLOCK g_hs_lock = SRWLOCK_INIT;
+static volatile LONG g_hs_round;                        /* this game's match set-ups so far */
+static RbhMsg g_hs_peer;  static int g_hs_have_peer;    /* host: the joiner's newest CHOICE */
+static RbhMsg g_hs_prop;  static int g_hs_have_prop;    /* host: the proposal sent; joiner: the proposal received */
+static volatile LONG g_hs_accepted, g_hs_refused; static char g_hs_why[160];
+static uint64_t g_hs_seed;
+static long long g_hs_tx, g_hs_rx;
+#define RBH_BLK 0xa48                                   /* match block + 0 .. + 0x580 + 2 * 0x260 + 8 */
+static uint8_t g_hs_mine_blk[RBH_BLK], g_hs_peer_blk[RBH_BLK]; static int g_hs_mine_ok, g_hs_peer_got, g_hs_blk_done; static uint8_t g_hs_peer_have[RBH_BLK / 768 + 1];
+static uint32_t exe_stamp(void) {
+    const uint8_t *b = (const uint8_t *)GetModuleHandleA(NULL); if (!b) return 0;
+    const IMAGE_NT_HEADERS *nt = (const IMAGE_NT_HEADERS *)(b + ((const IMAGE_DOS_HEADER *)b)->e_lfanew);
+    return nt->FileHeader.TimeDateStamp;
+}
+int rbn_handshake_wanted(void) {
+    static int w = -1;
+    if (w < 0) { const char *e = getenv("SSBU_RB_NET"), *h = getenv("SSBU_RB_NET_HANDSHAKE");
+        w = e && e[0] && e[0] != '0' && _strnicmp(e, "loop", 4) && !(h && h[0] == '0'); }
+    return w;
+}
+uint64_t rbn_match_seed(void) { return g_hs_seed; }
+static void hs_head(RbhMsg *m, int type, LONG round) { memset(m, 0, sizeof *m); m->type = (uint8_t)type; m->proto = RBH_PROTO; m->game_build = (int16_t)g_game_build; m->exe_stamp = exe_stamp(); m->round = (uint32_t)round; }
+static void hs_send(const void *p, int n) { if (net_rb_send(p, n)) g_hs_tx++; }
+static int hs_check(const RbhMsg *m, char *why, size_t n) {           /* 0 = the other game cannot play this match with us */
+    if (m->proto != RBH_PROTO) { snprintf(why, n, "handshake protocol %d here, %d there", RBH_PROTO, m->proto); return 0; }
+    if (m->game_build != (int16_t)g_game_build) { snprintf(why, n, "game build %d here, %d there (13.0.4 = 0, 13.0.5 = 1): both players need the same game version", g_game_build, m->game_build); return 0; }
+    return 1;
+}
+static void hs_refuse(LONG round, const char *why) {
+    RbhMsg r; hs_head(&r, RBH_REFUSE, round); snprintf((char *)&r.m, sizeof r.m, "%s", why); hs_send(&r, sizeof r);
+}
+/* the receive thread: a handshake message (1 = it was one) */
+static int hs_rx(const uint8_t *p, int n) {
+    if (n < 1 || p[0] < RBH_CHOICE || p[0] > RBH_BLOCK) return 0;
+    g_hs_rx++;
+    if (p[0] == RBH_BLOCK) {
+        if (n < (int)offsetof(RbhBlock, data)) return 1;
+        RbhBlock b; memset(&b, 0, sizeof b); memcpy(&b, p, (size_t)n < sizeof b ? (size_t)n : sizeof b);
+        if (b.off + b.len <= RBH_BLK && b.len <= sizeof b.data) { AcquireSRWLockExclusive(&g_hs_lock); memcpy(g_hs_peer_blk + b.off, b.data, b.len); g_hs_peer_have[b.off / 768] = 1; ReleaseSRWLockExclusive(&g_hs_lock); }
+        return 1;
+    }
+    if (n < (int)sizeof(RbhMsg)) return 1;
+    RbhMsg m; memcpy(&m, p, sizeof m);
+    char why[160];
+    AcquireSRWLockExclusive(&g_hs_lock);
+    switch (m.type) {
+    case RBH_CHOICE:                                    /* (host) */
+        if (g_local != 0) break;
+        if (!g_hs_have_peer || m.round >= g_hs_peer.round) { g_hs_peer = m; g_hs_have_peer = 1; }
+        if (g_hs_have_prop && g_hs_prop.round == m.round) hs_send(&g_hs_prop, sizeof g_hs_prop);   /* our proposal was lost */
+        break;
+    case RBH_PROPOSE:                                   /* (joiner) */
+        if (g_local != 1) break;
+        if (!hs_check(&m, why, sizeof why)) { snprintf(g_hs_why, sizeof g_hs_why, "%s", why); g_hs_refused = 1; hs_refuse((LONG)m.round, why); break; }
+        if ((LONG)m.round != g_hs_round) break;         /* not at that set-up (yet): the host sends it again */
+        g_hs_prop = m; g_hs_have_prop = 1;
+        { RbhMsg a; hs_head(&a, RBH_ACCEPT, (LONG)m.round); a.m = m.m; hs_send(&a, sizeof a); }
+        break;
+    case RBH_ACCEPT:                                    /* (host) */
+        if (g_local == 0 && g_hs_have_prop && m.round == g_hs_prop.round && !memcmp(&m.m, &g_hs_prop.m, sizeof m.m)) g_hs_accepted = 1;
+        break;
+    case RBH_REFUSE:
+        snprintf(g_hs_why, sizeof g_hs_why, "the other game refused: %.120s", (const char *)&m.m); g_hs_refused = 1;
+        break;
+    }
+    ReleaseSRWLockExclusive(&g_hs_lock);
+    return 1;
+}
+static uint64_t hs_new_seed(void) {
+    const char *e = getenv("SSBU_RB_NET_SEED");
+    uint64_t s;
+    if (e && *e) s = strtoull(e, NULL, 0);
+    else { LARGE_INTEGER t; QueryPerformanceCounter(&t); s = (uint64_t)t.QuadPart ^ ((uint64_t)GetCurrentProcessId() << 32) ^ GetTickCount64() * 0x9E3779B97F4A7C15ull; s ^= s >> 29; s *= 0xBF58476D1CE4E5B9ull; s ^= s >> 32; }
+    return s ? s : 1;
+}
+static void hs_print(const char *what, const RbhMatch *m) {
+    printf("[rbnet] handshake: %s: player 1 ui_chara %016llx colour %d controls %s, player 2 ui_chara %016llx colour %d controls %s; stage entry %016llx form %u flags %x second %016llx; hazards %d, items %u, rule kind %d, stocks %d; seed %016llx\n", what,
+           (unsigned long long)m->chara[0], m->colour[0], m->has_layout[0] ? "own layout" : "none", (unsigned long long)m->chara[1], m->colour[1], m->has_layout[1] ? "own layout" : "none",
+           (unsigned long long)*(const uint64_t *)m->stage, *(const uint32_t *)(m->stage + 8), *(const uint32_t *)(m->stage + 12), (unsigned long long)*(const uint64_t *)(m->stage + 16),
+           m->hazards, m->items, m->rule_kind, m->stock, (unsigned long long)m->seed);
+    fflush(stdout);
+}
+int rbn_handshake(const RbhMatch *mine, RbhMatch *out) {
+    if (!rbn_handshake_wanted() || rbn_on() <= 0 || g_loop) return 0;
+    LONG round = InterlockedIncrement(&g_hs_round);
+    double limit = getenv("SSBU_RB_NET_HS_WAIT") ? atof(getenv("SSBU_RB_NET_HS_WAIT")) * 1000.0 : 300000.0;
+    uint64_t t0 = GetTickCount64(), last_tx = 0, last_log = t0;
+    int ok = 0;
+    printf("[rbnet] handshake %ld: this game is the %s; own choice ui_chara %016llx colour %d; waiting for the other game (at most %.0f s)\n", (long)round, g_local ? "joiner (player 2)" : "host (player 1)",
+           (unsigned long long)mine->chara[0], mine->colour[0], limit / 1000.0);
+    fflush(stdout);
+    for (;;) {
+        uint64_t now = GetTickCount64();
+        if (g_hs_refused) break;
+        if ((double)(now - t0) > limit) { snprintf(g_hs_why, sizeof g_hs_why, "no agreement after %.0f s", limit / 1000.0); break; }
+        AcquireSRWLockExclusive(&g_hs_lock);
+        if (g_local == 0) {                             /* host: proposal = our choice + the joiner's */
+            if (!g_hs_have_prop && g_hs_have_peer && (LONG)g_hs_peer.round == round) {
+                char why[160];
+                if (!hs_check(&g_hs_peer, why, sizeof why)) { snprintf(g_hs_why, sizeof g_hs_why, "%s", why); g_hs_refused = 1; hs_refuse(round, why); }
+                else {
+                    if (g_hs_peer.exe_stamp != exe_stamp()) printf("[rbnet] handshake: NOTE the other game's exe was linked at another time (stamp %08x here, %08x there): a different build may desync\n", exe_stamp(), g_hs_peer.exe_stamp);
+                    RbhMatch m = *mine;
+                    m.chara[1] = g_hs_peer.m.chara[0]; m.colour[1] = g_hs_peer.m.colour[0];
+                    m.has_layout[1] = g_hs_peer.m.has_layout[0]; memcpy(m.layout[1], g_hs_peer.m.layout[0], sizeof m.layout[1]);
+                    if (m.chara[1] == m.chara[0] && m.colour[1] == m.colour[0]) m.colour[1] = (uint8_t)((m.colour[0] + 1) & 7);   /* same fighter, same colour: the joiner takes the next one */
+                    m.seed = hs_new_seed();
+                    hs_head(&g_hs_prop, RBH_PROPOSE, round); g_hs_prop.m = m; g_hs_have_prop = 1;
+                }
+            }
+            if (g_hs_accepted && g_hs_have_prop && (LONG)g_hs_prop.round == round) { *out = g_hs_prop.m; ok = 1; }
+            else if (g_hs_have_prop && now - last_tx >= 100) { last_tx = now; hs_send(&g_hs_prop, sizeof g_hs_prop); }
+        } else {                                        /* joiner: our choice until the proposal comes */
+            if (g_hs_have_prop && (LONG)g_hs_prop.round == round) {
+                if (g_hs_prop.exe_stamp != exe_stamp()) printf("[rbnet] handshake: NOTE the other game's exe was linked at another time (stamp %08x here, %08x there): a different build may desync\n", exe_stamp(), g_hs_prop.exe_stamp);
+                *out = g_hs_prop.m; ok = 1;
+            } else if (now - last_tx >= 100 && net_rb_ready()) { last_tx = now; RbhMsg c; hs_head(&c, RBH_CHOICE, round); c.m = *mine; hs_send(&c, sizeof c); }
+        }
+        ReleaseSRWLockExclusive(&g_hs_lock);
+        if (ok) break;
+        if (now - last_log >= 5000) { last_log = now; printf("[rbnet] handshake %ld: still waiting (%.0f s; lobby %s; messages sent %lld, received %lld)\n", (long)round, (now - t0) / 1000.0, net_rb_ready() ? "joined" : "NOT joined", g_hs_tx, g_hs_rx); fflush(stdout); }
+        Sleep(5);
+    }
+    if (!ok) { printf("[rbnet] handshake %ld FAILED: %s. Each game plays its own choice: the two matches will NOT be the same\n", (long)round, g_hs_why); fflush(stdout); return 0; }
+    g_hs_seed = out->seed;
+    host_fixed_random_reseed(g_hs_seed);
+    printf("[rbnet] handshake %ld agreed after %.2f s (messages sent %lld, received %lld)\n", (long)round, (GetTickCount64() - t0) / 1000.0, g_hs_tx, g_hs_rx);
+    hs_print("the match", out);
+    return 1;
+}
+/* rbn_start: the game's match block of this game, sent to the other in chunks (a check of the agreed start) */
+static void hs_block_send(void) {
+    if (!g_hs_mine_ok) return;
+    for (int off = 0; off < RBH_BLK; off += 768) {
+        RbhBlock b; memset(&b, 0, sizeof b); b.type = RBH_BLOCK; b.proto = RBH_PROTO; b.game_build = (int16_t)g_game_build; b.exe_stamp = exe_stamp(); b.round = (uint32_t)g_hs_round;
+        b.off = (uint16_t)off; b.len = (uint16_t)(RBH_BLK - off < 768 ? RBH_BLK - off : 768); b.total = RBH_BLK; memcpy(b.data, g_hs_mine_blk + off, b.len);
+        hs_send(&b, (int)(offsetof(RbhBlock, data) + b.len));
+    }
+}
+static void hs_block_capture(void) {
+    SIZE_T got = 0; uint64_t a = ga(0x71052c41b0ULL);            /* the game's global match block (debug_mode.c MELEE_INFO) */
+    g_hs_mine_ok = ReadProcessMemory(GetCurrentProcess(), (const void *)(uintptr_t)a, g_hs_mine_blk, RBH_BLK, &got) && got == RBH_BLK;
+}
+static void hs_block_compare(void) {                    /* main thread (rbn_drain): once both copies are complete */
+    if (g_hs_blk_done || !g_hs_mine_ok) return;
+    for (int k = 0; k * 768 < RBH_BLK; k++) if (!g_hs_peer_have[k]) return;
+    g_hs_blk_done = 1;
+    char line[900]; int n = 0, ranges = 0, bytes = 0;
+    AcquireSRWLockExclusive(&g_hs_lock);
+    for (int i = 0; i < RBH_BLK; i++) {
+        if (g_hs_mine_blk[i] == g_hs_peer_blk[i]) continue;
+        int j = i; while (j + 1 < RBH_BLK && g_hs_mine_blk[j + 1] != g_hs_peer_blk[j + 1]) j++;
+        bytes += j - i + 1;
+        if (ranges++ < 24 && n < (int)sizeof line - 80) n += snprintf(line + n, sizeof line - n, " +%03x..%03x (here %02x there %02x)", i, j, g_hs_mine_blk[i], g_hs_peer_blk[i]);
+        i = j;
+    }
+    ReleaseSRWLockExclusive(&g_hs_lock);
+    if (!ranges) printf("[rbnet] match block check: IDENTICAL on both games (%d bytes: rules + the two player records)\n", RBH_BLK);
+    else printf("[rbnet] match block check: %d ranges (%d bytes) differ (offsets from the match block; players at +0x580 + 0x260 * i):%s\n", ranges, bytes, line);
+    fflush(stdout);
+}
+
 /* ---------------------------------------------------------------- receive queue (net thread -> main) */
 #define RQ_N 1024
 #define RQ_MAX 1100
@@ -100,6 +282,7 @@ static void send_msg(const RbMsg *m) {
 }
 /* net_relay.c's receive thread: one rollback message from the other player */
 void rbn_rx(const uint8_t *p, int n) {
+    if (rbn_on() > 0 && n > 0 && hs_rx(p, n)) return;  /* the match handshake */
     if (rbn_on() <= 0 || n <= 0 || n > RQ_MAX) { InterlockedIncrement64(&g_rx_bad); return; }
     InterlockedIncrement64(&g_rx_pkts); InterlockedExchange64(&g_rx_last_ms, (LONG64)GetTickCount64());
     if (p[0] == RB_MSG_PING) {                          /* answered at once on this thread (the round trip excludes the frame wait) */
@@ -169,6 +352,7 @@ void rbn_start(long long f0) {
     if (g_delay < 1) g_delay = 1;                        /* (frames 1..delay are empty on both sides: no rollback can reach the base state, made before the start barrier) */
     rb_input_reset(2, g_local, g_delay);
     rb_ts_reset(16683);
+    if (!g_loop && rbn_handshake_wanted()) { hs_block_capture(); hs_block_send(); }     /* the match block check */
     printf("[rbnet] match start at frame %lld: local player %d, input delay %d frames (round trip %.1f ms, best %.1f ms)\n", f0, g_local + 1, g_delay,
            g_rtt_us > 0 ? g_rtt_us / 1000.0 : -1.0, g_rtt_min_us > 0 ? g_rtt_min_us / 1000.0 : -1.0);
     fflush(stdout);
@@ -201,9 +385,20 @@ void rbn_local_pad(long long f, RbPad now) {
     rb_input_local((int)f, now);
     send_pads();
 }
+/* (hs10) SSBU_RB_NET_DETAIL=1: the pads each pass gave the game and the fighters' frame lines of the last simulation of each
+ * frame, written as "d" lines next to the "f" lines of SSBU_RB_NET_LOG. Always: a local check at the finalization (every read
+ * of the final simulation of a frame must have got the final, received pad of both players). */
+static int g_detail = -1;
+static int detail_on(void) { if (g_detail < 0) { const char *e = getenv("SSBU_RB_NET_DETAIL"); g_detail = e && atoi(e) > 0; } return g_detail; }
+static RbPad g_acc_pad[2]; static int g_acc_n[2], g_acc_var[2];          /* reads in the pass now running */
+#define HR2 512
+static RbPad g_upad[HR2][2]; static int g_un[HR2][2], g_uvar[HR2][2];   /* reads of the last simulation of each frame */
+static uint8_t g_ulines[HR2][4][40]; static int g_unl[HR2];
+static long long g_padcheck_bad, g_padcheck_first = -1;
 RbPad rbn_pad(int player, long long f) {
     int pred = 0; RbPad p = rb_input_get(player, (int)f, &pred);
     g_stat_padget++; g_stat_pred += pred;
+    if (player >= 0 && player < 2) { if (g_acc_n[player] && !rb_pad_equal(&g_acc_pad[player], &p)) g_acc_var[player] = 1; g_acc_pad[player] = p; g_acc_n[player]++; }
     return p;
 }
 static void on_check(long long cf, uint32_t ck) {
@@ -220,6 +415,7 @@ void rbn_drain(long long cur) {
         for (long long f = rb_input_remote_latest(g_remote) + 1; f <= upto; f++) rb_input_remote_put(g_remote, (int)f, bot_pad(g_bot_seed ^ 0x5bd1e995u, f));
         return;
     }
+    if (rbn_handshake_wanted()) hs_block_compare();
     {   int32_t ts[TSQ]; int nts;
         AcquireSRWLockExclusive(&g_rq_lock); nts = g_tsq_n; memcpy(ts, g_tsq, sizeof(int32_t) * (size_t)nts); g_tsq_n = 0; ReleaseSRWLockExclusive(&g_rq_lock);
         for (int k = 0; k < nts; k++) rb_ts_sample(ts[k]);
@@ -248,15 +444,41 @@ int rbn_peer_gone(void) {
 }
 
 /* ---------------------------------------------------------------- checksums: fighter_host.c gives each fighter's frame line */
+static uint8_t g_lacc[4][40]; static int g_lacc_n;
 void rbn_hash_add(const void *p, size_t n) {
     if (g_on <= 0) return;
+    if (g_lacc_n < 4 && n <= 40) { memset(g_lacc[g_lacc_n], 0, 40); memcpy(g_lacc[g_lacc_n], p, n); g_lacc_n++; }
     const uint8_t *b = p; while (n--) { g_hacc ^= *b++; g_hacc *= 0x100000001b3ull; }
     g_hlines++;
 }
 /* the safe point after pass f: the lines since the last call belong to frame f (a re-run pass overwrites the value) */
 void rbn_pass_hash(long long f) {
     if (g_hlines && f > 0) { g_hash[f % HR] = g_hacc; g_hframe[f % HR] = f; }
+    if (f > 0) { int x = (int)(f % HR2);
+        for (int q = 0; q < 2; q++) { g_upad[x][q] = g_acc_pad[q]; g_un[x][q] = g_acc_n[q]; g_uvar[x][q] = g_acc_var[q]; }
+        memcpy(g_ulines[x], g_lacc, sizeof g_lacc); g_unl[x] = g_lacc_n; }
+    memset(g_acc_n, 0, sizeof g_acc_n); memset(g_acc_var, 0, sizeof g_acc_var); g_lacc_n = 0;
     g_hacc = 0xcbf29ce484222325ull; g_hlines = 0;
+}
+static void detail_frame(long long f) {              /* frame f is final: the pads its last simulation used against the final ones */
+    int x = (int)(f % HR2);
+    for (int q = 0; q < 2; q++) {
+        RbPad fin; int pred = 0;
+        if (q == g_local) { if (!rb_input_local_get((int)f, &fin)) memset(&fin, 0, sizeof fin); }
+        else fin = rb_input_get(q, (int)f, &pred);
+        int bad = g_un[x][q] && (!rb_pad_equal(&g_upad[x][q], &fin) || g_uvar[x][q]);
+        if (bad || pred) { g_padcheck_bad++; if (g_padcheck_first < 0) g_padcheck_first = f;
+            if (g_padcheck_bad <= 20) { printf("[rbnet] PAD CHECK: frame %lld player %d: its last simulation got %llx %d %d (reads %d, varied %d), the final pad is %llx %d %d%s\n", f, q + 1,
+                (unsigned long long)g_upad[x][q].buttons, g_upad[x][q].lx, g_upad[x][q].ly, g_un[x][q], g_uvar[x][q], (unsigned long long)fin.buttons, fin.lx, fin.ly, pred ? " (NOT received)" : ""); fflush(stdout); } }
+    }
+    if (g_hlog && detail_on()) {
+        fprintf(g_hlog, "d %lld p1 %llx %d %d %d %d n%d p2 %llx %d %d %d %d n%d", f, (unsigned long long)g_upad[x][0].buttons, g_upad[x][0].lx, g_upad[x][0].ly, g_upad[x][0].rx, g_upad[x][0].ry, g_un[x][0],
+                (unsigned long long)g_upad[x][1].buttons, g_upad[x][1].lx, g_upad[x][1].ly, g_upad[x][1].rx, g_upad[x][1].ry, g_un[x][1]);
+        for (int l = 0; l < g_unl[x]; l++) { const uint8_t *b = g_ulines[x][l]; int k, st; uint64_t mot, rh; float mf, px, py, dmg;
+            memcpy(&k, b, 4); memcpy(&st, b + 4, 4); memcpy(&mot, b + 8, 8); memcpy(&mf, b + 16, 4); memcpy(&px, b + 20, 4); memcpy(&py, b + 24, 4); memcpy(&dmg, b + 28, 4); memcpy(&rh, b + 32, 8);
+            fprintf(g_hlog, " | e%d st %x mot %llx mf %.3f x %.4f y %.4f dmg %.3f rng %016llx", k, st, (unsigned long long)mot, mf, px, py, dmg, (unsigned long long)rh); }
+        fputc('\n', g_hlog);
+    }
 }
 /* no rollback pending: every frame up to min(cur, newest remote pad) is final */
 void rbn_finalize(long long cur) {
@@ -264,6 +486,7 @@ void rbn_finalize(long long cur) {
     if (upto > cur) upto = cur;
     for (long long f = g_hfinal_upto + 1; f <= upto; f++) {
         if (g_hlog && g_hframe[f % HR] == f) fprintf(g_hlog, "f %lld h %016llx\n", f, (unsigned long long)g_hash[f % HR]);
+        detail_frame(f);
         g_hfinal_upto = f;
     }
     if (g_hlog && (upto & 63) == 0) fflush(g_hlog);
@@ -288,6 +511,7 @@ void rbn_resend(void) { if (g_started) send_pads(); }
 /* the match-start barrier: an empty PADS message says "in the match" (count 0, newest 0) */
 void rbn_hello(void) {
     if (!g_started || g_loop) return;
+    { static int n; if (rbn_handshake_wanted() && n++ < 20 && (n % 4) == 0) hs_block_send(); }   /* (the block check again, a few times) */
     if (rb_input_local_latest() >= 1) { send_pads(); return; }
     RbMsg m; memset(&m, 0, sizeof m); m.type = RB_MSG_PADS; m.player = g_local; m.newest = 0; m.count = 0; send_msg(&m);
 }
@@ -306,6 +530,7 @@ void rbn_report(FILE *o, long long frames) {
             frames, g_delay, g_rtt_n ? g_rtt_sum / g_rtt_n / 1000.0 : -1.0, g_rtt_min_us > 0 ? g_rtt_min_us / 1000.0 : -1.0, g_rtt_n, rb_ts_offset() / 1000.0, g_ts_n);
     fprintf(o, "[rbnet] report: pads given %lld, predicted %lld (%.1f%%), mispredictions %lld; finalized frames %lld; checksums compared %lld, DESYNCS %lld (first %lld)\n",
             g_stat_padget, g_stat_pred, g_stat_padget ? 100.0 * g_stat_pred / g_stat_padget : 0.0, g_stat_mis, g_hfinal_upto, g_check_ok + g_desync, g_desync, g_desync_first);
+    fprintf(o, "[rbnet] report: pad check of the final simulations: %lld pad values differ from the final ones (first frame %lld)\n", g_padcheck_bad, g_padcheck_first);
     fprintf(o, "[rbnet] report: packets sent %lld (failed %lld), received %lld (bad %lld, queue full %lld); remote pads up to %d, local up to %d\n",
             (long long)g_tx_pkts, (long long)g_tx_fail, (long long)g_rx_pkts, (long long)g_rx_bad, (long long)g_rx_drop, rb_input_remote_latest(g_remote), rb_input_local_latest());
     fflush(o);

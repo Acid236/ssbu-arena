@@ -1130,7 +1130,7 @@ static uint64_t g_ra_site;                                /* GA(13.0.4 0x7103749
 static double g_rap[3][4]; static long long g_rapn[3];  /* per pass kind (0 normal, 1 speculative, 2 real after a restore): pass start -> poll, poll -> frame end, frame end call, frame end -> next save point */
 static double g_ra_fe_end; static int g_ra_fe_kind; static double g_t_poll;
 static double g_ra_comp[2][5];static long long g_ra_ncomp[2];      /* save / restore: sweep + page copy, extras, fibers, command buffers, release */
-static volatile int g_ra_wd_pause;static int g_ra_submit_mode;
+static volatile int g_ra_wd_pause, g_ra_wd_base;   /* 1 = paused, 2 = long limit (R3 online match, rb_rollback.c) */static int g_ra_submit_mode;
 static int g_ra_skip = 1; static long long g_ra_skipped_kicks, g_ra_skipped_lines;      /* default 1: the preparation kicks of a speculative pass (pictures and hash checked identical); 2 (the render kick) changes 0.3 % of the picture */
 static long long g_ra_skip_why[4];                      /* holds that failed: task worker, audio, other thread, a job fiber running */
 static const char *g_ra_busy;
@@ -1403,8 +1403,10 @@ static DWORD WINAPI ra_watchdog(void *p) {
     (void)p;
     for (;;) {
         WaitForSingleObject(g_ra_wd_ev, INFINITE);
+        double t0 = now_ms();
         while (WaitForSingleObject(g_ra_wd_ev, 200) == WAIT_TIMEOUT) {
-            if (g_ra_wd_pause) continue;                 /* (the first, full save takes seconds) */
+            if (g_ra_wd_pause == 1) continue;            /* (the first, full save takes seconds; R3: the safe point's waits) */
+            if (g_ra_wd_pause == 2 && now_ms() - t0 < 10000) continue;      /* R3 online match: a slow pass must not let them go (10 s: H2 never came) */
             if (g_ra_wh_on) { g_ra_wd_fired++; ra_workers_release(); }
             break;
         }
@@ -1426,8 +1428,15 @@ static void ra_workers_hold(void) {
 static void ra_kick2(Ctx *c, void *user) {           /* hook on FUN 0x7103549170 (kick of a job group): points BEFORE the call */
     (void)user;
     uint64_t lr = c->x[30];
-    if (lr == GA(0x71037494fcull) && g_ra_site == GA(0x7103749b24ull) && !g_ra_off && (g_ra_phase || ra_fight_on())) ra_workers_hold();      /* H1 */
-    if (lr == g_ra_site) { ra_step(c); if (g_ra_wh_on) { ra_workers_release(); SetEvent(g_ra_wd_ev); } }      /* H2 */
+    if (lr == GA(0x71037494fcull) && g_ra_site == GA(0x7103749b24ull) && !g_ra_off && (g_ra_phase || ra_fight_on())) {
+        ra_workers_hold();      /* H1 */
+        {   /* (hs10, test only) SSBU_RB_NET_TEST_H1=<fight frame>,<ms>: a slow pass at the first H1 from that fight frame on (the hold watchdog's case) */
+            static long long tf = -2; static int tms;
+            if (tf == -2) { const char *e = getenv("SSBU_RB_NET_TEST_H1"); tf = -1; if (e && *e) sscanf(e, "%lld,%d", &tf, &tms); }
+            if (tf > 0 && g_ff >= tf && g_ra_phase == 0) { tf = -1; Sleep((DWORD)tms); LOG("r1: TEST: a slow pass of %d ms at fight frame %lld, after the workers' hold (watchdog releases so far %lld)\n", tms, g_ff, g_ra_wd_fired); }
+        }
+    }
+    if (lr == g_ra_site) { ra_step(c); if (g_ra_wh_on) { ra_workers_release(); SetEvent(g_ra_wd_ev); } g_ra_wd_pause = g_ra_wd_base; }      /* H2 (R3: rb_rollback.c pauses the watchdog while it runs here, and keeps the long limit during the match) */
     if ((g_ra_phase == 1 && g_ra_skip) || rgs_skip_now()) {      /* SSBU_RUNAHEAD_SKIP (experiment): job groups of the speculative pass whose result is thrown away (R2: SSBU_RB_SIM_SKIP, re-run passes but the last) */
         int prep = c->x[30] == GA(0x7103749b24ull) || c->x[30] == GA(0x710374b4f8ull) || c->x[30] == GA(0x710374b528ull) || c->x[30] == GA(0x710374b558ull), rend = c->x[30] == GA(0x710374c0d8ull);
         int logic = c->x[30] == GA(0x710374c398ull) || c->x[30] == GA(0x710374c5b8ull);

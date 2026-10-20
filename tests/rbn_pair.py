@@ -62,6 +62,9 @@ def main():
             last.append(l)
         for l in reversed(last):
             print('  ' + l[:330])
+        for l in open(os.path.join(LOGS, 'n11_%s.log' % t), errors='replace'):      # rbn9: the match handshake and the match block check
+            if 'handshake' in l and ('agreed' in l or 'FAILED' in l or 'the match:' in l) or 'match block check' in l:
+                print('  ' + l.rstrip()[:330])
 
 
 if __name__ == '__main__':

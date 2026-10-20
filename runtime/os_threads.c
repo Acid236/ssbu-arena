@@ -703,21 +703,31 @@ static void os_ConvertToTimeSpan(Ctx *c) { RET((uint64_t)((double)(int64_t)A0 * 
 BOOLEAN NTAPI SystemFunction036(PVOID buffer, ULONG length);
 /* Test switch SSBU_FIXED_SEED=<n> (track V, session 4): the bytes come from a splitmix64 stream seeded with n instead, so
  * that a scripted match meets the same random stage / CPU fighter in every run. Each call is logged (first 16). */
+static int g_fr_mode = -1;
+static volatile LONG g_fr_lock, g_fr_calls, g_fr_after;
+static uint64_t g_fr_state;
+/* R3 (rb_net.c, SSBU_RB_NET only): the seed both games agreed in the match handshake: from then on the bytes come from
+ * it (the same stream on both PCs whatever each did in the menus); the first 16 calls after it are logged */
+void host_fixed_random_reseed(uint64_t seed) {
+    while (InterlockedExchange(&g_fr_lock, 1)) YieldProcessor();
+    g_fr_state = seed * 0x9E3779B97F4A7C15ull + 1; g_fr_mode = 2; g_fr_after = 0;
+    InterlockedExchange(&g_fr_lock, 0);
+    printf("fixed seed: nn::os::GenerateRandomBytes from the agreed match seed on (%ld calls before)\n", (long)g_fr_calls);
+}
 int host_fixed_random(void *buffer, uint64_t size, const char *who, uint64_t lr) {
-    static int mode = -1;
-    static volatile LONG lock, calls;
-    static uint64_t state;
-    if (mode < 0) { const char *e = getenv("SSBU_FIXED_SEED"); if (e && *e) { state = strtoull(e, NULL, 0) * 0x9E3779B97F4A7C15ull + 1; mode = 1; } else mode = 0; }
-    if (!mode) return 0;
-    while (InterlockedExchange(&lock, 1)) YieldProcessor();
+    if (g_fr_mode < 0) { const char *e = getenv("SSBU_FIXED_SEED"); if (e && *e) { g_fr_state = strtoull(e, NULL, 0) * 0x9E3779B97F4A7C15ull + 1; g_fr_mode = 1; } else g_fr_mode = 0; }
+    if (!g_fr_mode) return 0;
+    while (InterlockedExchange(&g_fr_lock, 1)) YieldProcessor();
     for (uint64_t i = 0; i < size; i += 8) {
-        uint64_t z = (state += 0x9E3779B97F4A7C15ull);
+        uint64_t z = (g_fr_state += 0x9E3779B97F4A7C15ull);
         z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull; z = (z ^ (z >> 27)) * 0x94D049BB133111EBull; z ^= z >> 31;
         memcpy((uint8_t *)buffer + i, &z, size - i < 8 ? (size_t)(size - i) : 8);
     }
-    LONG n = ++calls;
-    InterlockedExchange(&lock, 0);
+    LONG n = ++g_fr_calls;
+    int after = g_fr_mode == 2 ? (int)++g_fr_after : 0;
+    InterlockedExchange(&g_fr_lock, 0);
     if (n <= 16) printf("fixed seed: %s call %ld, %llu bytes, caller %llx\n", who, n, (unsigned long long)size, (unsigned long long)lr);
+    if (after && after <= 16) printf("fixed seed: after the match seed: %s call %ld, %llu bytes, caller %llx\n", who, n, (unsigned long long)size, (unsigned long long)lr);
     return 1;
 }
 static void os_GenerateRandomBytes(Ctx *c) {

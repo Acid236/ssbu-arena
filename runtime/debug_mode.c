@@ -200,6 +200,13 @@ static void watch_set(const uint64_t *addrs, int n) {
     printf("debug watch: %d watchpoints on %d threads\n", n, set); fflush(stdout);
 }
 
+/* research (R3, SSBU_RB_NET_WATCH=1 only): write watchpoints on up to 4 addresses from another file (fighter_host.c) */
+static uint64_t g_dw_a[4]; static int g_dw_n;
+static DWORD WINAPI dw_thread(LPVOID u) { (void)u; watch_set(g_dw_a, g_dw_n); return 0; }
+void debug_watch(const uint64_t *addrs, int n) {        /* from a helper thread, so that the calling thread is watched too */
+    g_dw_n = n > 4 ? 4 : n; memcpy(g_dw_a, addrs, sizeof(uint64_t) * (size_t)g_dw_n);
+    HANDLE t = CreateThread(NULL, 0, dw_thread, NULL, 0, NULL); if (t) { WaitForSingleObject(t, 5000); CloseHandle(t); }
+}
 int hook_install(uint64_t addr, void (*repl)(Ctx *, void *), void *user, ImportFn *orig);
 
 /* ---- the match set-up (from the game's own binary; see tests\DEBUG_MODE.md) */
@@ -228,6 +235,61 @@ static uint64_t hash40(const char *s) {
     uint32_t crc = 0xffffffffu; size_t n = strlen(s);
     for (size_t i = 0; i < n; i++) { crc ^= (uint8_t)s[i]; for (int k = 0; k < 8; k++) crc = (crc >> 1) ^ (0xedb88320u & (0u - (crc & 1))); }
     return ((uint64_t)n << 32) | (uint32_t)~crc;
+}
+/* ---- R3 online rollback (SSBU_RB_NET=net, rb_net.c): the match handshake. At player 1's record each game sends its own
+ * player-1 choice (the panel state as the screens and SSBU_DEBUG_MATCH left it); the host adds its stage / items / stocks
+ * and a seed; both then write the agreed match into the panel states of players 1 and 2 (type human: port 2 = the other
+ * game) and the stage choice, before the game's own function builds the records. Fields read in the record builder
+ * 0x7101788260 (Ghidra, 13.0.4): state + 0x90 colour -> record + 0x19 / + 0x1b; the control layout -> record + 0x28 ..
+ * + 0x3d comes from state + 0x54 .. + 0x69 when state + 0x454 is set (or + 0x455 with type 0), else for a human from the
+ * name-tag profile state + 0x214 (table [[[[0x7105313510] + 0x58]]] + 0xf7d8 * profile + 0xc, default 0x7105313518).
+ * Both games force + 0x454 = 1 with the agreed layout of each player, so a player's own controls are the same on both PCs. */
+#include "rb_hs.h"
+static int g_hs_wanted, g_hs_ok;
+static RbhMatch g_hs_m;
+static int hs_layout(uint64_t st, uint16_t out[11]) {
+    uint32_t type = rd32(st + 0x78);
+    if (rd8(st + 0x454) || (rd8(st + 0x455) && type == 0)) { for (int k = 0; k < 11; k++) out[k] = rd16(st + 0x54 + 2ull * k); return 1; }
+    uint32_t prof = rd32(st + 0x214);
+    if (!rd8(st + 0x455) && prof != 0xffffffffu && type == 0) {
+        uint64_t p = GA(0x7105313518ULL), x = sr64(GA(0x7105313510ULL));
+        if (prof < 0x3d && x && rd8(x) == 0) { uint64_t a = sr64(x + 0x58), b = a ? sr64(a) : 0, q = b ? sr64(b) : 0; if (q) p = q + 0xf7d8ull * prof; }
+        if (!rd8(p)) p = GA(0x7105313518ULL);
+        for (int k = 0; k < 11; k++) out[k] = rd16(p + 0xc + 2ull * k);
+        return 1;
+    }
+    return 0;
+}
+static void hs_apply(uint64_t st, int idx, uint32_t type_was) {
+    if (idx == 0) {
+        RbhMatch me; memset(&me, 0, sizeof me);
+        uint32_t cur = rd32(GA(0x7105309968ULL)); uint64_t sel = GA(0x71053097c0ULL) + 0x20ull * (cur < 3 ? cur : 0);
+        me.chara[0] = rd64(st + 0x88); me.colour[0] = rd8(st + 0x90); me.has_layout[0] = (uint8_t)hs_layout(st, me.layout[0]);
+        safe_read(sel, me.stage, sizeof me.stage);
+        me.hazards = rd8(GA(0x7105309985ULL)); me.items = rd32(MELEE_INFO + 0x54); me.rule_kind = rd8(st + 5); me.stock = rd8(st + 0xa);
+        if (getenv("SSBU_RB_NET_WATCH")) { uint64_t w[1] = {MELEE_INFO + 0x98}; printf("[rbnet] research: match block + 0x98 at the handshake = %08x\n", rd32(MELEE_INFO + 0x98)); debug_watch(w, 1); }
+        g_hs_ok = rbn_handshake(&me, &g_hs_m);
+        if (g_hs_ok) {
+            for (int k = 0; k < 0x20; k++) wr8(sel + (uint64_t)k, g_hs_m.stage[k]);
+            wr8(GA(0x7105309985ULL), g_hs_m.hazards); wr32(MELEE_INFO + 0x54, g_hs_m.items);
+            /* the match's random seed: after this hook the game's set-up 0x71014d8620 stores the next value of the global
+             * xorshift128 at 0x71052381c0 (4 words; advanced by the menus, so different on the two PCs) in match block
+             * + 0x98 (at 0x71014d8f00..2c, when block + 0x9c is set), and the fight's script generators are seeded from it
+             * (found with SSBU_RB_NET_WATCH, runs hs4 / hs5: equal + 0x98 at the handshake, different after that store).
+             * Both games set that generator from the agreed seed here. */
+            {   uint64_t g = GA(0x71052381c0ULL), z = g_hs_m.seed;
+                printf("[rbnet] handshake: the global generator %llx was %08x %08x %08x %08x; set from the agreed seed\n", (unsigned long long)g, rd32(g), rd32(g + 4), rd32(g + 8), rd32(g + 12));
+                for (int k = 0; k < 4; k++) { z += 0x9E3779B97F4A7C15ull; uint64_t y = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull; y = (y ^ (y >> 27)) * 0x94D049BB133111EBull; y ^= y >> 31; wr32(g + 4ull * k, (uint32_t)y | (k == 0)); }
+                fflush(stdout); }
+        }
+    }
+    if (!g_hs_ok || idx < 0 || idx > 1) return;
+    if (type_was == 3) { printf("[rbnet] handshake: player %d has NO panel on this game's select screen (put a CPU there): this match will not be the agreed one\n", idx + 1); fflush(stdout); return; }
+    wr64(st + 0x88, g_hs_m.chara[idx]); wr8(st + 0x90, g_hs_m.colour[idx]); wr32(st + 0x78, 0);
+    if (g_hs_m.has_layout[idx]) { wr8(st + 0x454, 1); for (int k = 0; k < 11; k++) wr16(st + 0x54 + 2ull * k, g_hs_m.layout[idx][k]); }
+    else { wr8(st + 0x454, 0); wr8(st + 0x455, 0); wr32(st + 0x214, 0xffffffffu); }
+    if (rd8(st + 5) == g_hs_m.rule_kind) { if (g_hs_m.rule_kind == 1) wr8(st + 0xa, g_hs_m.stock); }
+    else { printf("[rbnet] handshake: player %d: rule kind %d here, %d agreed (not changed: set the same rules on both)\n", idx + 1, rd8(st + 5), g_hs_m.rule_kind); fflush(stdout); }
 }
 static void match_player_hook(Ctx *c, void *user) {
     (void)user;
@@ -281,6 +343,7 @@ static void match_player_hook(Ctx *c, void *user) {
         if (g_dm_hazards >= 0) wr8(GA(0x7105309985ULL), (uint8_t)g_dm_hazards);
         if (g_dm.items >= 0) wr32(MELEE_INFO + 0x54, g_dm.items ? 2u : 0u);
     }
+    if (g_hs_wanted) hs_apply(st, idx, type_was);       /* R3: the match both online games agreed (rb_net.c handshake) */
     if (idx == 1) g_dm_state1_ok = safe_read(st, g_dm_state1, sizeof g_dm_state1);
     g_orig_player_record(c);
     printf("debug match: player %d: screen choice %llx type %u level %u -> record %llx: ui_chara %llx, fighter kind %d, type %d, colour %d, cpu level %d\n", idx,
@@ -353,7 +416,8 @@ void debug_mode_init(void) {
     if (end && atof(end) > 0) { g_end_limit = (LONG64)(strchr(end, 's') ? atof(end) * 60.0 : atof(end)); printf("debug end: the run ends after %lld fight frames\n", (long long)g_end_limit); }
     if (list && !(g_dm_list = fopen(list, "r"))) printf("debug match: SSBU_DEBUG_MATCH_LIST: cannot open %s\n", list);
     if (g_dm_list && !getenv("SSBU_DEBUG_MATCH")) snprintf(g_dm.text, sizeof g_dm.text, "(list)");
-    if (getenv("SSBU_DEBUG_MATCH") || g_dm_list) {
+    g_hs_wanted = rbn_handshake_wanted();
+    if (getenv("SSBU_DEBUG_MATCH") || g_dm_list || g_hs_wanted) {
         if (getenv("SSBU_DEBUG_MATCH")) parse_match(getenv("SSBU_DEBUG_MATCH"));
         printf("debug match: hook on the player record builder %llx: id %d\n", FN_PLAYER_RECORD, hook_install(FN_PLAYER_RECORD, match_player_hook, NULL, &g_orig_player_record));
     }

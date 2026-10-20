@@ -28,6 +28,15 @@ static volatile LONG g_rbg_last_k, g_rbg_max_k;
 #define RBG_NT 200000
 static float *g_rbg_work, *g_rbg_gap; static unsigned char *g_rbg_wk; static int g_rbg_nw, g_rbg_ng, g_rbg_pace = -1, g_rbg_tick_k;
 static HANDLE g_rbg_timer;
+/* (hs10) the task workers at the safe point H2: r1_state.c holds them from the kick H1 to H2, so at H2 the kick's jobs are
+ * queued and their (host-side) wake-up event is signaled and not consumed; a ring load relies on that, since the nn::os
+ * objects are not part of the ring. The 200 ms watchdog of that hold let them go while this file waited at H2 (a stall for
+ * the other player, the start barrier): they consumed the event and ran the jobs, and a rollback loaded right after left the
+ * game's job counters waiting for jobs no worker would ever be woken for: the main thread spun in the job wait f_710354a120
+ * forever (rnh2 / rnh3 / hs7). Now the watchdog is paused while this file runs at H2 (SSBU_RB_NET_WDFIX=0: the old way). */
+static int g_rbg_wdfix = -1; static long long g_rbg_wd_before, g_rbg_rb_unheld;
+static int g_rbg_detail = -1;
+static long long g_rbg_test_f = -2; static int g_rbg_test_ms, g_rbg_test_k;    /* SSBU_RB_NET_TEST=<frame>,<ms>[,<k>]: a stall of ms at frame's H2, then a rollback of k */
 
 void rbn_stats(int *delay, int *last, int *maxk) { *delay = rbn_delay(); *last = (int)g_rbg_last_k; *maxk = (int)g_rbg_max_k; }   /* net_relay.c net_stats_get (F2) */
 
@@ -49,22 +58,29 @@ static int rbg_rollback(Ctx *c, long long i, int m) {
         return 0;
     }
     double t0 = now_ms();
+    if (!g_ra_wh_on) { g_rbg_rb_unheld++; if (g_rbg_rb_unheld <= 10) LOG("r1: RB NET: rollback at frame %lld while the task workers are NOT held (watchdog releases so far %lld): the load may leave the job system waiting\n", i, g_ra_wd_fired); }
     if (!r1_ring_load(best, c)) { g_rbg_miss++; return 0; }
     g_rbg_load_ms += now_ms() - t0;
     int k = (int)(i - best);
     g_rgs_left = k; g_rgs_next = best + 1; g_ra_phase = 2;
     g_rbg_rb++; g_rbg_k[k < RG_MAXSLOT + 1 ? k : RG_MAXSLOT + 1]++; g_rbg_rerun += k; g_rbg_tick_k += k;
     InterlockedExchange(&g_rbg_last_k, k); if (k > g_rbg_max_k) InterlockedExchange(&g_rbg_max_k, k);
-    if (g_rbg_rb <= 20 || g_rbg_rb % 200 == 0) LOG("r1: RB NET: rollback %lld at frame %lld: wrong guess at %d, state of frame %lld loaded in %.3f ms, %d frames again\n", g_rbg_rb, i, m, best, now_ms() - t0, k);
+    if (g_rbg_rb <= 20 || g_rbg_rb % 200 == 0 || g_rbg_detail > 0) LOG("r1: RB NET: rollback %lld at frame %lld: wrong guess at %d, state of frame %lld loaded in %.3f ms, %d frames again\n", g_rbg_rb, i, m, best, now_ms() - t0, k);
     return 1;
 }
 /* at the safe point (H2) of every pass while the fight runs (r1_ring.c rgs_step) */
 static void rbg_step(Ctx *c) {
     long long i = g_rgs_next;
+    if (g_rbg_wdfix < 0) { const char *e = getenv("SSBU_RB_NET_WDFIX"); g_rbg_wdfix = !e || atoi(e) != 0; e = getenv("SSBU_RB_NET_DETAIL"); g_rbg_detail = e && atoi(e) > 0; }
+    if (g_rbg_wdfix) g_ra_wd_pause = 1;                 /* (until H2 lets the workers go: r1_state.c ra_kick2) */
+    if (g_rbg_wd_before != g_ra_wd_fired) { if (g_rg_ready) LOG("r1: RB NET: the task-worker watchdog let them go before the safe point of frame %lld (%lld times so far)\n", i, g_ra_wd_fired); g_rbg_wd_before = g_ra_wd_fired; }
     if (!g_rg_ready) {                                  /* the base state: r1's full save (one hitch) */
         r1_ring_capture(i, c);
+        if (g_rbg_wdfix) g_ra_wd_pause = 1;             /* (the full save sets it back to 0) */
         if (!g_rg_ready) return;
         rbn_start(i);
+        if (g_rbg_wdfix) g_ra_wd_base = 2;              /* from now on the hold watchdog has the long limit (H2 sets it back to this) */
+        g_rbg_wd_before = g_ra_wd_fired;                /* (releases before the match, e.g. at its slow first passes, are harmless: no state in the ring yet) */
         g_rgs_next = i + 1;
         if (g_rbg_pace < 0) { const char *e = getenv("SSBU_RB_NET_PACE"); g_rbg_pace = !e || atoi(e) != 0; }
         { const char *e = getenv("SSBU_RB_NET_LASTLITE"); g_rgs_lastlite = !e || atoi(e) != 0; }      /* default on here: proven exact (rl4L, rl4K); =0 runs the last re-run pass fully */
@@ -106,6 +122,13 @@ static void rbg_step(Ctx *c) {
             if (rbg_rollback(c, i, m)) return;
             if (keep) r1_ring_let_go(); else if (!r1_ring_capture(i, c)) g_rbg_capfail++;
         } else if (!r1_ring_capture(i, c)) g_rbg_capfail++;
+        if (g_rbg_test_f == -2) { const char *e = getenv("SSBU_RB_NET_TEST"); g_rbg_test_f = -1; if (e && *e) { long long tf = -1; int ms = 0, k = 0; sscanf(e, "%lld,%d,%d", &tf, &ms, &k); g_rbg_test_f = tf; g_rbg_test_ms = ms; g_rbg_test_k = k; } }
+        if (g_rbg_test_f > 0 && i >= g_rbg_test_f) {    /* (the first real pass from that frame on without a rollback of its own) */
+            g_rbg_test_f = -1;                        /* test: a long stall at this safe point, then a rollback (same pads: the timeline must not change) */
+            double ts = now_ms(); rbg_wait_until(ts + g_rbg_test_ms);
+            LOG("r1: RB NET TEST: stalled %.0f ms at frame %lld (watchdog releases so far %lld, workers held %d); rollback of %d frames\n", now_ms() - ts, i, g_ra_wd_fired, (int)g_ra_wh_on, g_rbg_test_k);
+            if (g_rbg_test_k > 0 && rbg_rollback(c, i, (int)(i - g_rbg_test_k + 1))) return;
+        }
     }
     /* the next pass is a real one (frame i + 1): pending wrong guesses first, then the other player, then the tick */
     double tw = now_ms();
@@ -168,6 +191,7 @@ static void rbg_report(void) {
         g_rbg_real, g_rbg_rb, g_rbg_rerun, g_rbg_k[1], g_rbg_k[2], g_rbg_k[3], g_rbg_k[4], g_rbg_k[5], g_rbg_k[6], g_rbg_k[7], g_rbg_k[RG_MAXSLOT + 1] + g_rbg_k[8], g_rbg_miss);
     LOG("r1: RB NET report: stalls for the other player %lld (%.1f ms in all); captures failed %lld, re-run captures not needed %lld; load mean %.3f ms; peer silent %lld\n",
         g_rbg_stalls, g_rbg_stall_ms, g_rbg_capfail, g_rbg_capskip, g_rbg_rb ? g_rbg_load_ms / g_rbg_rb : 0.0, g_rbg_gone);
+    LOG("r1: RB NET report: task-worker watchdog releases %lld (since the process start), rollbacks with the workers not held %lld (watchdog paused at H2: %s)\n", g_ra_wd_fired, g_rbg_rb_unheld, g_rbg_wdfix ? "yes" : "NO");
     rbg_dist("work per tick (real pass + its rollback, without waits)", g_rbg_work, g_rbg_nw, g_rbg_wk, -1);
     rbg_dist("work per tick without rollback", g_rbg_work, g_rbg_nw, g_rbg_wk, 0);
     rbg_dist("work per tick with rollback", g_rbg_work, g_rbg_nw, g_rbg_wk, 1);

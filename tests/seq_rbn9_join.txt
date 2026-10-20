@@ -1,0 +1,23 @@
+# R3 handshake test (rbn9): seq_completo.txt with longer waits in the stage / character screens (the joiner reaches the match later, by another menu timing)
+@movie
+@draws:22-26/30
+@draws:36-44/30
+30:Z
+@draws:700-800/40 30:Z
+150:Z
+@draws:370-400/40 30:Z
+300
+@draws:270-330/40 30:Z
+@draws:540-680/40
+400
+30:u/30 20:l/18 30:Z
+90:Z
+90:Z
+@fight
+200
+40:X/6 40:X/6 40:X/6 40:X/6 30:l/10 40:X/6 40:X/6 20:Z 40:X/6 30:r/10 40:X/6 40:X/6
+40:X/6 40:X/6 40:X/6 40:X/6 30:l/10 40:X/6 40:X/6 20:Z 40:X/6 30:r/10 40:X/6 40:X/6
+40:X/6 40:X/6 40:X/6 40:X/6 30:l/10 40:X/6 40:X/6 20:Z 40:X/6 30:r/10 40:X/6 40:X/6
+40:X/6 40:X/6 40:X/6 40:X/6 30:l/10 40:X/6 40:X/6 20:Z 40:X/6 30:r/10 40:X/6 40:X/6
+40:X/6 40:X/6 40:X/6 40:X/6 30:l/10 40:X/6 40:X/6 20:Z 40:X/6 30:r/10 40:X/6 40:X/6
+40:X/6 40:X/6 40:X/6 40:X/6 30:l/10 40:X/6 40:X/6 20:Z 40:X/6 30:r/10 40:X/6 40:X/6

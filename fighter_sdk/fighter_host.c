@@ -1155,6 +1155,7 @@ static void fd_hook(Ctx *c, void *user) {
  * SSBU_DETERMINISTIC=1: see plan\phases\R0_determinism.md. Here: the 9 generators are set to a fixed state at the
  * first battle frame (SSBU_DET_OFF=1 leaves them alone, for diagnosis). */
 void input_mark(const char *what);                      /* nnhid.c */
+int rbn_handshake_wanted(void); uint64_t rbn_match_seed(void);   /* rb_net.c (R3: 0 / 0 without SSBU_RB_NET) */
 static ImportFn g_fh_orig;
 static struct { uint64_t boma; int entry; long long frame; } g_fh_f[8];
 static int g_fh_n, g_fh_det, g_fh_detoff;
@@ -1187,11 +1188,22 @@ static void fh_hook(Ctx *c, void *user) {
                 printf("[fight] first battle frame (fighter entry %d); input mark \"fight\" raised; script random generators at %llx\n", g_fh_f[k].entry, (unsigned long long)rb);
                 if (rb) { printf("[fight] generators before:"); for (int i = 0; i < 9; i++) printf(" %08x.%u", rd32(rb + 0x14ull * i + 12), rd32(rb + 0x14ull * i + 16)); printf("\n"); }
                 if (g_fh_det && !(g_fh_detoff & 1) && rb) {
+                    uint64_t ms = rbn_match_seed();    /* R3: the seed of the online match handshake (0 without one: the fixed state below) */
+                    if (ms) {
+                        for (int i = 0; i < 9; i++) {
+                            uint64_t z = ms + 0x9E3779B97F4A7C15ull * (uint64_t)(i + 1); z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull; z = (z ^ (z >> 27)) * 0x94D049BB133111EBull; z ^= z >> 31;
+                            uint64_t y = z * 0xD1342543DE82EF95ull + 1;
+                            wr32(rb + 0x14ull * i, (uint32_t)z | 1u); wr32(rb + 0x14ull * i + 4, (uint32_t)(z >> 32)); wr32(rb + 0x14ull * i + 8, (uint32_t)y); wr32(rb + 0x14ull * i + 12, (uint32_t)(y >> 32)); wr32(rb + 0x14ull * i + 16, 0);
+                        }
+                        printf("[fight] SSBU_RB_NET: the 9 script random generators set from the agreed match seed %016llx, counters 0\n", (unsigned long long)ms);
+                        if (getenv("SSBU_RB_NET_WATCH")) { void debug_watch(const uint64_t *a, int n); uint64_t w[2] = {rb, GA(0x71052c41b0ull) + 0x98}; debug_watch(w, 2); }   /* research: who writes the generators / match block + 0x98 next */
+                    } else {
                     for (int i = 0; i < 9; i++) {
                         wr32(rb + 0x14ull * i, 0x12345678u + 0x9E3779B9u * (unsigned)i); wr32(rb + 0x14ull * i + 4, 0x2468ACE1u ^ (unsigned)i);
                         wr32(rb + 0x14ull * i + 8, 0x0F1E2D3Cu + (unsigned)i); wr32(rb + 0x14ull * i + 12, 0x89ABCDEFu - (unsigned)i); wr32(rb + 0x14ull * i + 16, 0);
                     }
                     printf("[fight] SSBU_DETERMINISTIC: the 9 script random generators set to a fixed state, counters 0\n");
+                    }
                 }
                 if (getenv("SSBU_WORK_RESEARCH")) {        /* S11 part 4: where the work module keeps its variables */
                     uint64_t wm = rd64(boma + 0x50), vt = wm ? rd64(wm) : 0;
@@ -1280,7 +1292,7 @@ int fight_seq_ticks(void) {
 static void fh_exit(void) { if (g_fh_out) { fflush(g_fh_out); if (g_fh_out != stdout) fclose(g_fh_out); g_fh_out = NULL; } }
 static void fight_hash_start(void) {
     const char *h = getenv("SSBU_FIGHT_HASH"), *d = getenv("SSBU_DETERMINISTIC"), *o = getenv("SSBU_DET_OFF");
-    g_fh_det = d && d[0] && d[0] != '0';
+    g_fh_det = (d && d[0] && d[0] != '0') || rbn_handshake_wanted();      /* R3: a match between online players needs it (no extra logic frames; generators from the agreed seed) */
     g_fh_detoff = o ? atoi(o) : 0;
     if ((!h || !h[0] || h[0] == '0') && !g_fh_det) return;
     if (h && h[0] && h[0] != '0') g_fh_out = strcmp(h, "1") == 0 ? stdout : fopen(h, "w");
