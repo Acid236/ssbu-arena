@@ -391,6 +391,13 @@ def cmd_nro(jobs, names):
     if not names:
         names = [e['name'] for e in build_nro.load_map()]
     rc = build_nro.main(names + ['--jobs=%d' % jobs])
+    # a compiler that crashed with many running at once usually ran out of memory (clang "due to signal"): the modules are
+    # built again with far fewer at a time, then one; only the objects that failed are compiled again
+    for retry in (max(1, jobs // 4), 1):
+        if not rc or retry >= jobs:
+            continue
+        print('building the modules again with %d job(s): some compiles failed (usually out of memory with %d at once)' % (retry, jobs), flush=True)
+        rc = build_nro.main(names + ['--jobs=%d' % retry])
     report(os.path.join(HERE, 'obj_nro' + os.environ['RECOMP_NRO_SUFFIX']))
     return rc
 
