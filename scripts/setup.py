@@ -883,7 +883,10 @@ def step_convert(cx):
         known = GAME_BUILDS.get(got) if name == 'main' else got == SDK_TEXT_SIZE
         if 'MISMATCH' in out or not known:
             raise Fail('%s is not a build this port knows (code size %#x, or a segment hash mismatch): it handles Super Smash Bros. '
-                       'Ultimate %s (update applied)' % (name, got, ' and '.join(sorted(GAME_BUILDS.values()))))
+                       'Ultimate %s (update applied). Your dump is from another version: usually an older update (13.0.3 or '
+                       'before) or the base game without its update. Fix: give the installer the base game AND the 13.0.4 '
+                       '(v1966080) or 13.0.5 update file instead of this dump folder, or dump again with that update installed'
+                       % (name, got, ' and '.join(sorted(GAME_BUILDS.values()))))
         if name == 'main':
             version = known
         say('  %s -> %s.elf   code %.1f MB, segment hashes ok' % (name, name, got / 1048576.0))
