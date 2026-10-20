@@ -44,8 +44,8 @@ jobs:
 
       - name: Differential test of the lifted code on this host (no game data; -O0 and -O1)
         run: |
-          python scripts/macos/difftest_synthetic.py --work build-linux/work --clang clang-19 --opt -O0
-          python scripts/macos/difftest_synthetic.py --work build-linux/work --clang clang-19 --opt -O1
+          python scripts/macos/difftest_synthetic.py --work build-linux/work --clang clang-19 --opt=-O0
+          python scripts/macos/difftest_synthetic.py --work build-linux/work --clang clang-19 --opt=-O1
 
       - name: Build and run the platform self-test
         working-directory: runtime

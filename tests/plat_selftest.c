@@ -106,7 +106,11 @@ int main(void) {
     QueryPerformanceCounter(&q1);
     double ms = (double)(q1.QuadPart - q0.QuadPart) * 1000.0 / (double)f.QuadPart;
     printf("     waitable timer: %.1f ms\n", ms);
+    #ifdef __APPLE__                 /* the macos-14 runner VM coalesces timers: up to ~95 ms seen for Sleep(20) (plan MAC1 "Timing") */
+    CHECK(ms >= 19 && ms < 150, "waitable timer ~20 ms (macOS VM: < 150 ms)");
+#else
     CHECK(ms >= 19 && ms < 60, "waitable timer ~20 ms");
+#endif
     /* init once */
     static INIT_ONCE once = INIT_ONCE_STATIC_INIT; int n = 0;
     InitOnceExecuteOnce(&once, once_fn, &n, NULL); InitOnceExecuteOnce(&once, once_fn, &n, NULL);

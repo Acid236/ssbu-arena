@@ -43,10 +43,13 @@ jobs:
           import json, subprocess, sys
           sys.path.insert(0, '../scripts')
           import setup
-          t = json.load(open('../build-macos/state.json'))['tools']
-          argv = setup.mac_shim_argv(t['clang'], t['brew_prefix'], t['glslang_libs'])
-          print(' '.join(argv), flush=True)
-          sys.exit(subprocess.call(argv))
+          prefix = setup.brew_prefix()
+          for libs in setup.GLSLANG_LIBS_MAC:                  # as the deps step chooses: the first list that links
+              argv = setup.mac_shim_argv('/usr/bin/clang', prefix, libs)
+              print(' '.join(argv), flush=True)
+              if subprocess.call(argv) == 0:
+                  sys.exit(0)
+          sys.exit(1)
           EOF
           otool -L ssbu_glslang.dylib
           file ssbu_glslang.dylib
@@ -91,8 +94,8 @@ jobs:
 
       - name: Differential test of the lifted code on this host (no game data; -O0 and -O1)
         run: |
-          python scripts/macos/difftest_synthetic.py --work build-macos/work --clang clang --opt -O0
-          python scripts/macos/difftest_synthetic.py --work build-macos/work --clang clang --opt -O1
+          python scripts/macos/difftest_synthetic.py --work build-macos/work --clang clang --opt=-O0
+          python scripts/macos/difftest_synthetic.py --work build-macos/work --clang clang --opt=-O1
 
   # tests/plat_selftest.c: the Win32 subset of plat_posix.c by itself (threads, events, condition variables, fibers,
   # virtual memory, files, libraries). Runs on the runner: no window, no game.
