@@ -27,6 +27,11 @@ static DWORD WINAPI loose_host_wait(LPVOID arg) {
      * (loose_files_early), before the first file request when it wins; SSBU_LOOSE_EARLY=0: only the first decompress */
     const char *ee = getenv("SSBU_LOOSE_EARLY");
     int hooked = 0, early = !(ee && ee[0] == '0');
+    /* the hook addresses go through GA(), which needs to know the build: wait until main.elf has been read (hostrt.c
+     * load_layout). Before this wait the thread asked GA() first and the runtime stopped ("asked for before main.elf
+     * was read") whenever a characters folder was given. */
+    for (int i = 0; g_game_build < 0 && i < 120000; i++) Sleep(1);
+    if (g_game_build < 0) { loose_host_log("[loose] main.elf was not read in 120 s: the layer is OFF"); return 0; }
     for (int i = 0; i < 120000; i++) {
         if (!hooked && i % 10 == 0) hooked = loose_files_install(hook_install, 1);
         if (early && loose_files_early()) early = 0;
