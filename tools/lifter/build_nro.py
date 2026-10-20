@@ -81,7 +81,7 @@ def build_module(e, jobs, relift, opt):
     name = e['name']
     nro = os.path.join(RO, 'nro', e['file'])
     suffix = os.environ.get('RECOMP_NRO_SUFFIX', '_eh')     # e.g. _eh: gen_nro_eh, obj_nro_eh, nro_bin_eh (run with SSBU_NRO_BIN=nro_bin_eh)
-    gen = os.path.join(HERE, 'gen_nro' + suffix, name)
+    gen = os.path.join(HERE, 'gen_nro' + os.environ.get('RECOMP_NRO_GEN_SUFFIX', suffix), name)   # RECOMP_NRO_GEN_SUFFIX: another build's lifted code (setup.py --rollback: _eh_o2 compiled again with marks)
     obj = os.path.join(HERE, 'obj_nro' + suffix, name)
     bindir = os.path.join(HERE, 'nro_bin' + suffix)
     for d in (gen, obj, bindir):

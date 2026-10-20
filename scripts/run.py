@@ -162,6 +162,8 @@ def main():
         env['SSBU_FIXED_SEED'] = a.seed
     if rollback and 'SSBU_RB_NET' not in env:
         env['SSBU_RB_NET'] = 'net'                    # rollback over the online connection (net_relay); needs online play on
+    if rollback and os.path.isdir(os.path.join(work, 'nro_bin_eh_o2r1')):
+        env['SSBU_NRO_BIN'] = 'nro_bin_eh_o2r1'       # the script modules with dirty-page marks (setup.py --rollback, step nro)
     if a.mac and not (env.get('VK_DRIVER_FILES') or env.get('VK_ICD_FILENAMES')):
         # MoltenVK (the Vulkan driver on Metal) named for Homebrew's Vulkan loader, as play_mac.sh does: run.py started by hand
         icd = next((p for p in ('/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json', '/opt/homebrew/share/vulkan/icd.d/MoltenVK_icd.json',

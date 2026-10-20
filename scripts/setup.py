@@ -1054,6 +1054,15 @@ def step_nro(cx):
     cx.run('nro', argv, env=build_env(cx))
     d = os.path.join(cx.work, 'nro_bin_eh_o2')
     say('  %d module libraries in nro_bin_eh_o2 (%.0f MB)' % (len([f for f in os.listdir(d) if f.endswith(lib_ext(cx))]), disk_mb(d)))
+    if getattr(cx.a, 'rollback', False) and not cx.posix:
+        # the rollback pair's script modules: the same lifted code (gen_nro_eh_o2) compiled with -DR1_MARK, so the fighters'
+        # own stores mark their pages too and a rollback restores them (without marks a fighter module's writes are not
+        # in the snapshot ring: desync); loaded by the rollback exe from nro_bin_eh_o2r1 (scripts/run.py SSBU_NRO_BIN)
+        say('  rollback: the script modules with dirty-page marks (nro_bin_eh_o2r1; about as long as the step above) ...')
+        cx.run('nro', argv, env=cx.env(**dict(build_env(cx), RECOMP_NRO_SUFFIX='_eh_o2r1', RECOMP_NRO_GEN_SUFFIX='_eh_o2',
+                                               RECOMP_CFLAGS='-DR1_MARK')))
+        d = os.path.join(cx.work, RB_NRO)
+        say('  %d module libraries in %s (%.0f MB)' % (len([f for f in os.listdir(d) if f.endswith(lib_ext(cx))]), RB_NRO, disk_mb(d)))
 
 
 def step_link(cx):
@@ -1217,6 +1226,7 @@ def _difftest(cx):
 
 
 RB_EXE = 'ssbu_native_rb.exe'
+RB_NRO = 'nro_bin_eh_o2r1'           # the rollback pair's script modules (step_nro --rollback)
 
 
 def link_rollback(cx):
@@ -1337,9 +1347,9 @@ def main():
             for s in ('compile', 'link', 'check'):
                 done.pop(s, None)
     if getattr(a, 'rollback', False) and not a.dry_run and 'compile' in done and not cx.linux and not cx.mac and \
-            not all(os.path.exists(os.path.join(cx.work, f)) for f in ('ssbu_game_r1.dll', RB_EXE)):
-        say('--rollback: the rollback pair is not built yet: compile (the marked game DLL) and link run again')
-        for s in ('compile', 'link'):
+            not all(os.path.exists(os.path.join(cx.work, f)) for f in ('ssbu_game_r1.dll', RB_EXE, os.path.join(RB_NRO, 'lua2cpp_common.dll'))):
+        say('--rollback: the rollback pair is not built yet: compile (the marked game DLL), nro (the marked script modules) and link run again')
+        for s in ('compile', 'nro', 'link'):
             done.pop(s, None)
     t_all = time.time()
     for i, s in enumerate(STEPS):
