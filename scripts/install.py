@@ -106,8 +106,8 @@ TOOLS = {   # checked 2026-10-19: SDL3 and glslang equal GitHub's own asset dige
 # The prebuilt runtime package of the GitHub Release of this version (scripts/make_release.py): (URL, SHA-256 of the zip).
 # (None, None) until the maintainer has uploaded the package made from this commit and written its hash here; the
 # download is refused when the hash does not match, and setup.py uses the package only with the tree it was built from.
-RUNTIME_RELEASE = ('https://github.com/Denkishi/ssbu-recomp/releases/download/runtime-82b364e/ssbu-runtime-82b364e64a.zip',
-                   'b0d39d3c9e6ca03fe745bf4e73dff5463175aa6e2b587b4cd9654386c8da62c3')
+RUNTIME_RELEASE = ('https://github.com/Denkishi/ssbu-recomp/releases/download/runtime-7772a7b/ssbu-runtime-7772a7b66e.zip',
+                   '7c69126322b5eeadb3513995e524fff333f6d6acd39d741cd8764d16fa5dde09')
 
 SETUP_STEPS = ['deps', 'stage', 'convert', 'modules', 'tables', 'lift', 'sdk', 'compile', 'nro', 'link', 'check']
 # expected seconds, measured 2026-10-19 on a PC with 12 jobs and 32 threads (compile and nro scale with 12 / jobs)
