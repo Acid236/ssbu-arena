@@ -24,6 +24,7 @@ Flags: -fno-strict-aliasing as in the -O0 build; -ffp-contract=off (no fused mul
 never formed one either; fused operations the game asks for are explicit fma() calls); no fast-math; the default x86-64
 target (SSE2), so no FMA / AVX instructions are selected.
 """
+import collections
 import hashlib
 import json
 import os
@@ -48,8 +49,15 @@ OPT = os.environ.get('RECOMP_OPT', '-O1')
 EXTRA = ['-ffp-contract=off'] + os.environ.get('RECOMP_CFLAGS', '').split()
 OPTNONE_LINES = int(os.environ.get('RECOMP_OPTNONE_LINES', '20000'))
 TIME_LIMIT = float(os.environ.get('RECOMP_TIME_LIMIT', '180'))
-# Linux build: address-space limit per compiler, bytes (0: none). Set by limit_memory() from the job count.
+# Linux build: address-space limit per compiler, bytes (0: none). Set by limit_memory(): the most one compiler may get.
 MEM_LIMIT = 0
+# Linux and macOS builds (RECOMP_TARGET linux / macos): the RAM all compilers share, bytes (0: no sharing, as on Windows).
+# Each compile reserves an estimate of what it needs before it starts (mem_estimate) and gives it back when it ends, so
+# the job count can follow the CPU threads while the few files that need many GB run with fewer beside them. On Linux the
+# reservation is also the compiler's address-space limit: a file that passes it is compiled again with twice as much (up
+# to MEM_BUDGET) before it takes the next step of the fallback ladder. macOS enforces no limit: there it only paces.
+MEM_BUDGET = 0
+POSIX_TARGET = os.environ.get('RECOMP_TARGET') in ('linux', 'macos')
 DEF = re.compile(r'^(?:static )?void (\w+)\((Ctx \*c(?:, uint64_t rp)?)\) \{$')
 
 
@@ -88,32 +96,100 @@ def optnone_header(src, obj, limit):
     return path, len(big), sum(b[0] for b in big)
 
 
+def ram_bytes():
+    """This machine's RAM in bytes (Linux: /proc/meminfo, macOS: hw.memsize), or 0 when unknown."""
+    try:
+        if sys.platform == 'darwin':
+            return int(subprocess.run(['sysctl', '-n', 'hw.memsize'], capture_output=True, text=True).stdout.strip())
+        with open('/proc/meminfo') as f:
+            return next(int(l.split()[1]) for l in f if l.startswith('MemTotal:')) << 10
+    except (OSError, StopIteration, ValueError):
+        return 0
+
+
 def limit_memory(jobs):
-    """Linux build: each compiler may use (RAM - 4 GB) / jobs. With current clang a lifted file can pass 20 GB before its
-    time limit runs out (c_00a3.c: 12 GB after 30 s), which gets processes killed, not slowed down; over the limit, clang
-    fails and the file takes the next step of the fallback ladder, as on a timeout."""
-    global MEM_LIMIT
-    if os.environ.get('RECOMP_TARGET') != 'linux':        # macOS: no limit (no prlimit; RLIMIT_AS is not enforced there)
+    """Linux and macOS builds: the compilers share RAM - 4 GB (MEM_BUDGET; at least 2 GB). With current clang a lifted file
+    can pass 20 GB before its time limit runs out (c_00a3.c: 12 GB after 30 s), which gets processes killed, not slowed
+    down; but most files need far less (clang 9 -O1, measured 2026-10-20: 0.13 GB for the median file, 0.9 GB for the
+    largest ones, 1.5 GB for c_013a.c), so a fixed share per job ((RAM - 4 GB) / jobs, the rule before) held a 16 GB
+    machine to 3 compilers. Linux: a compiler over its reservation fails and is compiled again with twice as much; over the
+    whole budget it takes the next step of the fallback ladder, as on a timeout."""
+    global MEM_LIMIT, MEM_BUDGET
+    if not POSIX_TARGET:
         return
-    with open('/proc/meminfo') as f:
-        kb = next(int(l.split()[1]) for l in f if l.startswith('MemTotal:'))
-    MEM_LIMIT = max(4 << 30, ((kb << 10) - (4 << 30)) // max(1, jobs))
+    ram = ram_bytes()
+    if not ram:
+        return
+    MEM_BUDGET = max(2 << 30, ram - (4 << 30))
+    if os.environ.get('RECOMP_TARGET') == 'linux':        # macOS: no limit (no prlimit; RLIMIT_AS is not enforced there)
+        MEM_LIMIT = MEM_BUDGET
+    print('compilers share %.1f GB of RAM (%s); at most %d at once' % (MEM_BUDGET / 2.0 ** 30, 'each held to its reservation'
+          if MEM_LIMIT else 'reservations pace them', jobs), flush=True)
+
+
+MEM_FLOOR = [1536 << 20]                 # the smallest reservation; raised when a file reserved at the floor ran out
+
+
+def mem_estimate(src, sizes):
+    """What one compile of src is expected to need, bytes (a reservation, not a promise): MEM_FLOOR (1.5 GB to begin with)
+    at least, 0.75 GB per MB of source, 40 KB per statement of its longest function (the giant functions drive clang's
+    memory even when they are compiled unoptimised: c_00a3.c, 215,493 statements). At most MEM_BUDGET."""
+    longest = max([n for n, _, _ in sizes] or [0])
+    return min(MEM_BUDGET, max(MEM_FLOOR[0], os.path.getsize(src) * 768, longest * (40 << 10)))
+
+
+def mem_floor_raise(want):
+    """Linux: a compile reserved at the floor ran out: this clang needs more for an ordinary file than the floor assumes,
+    so the next files start a quarter higher (instead of each running out once)."""
+    with _mem_cv:
+        if want == MEM_FLOOR[0]:             # (not a large file's own estimate; not already raised by another compile)
+            MEM_FLOOR[0] = min(MEM_BUDGET, want + want // 4)
+
+
+_mem_cv = threading.Condition()
+_mem_used = 0
+_mem_queue = collections.deque()
+
+
+def mem_acquire(n):
+    """Wait until n bytes of MEM_BUDGET are free, first come first served (a large reservation is not overtaken forever)."""
+    global _mem_used
+    me = object()
+    with _mem_cv:
+        _mem_queue.append(me)
+        while _mem_queue[0] is not me or _mem_used + n > MEM_BUDGET:
+            _mem_cv.wait()
+        _mem_queue.popleft()
+        _mem_used += n
+        _mem_cv.notify_all()
+
+
+def mem_release(n):
+    global _mem_used
+    with _mem_cv:
+        _mem_used -= n
+        _mem_cv.notify_all()
 
 
 def out_of_memory(code, out):
     return MEM_LIMIT and code and ('out of memory' in out or 'bad_alloc' in out or 'Cannot allocate memory' in out or code < 0)
 
 
-def run_limited(cmd, limit):
+OOM = 'out of memory'                    # run_limited's output when the memory limit stopped the compiler
+
+
+def run_limited(cmd, limit, mem=0):
+    """Run a compiler with a time limit (and on Linux an address-space limit: mem, else MEM_LIMIT). Returns (exit code,
+    output, seconds); the exit code is None when a limit stopped it, the output then OOM for memory and '' for time."""
     t = time.time()
     if MEM_LIMIT:
-        cmd = ['prlimit', '--as=%d' % MEM_LIMIT, '--'] + cmd      # util-linux; inherited by clang's -cc1 child
+        cmd = ['prlimit', '--as=%d' % (mem or MEM_LIMIT), '--'] + cmd      # util-linux; inherited by clang's -cc1 child
     p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=(os.name != 'nt'))
     try:
         out, _ = p.communicate(timeout=limit)
         out = out.decode('latin-1')[-2000:]
         if out_of_memory(p.returncode, out):
-            return None, '', time.time() - t
+            return None, OOM, time.time() - t
         return p.returncode, out, time.time() - t
     except subprocess.TimeoutExpired:
         if os.name == 'nt':
@@ -165,24 +241,52 @@ def compile_file(src, obj, base_flags, time_limit=None):
         key = hashlib.sha1(f.read() + repr((OPT, EXTRA, base_flags, OPTNONE_LINES, time_limit) + ((MEM_LIMIT,) if MEM_LIMIT else ())).encode()).hexdigest()
     known = ladder(objdir).get(name)
     first = known[1] if known and known[0] == key else 0
+    want = mem_estimate(src, function_sizes(src)) if MEM_BUDGET else 0      # Linux / macOS: this compile's share of RAM
+    raised = ''
+    tried = None
     for step, limit in enumerate((OPTNONE_LINES, OPTNONE_LINES // 4, OPTNONE_LINES // 16)):
         if step < first:
             continue
         hdr, count, lines = optnone_header(src, obj, limit)
         if step and not count:
             continue
+        # Linux / macOS: as many functions unoptimised as in the attempt that just failed is the same set (each limit's set
+        # holds the previous one), so the same compile, which fails the same way (c_03d9.c: one function of 77,061
+        # statements and the rest under 1,250 ran three identical times into the 180 s limit)
+        if POSIX_TARGET and count == tried:
+            continue
+        tried = count
         cmd = [CLANG, '-c', OPT] + EXTRA + base_flags + (['-include', hdr] if hdr else []) + [src, '-o', obj]
-        code, out, secs = run_limited(cmd, time_limit)
-        total += secs
+        while True:
+            if want:
+                mem_acquire(want)
+            try:
+                code, out, secs = run_limited(cmd, time_limit, want)
+            finally:
+                if want:
+                    mem_release(want)
+            total += secs
+            if code is None and out == OOM and want and want < MEM_BUDGET:     # Linux: over its reservation, not the budget
+                mem_floor_raise(want)
+                want = min(MEM_BUDGET, want * 2)
+                raised = ' (memory reservation raised to %.1f GB)' % (want / 2.0 ** 30)
+                continue
+            break
         if code is not None:
             note = ''
             if count:
                 note = '%d function(s) over %d statements unoptimised (%d statements)' % (count, limit, lines)
             if code == 0:
                 ladder_save(objdir, name, key, step)
-            return code, out, total, note + (' (step known from _ladder.json)' if first else '')
+            return code, out, total, note + (' (step known from _ladder.json)' if first else '') + raised
     cmd = [CLANG, '-c', '-O0'] + EXTRA + base_flags + [src, '-o', obj]
-    r = subprocess.run(cmd, capture_output=True, text=True)
+    if want:
+        mem_acquire(want)
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True)
+    finally:
+        if want:
+            mem_release(want)
     if r.returncode == 0:
         ladder_save(objdir, name, key, 3)
     return r.returncode, (r.stdout + r.stderr)[-2000:], total, 'WHOLE FILE at -O0 (time limit %.0fs%s exceeded three times)' % (

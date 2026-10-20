@@ -58,6 +58,9 @@ def write_registry(entries):
 # 937 s at 12 jobs, of which 226 s lifting and the rest mostly the tail of each module).
 _cc_slots = None
 _lift_slots = threading.BoundedSemaphore(2)
+# Linux / macOS (scripts/setup.py sets it): the lifters' worker processes, which hold memory the compilers' sharing
+# (build_opt.py MEM_BUDGET) does not count, follow the RAM rule rather than the compiler job count
+LIFT_JOBS = int(os.environ.get('RECOMP_LIFT_JOBS') or 0) if (TARGET_LINUX or TARGET_MACOS) else 0
 
 
 def _in_slot(job):
@@ -92,7 +95,7 @@ def build_module(e, jobs, relift, opt):
     deps = [nro, LIFTER, os.path.join(RO, 'nro_eh.py')] + ([extra] if os.path.exists(extra) else [])
     if relift or not os.path.exists(stamp) or os.path.getmtime(stamp) < max(os.path.getmtime(p) for p in deps):
         with _lift_slots:
-            r = subprocess.run([sys.executable, LIFTER, 'full', nro, gen, str(min(jobs, 16)), e['base']], capture_output=True, text=True)
+            r = subprocess.run([sys.executable, LIFTER, 'full', nro, gen, str(min(LIFT_JOBS or jobs, 16)), e['base']], capture_output=True, text=True)
         tail = [l for l in r.stdout.splitlines() if l.startswith('functions:')]
         if r.returncode or not tail:
             print('%s: LIFT FAILED\n%s\n%s' % (name, r.stdout[-3000:], r.stderr[-3000:]))
