@@ -317,6 +317,8 @@ BOOL VirtualProtect(LPVOID addr, SIZE_T size, DWORD prot, DWORD *old);
 SIZE_T VirtualQuery(LPCVOID addr, MEMORY_BASIC_INFORMATION *mi, SIZE_T len);
 UINT GetWriteWatch(DWORD flags, PVOID base, SIZE_T size, PVOID *addrs, ULONG_PTR *count, ULONG *gran);   /* not available: 1 (callers fall back) */
 UINT ResetWriteWatch(LPVOID base, SIZE_T size);
+int plat_write_fault(void *addr);                        /* macOS write watch: 1 = a fault on a watched page, resolved (hostrt.c's crash handler asks first) */
+void plat_prepare_write(void *p, size_t n);              /* before the kernel writes into [p, p+n) (read, fread): marks watched pages written */
 BOOL FlushInstructionCache(HANDLE p, LPCVOID base, SIZE_T size);
 BOOL ReadProcessMemory(HANDLE p, LPCVOID src, LPVOID dst, SIZE_T n, SIZE_T *got);
 typedef struct {
@@ -392,6 +394,10 @@ int plat_remove(const char *path);
 #define _unlink plat_remove
 int plat_rename(const char *a, const char *b);
 #define rename plat_rename
+#ifdef __APPLE__                                         /* fread into write-watched memory: the kernel's write would fail, not fault */
+size_t plat_fread(void *p, size_t size, size_t n, FILE *f);
+#define fread plat_fread
+#endif
 const char *plat_path(const char *in, char *out, size_t n);        /* '\' -> '/' */
 
 /* ---- files ---- */

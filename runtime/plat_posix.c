@@ -667,6 +667,36 @@ static void seg_set(uintptr_t lo, uintptr_t hi, uintptr_t base, DWORD state, DWO
     memcpy(g_seg + i, tmp, (size_t)nt * sizeof *tmp);
     g_nseg = n;
 }
+#ifdef __APPLE__
+/* Host pages (MAC2): Apple Silicon maps memory in 16 KB pages; the bookkeeping above, VirtualQuery and the guest keep 4 KB
+ * ones (PAGE). mprotect works on whole host pages, so each host page gets the union of the rights of its committed 4 KB
+ * pieces (vm_sync). Decision: more permissive is harmless for the game; what is lost is the fault on a NOACCESS / READONLY
+ * 4 KB piece that shares a host page with a writable one (a guard page smaller than 16 KB does not fault). Write + execute
+ * together is refused on Apple Silicon outside MAP_JIT: such a page keeps read + write (nothing executes guest memory). */
+static uintptr_t g_hpage;
+static uintptr_t hpage(void) { if (!g_hpage) g_hpage = (uintptr_t)getpagesize(); return g_hpage; }
+static int host_rights(uintptr_t h, uintptr_t he) {    /* g_vm_lock held */
+    int r = 0;
+    for (int k = seg_find(h); k < g_nseg && g_seg[k].lo < he; k++) if (g_seg[k].state == MEM_COMMIT) r |= prot_posix(g_seg[k].prot);
+    if ((r & PROT_WRITE) && (r & PROT_EXEC)) r &= ~PROT_EXEC;
+    return r;
+}
+static int ww_arm(uintptr_t h, int r);
+/* Applies the segments' rights to the host pages over [lo, hi) (after seg_set); one mprotect per run of equal rights. */
+static void vm_sync(uintptr_t lo, uintptr_t hi) {     /* g_vm_lock held */
+    uintptr_t H = hpage(), run = 0;
+    int rr = -1;
+    for (uintptr_t h = lo & ~(H - 1); h < hi; h += H) {
+        int r = ww_arm(h, host_rights(h, h + H));
+        if (r != rr) { if (rr >= 0) mprotect((void *)run, h - run, rr); run = h; rr = r; }
+    }
+    if (rr >= 0) mprotect((void *)run, ((hi + H - 1) & ~(H - 1)) - run, rr);
+}
+#define vm_mprotect(lo, hi, prot) 0                   /* the rights are applied by vm_sync, after the bookkeeping */
+#else
+#define vm_sync(lo, hi) ((void)0)
+#define vm_mprotect(lo, hi, prot) mprotect((void *)(lo), (hi) - (lo), prot_posix(prot))
+#endif
 /* Write watch (MEM_WRITE_WATCH, GetWriteWatch): userfaultfd write protection in asynchronous mode (Linux 6.7+), which the
  * kernel resolves by itself on the first write to a page and records; PAGEMAP_SCAN lists the written pages of a range
  * and protects them again in the same call. This is what Wine uses for the same function. Without it (older kernel,
@@ -738,23 +768,140 @@ UINT ResetWriteWatch(LPVOID base, SIZE_T size) {
     ww_protect(lo, hi - lo);
     return 0;
 }
+void plat_prepare_write(void *p, size_t n) { (void)p; (void)n; }       /* the kernel resolves the write protection itself */
+int plat_write_fault(void *addr) { (void)addr; return 0; }
 #else
-/* macOS: no write watch yet (plan/phases/MAC1_port.md: mprotect and the fault handler, or Mach's page queries). The
- * regions are not watched and GetWriteWatch fails, as on a Linux kernel without asynchronous userfaultfd. */
-static void ww_protect(uintptr_t lo, size_t n) { (void)lo; (void)n; }
-static void ww_add(uintptr_t lo, size_t n) {
-    static int said;
-    (void)lo; (void)n;
-    if (!said++) fprintf(stderr, "plat: no write watch on macOS yet: write watch off\n");
+/* macOS (MAC2): no userfaultfd. A watched host page that has not been written since the last reset is mapped without the
+ * write right; the first write faults (SIGBUS), plat_write_fault gives the right back and marks the page's 4 KB pieces
+ * written; GetWriteWatch lists them and, with the reset flag, takes the right away again. Granularity: a write anywhere
+ * in a 16 KB host page reports its four 4 KB pieces (more than Windows, never less: nvn_gl.c then hashes the texture).
+ * The fault path takes no lock (the faulting thread may hold g_vm_lock): regions stay in their slot, rights[] and dirty[]
+ * are read with atomics. The kernel does not fault for its own writes (read(), fread's direct read): those fail with
+ * EFAULT, so ReadFile and fread call plat_prepare_write first. */
+typedef struct { uintptr_t lo, hi; uint8_t *rights, *dirty; } WwRegion;    /* rights: the host page's own rights (vm_sync) */
+static WwRegion g_ww[64];
+static int g_nww;                                          /* slots in use or freed (hi = 0); never moved */
+static struct sigaction g_ww_old_segv, g_ww_old_bus;
+static volatile LONG64 g_ww_faults;
+static int ww_find(uintptr_t a) {
+    int n = __atomic_load_n(&g_nww, __ATOMIC_ACQUIRE);
+    for (int i = 0; i < n; i++) {
+        uintptr_t lo = __atomic_load_n(&g_ww[i].lo, __ATOMIC_ACQUIRE), hi = __atomic_load_n(&g_ww[i].hi, __ATOMIC_ACQUIRE);
+        if (a >= lo && a < hi) return i;
+    }
+    return -1;
 }
-static int ww_find(uintptr_t a) { (void)a; return -1; }
-static void ww_drop(uintptr_t lo) { (void)lo; }
-UINT GetWriteWatch(DWORD flags, PVOID base, SIZE_T size, PVOID *addrs, ULONG_PTR *count, ULONG *gran) {
-    (void)flags; (void)base; (void)size; (void)addrs; (void)count; (void)gran;
-    t_lasterr = ERROR_INVALID_PARAMETER;
+/* Gives a watched host page its write right back and marks its pieces written (the marks after the mprotect: see
+ * ww_reset). 0 = not a watched page that has the write right. */
+static int ww_unarm(uintptr_t a) {
+    int i = ww_find(a);
+    if (i < 0) return 0;
+    uintptr_t H = g_hpage, idx = (a - g_ww[i].lo) / H;
+    int r = __atomic_load_n(&g_ww[i].rights[idx], __ATOMIC_ACQUIRE);
+    if (!(r & PROT_WRITE) || mprotect((void *)(a & ~(H - 1)), H, r)) return 0;
+    __atomic_fetch_or(&g_ww[i].dirty[idx], 0xff, __ATOMIC_SEQ_CST);
     return 1;
 }
-UINT ResetWriteWatch(LPVOID base, SIZE_T size) { (void)base; (void)size; return 1; }
+int plat_write_fault(void *addr) {
+    if (!ww_unarm((uintptr_t)addr)) return 0;
+    __atomic_fetch_add(&g_ww_faults, 1, __ATOMIC_RELAXED);
+    return 1;
+}
+void plat_prepare_write(void *p, size_t n) {
+    if (!n || !__atomic_load_n(&g_nww, __ATOMIC_ACQUIRE)) return;
+    uintptr_t H = hpage(), a = (uintptr_t)p, e = a + n;
+    for (uintptr_t h = a & ~(H - 1); h < e; h += H) {
+        int i = ww_find(h);
+        if (i >= 0 && __atomic_load_n(&g_ww[i].dirty[(h - g_ww[i].lo) / H], __ATOMIC_ACQUIRE) != 0xff) ww_unarm(h);
+    }
+}
+static void ww_signal(int sig, siginfo_t *si, void *uc) {
+    if (plat_write_fault(si->si_addr)) return;
+    struct sigaction *o = sig == SIGBUS ? &g_ww_old_bus : &g_ww_old_segv;
+    if (o->sa_flags & SA_SIGINFO) { if (o->sa_sigaction) { o->sa_sigaction(sig, si, uc); return; } }
+    else if (o->sa_handler != SIG_DFL && o->sa_handler != SIG_IGN) { o->sa_handler(sig); return; }
+    signal(sig, SIG_DFL);                                  /* nobody else: the default action when the instruction runs again */
+}
+/* The rights a watched host page gets: no write right (armed), even if some pieces are still marked (a write marks them
+ * all again). Records the page's own rights for the fault path. g_vm_lock held. */
+static int ww_arm(uintptr_t h, int r) {
+    int i = ww_find(h);
+    if (i < 0) return r;
+    __atomic_store_n(&g_ww[i].rights[(h - g_ww[i].lo) / g_hpage], (uint8_t)r, __ATOMIC_RELEASE);
+    return r & ~PROT_WRITE;
+}
+static void ww_add(uintptr_t lo, size_t n) {               /* g_vm_lock held; the caller runs vm_sync over the range */
+    static int installed;
+    if (getenv("SSBU_NO_WRITEWATCH")) return;
+    int slot = -1;
+    for (int i = 0; i < g_nww; i++) if (!g_ww[i].hi) { slot = i; break; }
+    if (slot < 0) { if (g_nww == 64) return; slot = g_nww; }
+    uintptr_t H = hpage(), nh = (n + H - 1) / H;
+    uint8_t *rights = calloc(nh, 1), *dirty = calloc(nh, 1);
+    if (!rights || !dirty) { free(rights); free(dirty); return; }
+    if (!installed) {
+        struct sigaction sa;
+        memset(&sa, 0, sizeof sa);
+        sa.sa_sigaction = ww_signal;
+        sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+        sigemptyset(&sa.sa_mask);
+        sigaction(SIGBUS, &sa, &g_ww_old_bus); sigaction(SIGSEGV, &sa, &g_ww_old_segv);
+        installed = 1;
+    }
+    free(g_ww[slot].rights); free(g_ww[slot].dirty);
+    g_ww[slot].rights = rights; g_ww[slot].dirty = dirty;
+    __atomic_store_n(&g_ww[slot].lo, lo, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_ww[slot].hi, lo + n, __ATOMIC_RELEASE);
+    if (slot == g_nww) __atomic_store_n(&g_nww, g_nww + 1, __ATOMIC_RELEASE);
+}
+static void ww_drop(uintptr_t lo) {        /* the arrays stay until the slot is reused: a late fault reads valid memory */
+    int i = ww_find(lo);
+    if (i >= 0) __atomic_store_n(&g_ww[i].hi, 0, __ATOMIC_RELEASE);
+}
+/* Clears the marks of the 4 KB pieces of [lo, hi) (g_vm_lock held); with rearm the written host pages lose the write right
+ * again. Order: protect, clear, protect again. A write whose fault raced the first mprotect sets its marks after its own
+ * mprotect, so it is either after the clear (still marked) or caught by the second mprotect: a page is never left
+ * writable with clear marks. */
+static void ww_reset(int i, uintptr_t lo, uintptr_t hi, int rearm) {
+    uintptr_t H = g_hpage;
+    for (uintptr_t h = lo & ~(H - 1); h < hi; h += H) {
+        uintptr_t idx = (h - g_ww[i].lo) / H, a = h < lo ? lo : h, e = h + H > hi ? hi : h + H;
+        if (!__atomic_load_n(&g_ww[i].dirty[idx], __ATOMIC_ACQUIRE)) continue;     /* not written: already armed */
+        uint8_t mask = 0;
+        for (uintptr_t p = a; p < e; p += PAGE) mask |= (uint8_t)(1u << ((p - h) / PAGE));
+        int r = __atomic_load_n(&g_ww[i].rights[idx], __ATOMIC_ACQUIRE);
+        if (rearm && (r & PROT_WRITE)) mprotect((void *)h, H, r & ~PROT_WRITE);
+        __atomic_fetch_and(&g_ww[i].dirty[idx], (uint8_t)~mask, __ATOMIC_SEQ_CST);
+        if (rearm && (r & PROT_WRITE)) mprotect((void *)h, H, r & ~PROT_WRITE);
+    }
+}
+static void ww_protect(uintptr_t lo, size_t n) {          /* decommitted pieces: not written; vm_sync arms the pages */
+    int i = ww_find(lo);
+    if (i >= 0) ww_reset(i, lo, lo + n, 0);
+}
+UINT GetWriteWatch(DWORD flags, PVOID base, SIZE_T size, PVOID *addrs, ULONG_PTR *count, ULONG *gran) {
+    uintptr_t lo = (uintptr_t)base & ~(uintptr_t)(PAGE - 1), hi = ((uintptr_t)base + size + PAGE - 1) & ~(uintptr_t)(PAGE - 1);
+    pthread_mutex_lock(&g_vm_lock);
+    int i = ww_find(lo);
+    if (i < 0 || hi > g_ww[i].hi || !size) { pthread_mutex_unlock(&g_vm_lock); t_lasterr = ERROR_INVALID_PARAMETER; return 1; }
+    ULONG_PTR max = *count, got = 0;
+    uintptr_t H = g_hpage, p = lo;
+    for (; p < hi && got < max; p += PAGE)
+        if (__atomic_load_n(&g_ww[i].dirty[(p - g_ww[i].lo) / H], __ATOMIC_ACQUIRE) & (1u << ((p & (H - 1)) / PAGE))) addrs[got++] = (PVOID)p;
+    if (flags & WRITE_WATCH_FLAG_RESET) ww_reset(i, lo, p, 1);           /* the pieces looked at */
+    pthread_mutex_unlock(&g_vm_lock);
+    if (gran) *gran = PAGE;
+    *count = got;
+    return 0;
+}
+UINT ResetWriteWatch(LPVOID base, SIZE_T size) {
+    uintptr_t lo = (uintptr_t)base & ~(uintptr_t)(PAGE - 1), hi = ((uintptr_t)base + size + PAGE - 1) & ~(uintptr_t)(PAGE - 1);
+    pthread_mutex_lock(&g_vm_lock);
+    int i = ww_find(lo);
+    if (i >= 0) ww_reset(i, lo, hi < g_ww[i].hi ? hi : g_ww[i].hi, 1);
+    pthread_mutex_unlock(&g_vm_lock);
+    return i < 0;
+}
 #endif
 /* MEM_RESERVE maps the range PROT_NONE (address space only) and MEM_COMMIT is an mprotect; reservations start on 64 KB, the
  * Windows allocation granularity. Decommit (VirtualFree MEM_DECOMMIT) drops the pages, so a new commit reads zeros as on Windows. */
@@ -766,21 +913,28 @@ LPVOID VirtualAlloc(LPVOID addr, SIZE_T size, DWORD type, DWORD prot) {
         uintptr_t lo = a & ~(uintptr_t)0xffff;          /* reservations start on 64 KB, as on Windows */
         size_t n = (size + (a - lo) + PAGE - 1) & ~(size_t)(PAGE - 1);
         int commit = (type & MEM_COMMIT) != 0;
+#ifdef __APPLE__                                  /* whole host pages, no rights yet (vm_sync below gives them) */
+        size_t nm = (n + hpage() - 1) & ~(size_t)(hpage() - 1);
+        int mprot = PROT_NONE;
+#else
+        size_t nm = n;
+        int mprot = commit ? prot_posix(prot) : PROT_NONE;
+#endif
         int flags = MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE;
         void *p;
-        if (addr) p = mmap((void *)lo, n, commit ? prot_posix(prot) : PROT_NONE, flags | MAP_FIXED_NOREPLACE, -1, 0);
+        if (addr) p = mmap((void *)lo, nm, mprot, flags | MAP_FIXED_NOREPLACE, -1, 0);
         else {
             /* 64 KB alignment: over-allocate and trim */
-            p = mmap(NULL, n + 0x10000, commit ? prot_posix(prot) : PROT_NONE, flags, -1, 0);
+            p = mmap(NULL, nm + 0x10000, mprot, flags, -1, 0);
             if (p != MAP_FAILED) {
                 uintptr_t s = (uintptr_t)p, al = (s + 0xffff) & ~(uintptr_t)0xffff;
                 if (al > s) munmap(p, al - s);
-                if (s + n + 0x10000 > al + n) munmap((void *)(al + n), s + n + 0x10000 - (al + n));
+                if (s + nm + 0x10000 > al + nm) munmap((void *)(al + nm), s + nm + 0x10000 - (al + nm));
                 p = (void *)al;
             }
         }
         if (p == MAP_FAILED || (addr && (uintptr_t)p != lo)) {
-            if (p != MAP_FAILED) munmap(p, n);
+            if (p != MAP_FAILED) munmap(p, nm);
             pthread_mutex_unlock(&g_vm_lock);
             t_lasterr = ERROR_INVALID_ADDRESS;
             return NULL;
@@ -788,6 +942,7 @@ LPVOID VirtualAlloc(LPVOID addr, SIZE_T size, DWORD type, DWORD prot) {
         lo = (uintptr_t)p;
         seg_set(lo, lo + n, lo, commit ? MEM_COMMIT : MEM_RESERVE, commit ? prot : 0, prot);
         if (type & MEM_WRITE_WATCH) ww_add(lo, n);
+        if (commit) vm_sync(lo, lo + n);
         pthread_mutex_unlock(&g_vm_lock);
         return addr ? (void *)a : p;
     }
@@ -801,8 +956,9 @@ LPVOID VirtualAlloc(LPVOID addr, SIZE_T size, DWORD type, DWORD prot) {
         if (k >= g_nseg || g_seg[k].lo > p) { pthread_mutex_unlock(&g_vm_lock); t_lasterr = ERROR_INVALID_ADDRESS; return NULL; }
         p = g_seg[k].hi;
     }
-    if (mprotect((void *)lo, hi - lo, prot_posix(prot))) { pthread_mutex_unlock(&g_vm_lock); fail_errno(); return NULL; }
+    if (vm_mprotect(lo, hi, prot)) { pthread_mutex_unlock(&g_vm_lock); fail_errno(); return NULL; }
     seg_set(lo, hi, base, MEM_COMMIT, prot, aprot);
+    vm_sync(lo, hi);
     pthread_mutex_unlock(&g_vm_lock);
     return addr;
 }
@@ -822,14 +978,27 @@ BOOL VirtualFree(LPVOID addr, SIZE_T size, DWORD type) {
         uintptr_t lo = a & ~(uintptr_t)(PAGE - 1), hi = size ? (a + size + PAGE - 1) & ~(uintptr_t)(PAGE - 1) : lo;
         if (!size) { uintptr_t base = g_seg[i].alloc_base; int k = seg_find(base); lo = base; while (k < g_nseg && g_seg[k].alloc_base == base) hi = g_seg[k++].hi; }
         uintptr_t base = g_seg[i].alloc_base; DWORD aprot = g_seg[i].alloc_prot;
-#ifdef __APPLE__                                  /* MADV_DONTNEED keeps the pages on macOS: a new mapping over them reads zeros */
-        mmap((void *)lo, hi - lo, PROT_NONE, MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+#ifdef __APPLE__
+        /* MADV_DONTNEED keeps the pages on macOS: a new mapping over the whole host pages reads zeros; the 4 KB pieces of a
+         * host page shared with other pieces are cleared by hand (the page gets read + write for that, vm_sync below
+         * gives it its rights again) */
+        uintptr_t H = hpage(), flo = (lo + H - 1) & ~(H - 1), fhi = hi & ~(H - 1);
+        if (flo < fhi) mmap((void *)flo, fhi - flo, PROT_NONE, MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+        else flo = fhi = hi;
+        for (uintptr_t p = lo; p < hi; p += PAGE) {
+            if (p >= flo && p < fhi) continue;
+            int k = seg_find(p);
+            if (k >= g_nseg || g_seg[k].lo > p || g_seg[k].state != MEM_COMMIT) continue;   /* never committed: zero already */
+            mprotect((void *)(p & ~(H - 1)), H, PROT_READ | PROT_WRITE);
+            memset((void *)p, 0, PAGE);
+        }
 #else
         madvise((void *)lo, hi - lo, MADV_DONTNEED);     /* decommitted pages come back zero */
         mprotect((void *)lo, hi - lo, PROT_NONE);
 #endif
         if (ww_find(lo) >= 0) ww_protect(lo, hi - lo);   /* emptied pages are watched again (not "written") */
         seg_set(lo, hi, base, MEM_RESERVE, 0, aprot);
+        vm_sync(lo, hi);
     }
     pthread_mutex_unlock(&g_vm_lock);
     return TRUE;
@@ -845,7 +1014,11 @@ BOOL VirtualProtect(LPVOID addr, SIZE_T size, DWORD prot, DWORD *old) {
     int i = seg_find(lo);
     int tracked = i < g_nseg && g_seg[i].lo <= lo;
     if (old) *old = tracked ? g_seg[i].prot : untracked_old;
-    if (mprotect((void *)lo, hi - lo, prot_posix(prot))) { pthread_mutex_unlock(&g_vm_lock); return fail_errno(); }
+#ifdef __APPLE__                                  /* memory we did not map: whole host pages (vm_sync does ours) */
+    uintptr_t hlo = lo & ~(hpage() - 1), hhi = (hi + hpage() - 1) & ~(hpage() - 1);
+    if (!tracked && mprotect((void *)hlo, hhi - hlo, prot_posix(prot))) { pthread_mutex_unlock(&g_vm_lock); return fail_errno(); }
+#endif
+    if (vm_mprotect(lo, hi, prot)) { pthread_mutex_unlock(&g_vm_lock); return fail_errno(); }
     if (tracked) {                                   /* per segment: keeps each one's allocation base */
         for (uintptr_t p = lo; p < hi;) {
             int k = seg_find(p);
@@ -854,6 +1027,7 @@ BOOL VirtualProtect(LPVOID addr, SIZE_T size, DWORD prot, DWORD *old) {
             seg_set(p, e, g_seg[k].alloc_base, MEM_COMMIT, prot, g_seg[k].alloc_prot);
             p = e;
         }
+        vm_sync(lo, hi);
     }
     pthread_mutex_unlock(&g_vm_lock);
     return TRUE;
@@ -1163,6 +1337,7 @@ intptr_t _get_osfhandle(int fd) { return fd < 0 ? -1 : (intptr_t)(FD_TAG + (uint
 BOOL ReadFile(HANDLE h, LPVOID buf, DWORD n, DWORD *got, OVERLAPPED *ov) {
     int fd = plat_handle_fd(h);
     size_t done = 0;
+    plat_prepare_write(buf, n);                      /* write-watched memory (macOS): the kernel's write would fail */
     while (done < n) {
         ssize_t k = ov ? pread(fd, (char *)buf + done, n - done, (off_t)(((uint64_t)ov->OffsetHigh << 32 | ov->Offset) + done))
                        : read(fd, (char *)buf + done, n - done);
@@ -1943,3 +2118,10 @@ void plat_print_build_identity(const char *exe, size_t dir_len) {
 #endif
 /* There are no 8.3 names: callers fall back to the long name. */
 DWORD GetShortPathNameW(LPCWSTR path, LPWSTR out, DWORD n) { (void)path; (void)out; (void)n; SetLastError(1 /* ERROR_INVALID_FUNCTION */); return 0; }
+#ifdef __APPLE__
+#undef fread
+size_t plat_fread(void *p, size_t size, size_t n, FILE *f) {
+    plat_prepare_write(p, size * n);                 /* stdio reads large requests straight into p */
+    return fread(p, size, n, f);
+}
+#endif

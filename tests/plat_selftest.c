@@ -24,6 +24,13 @@ static void *main_fiber, *fib;
 static int fiber_steps;
 static void fiber_fn(LPVOID p) { for (;;) { fiber_steps += (int)(uintptr_t)p; SwitchToFiber(main_fiber); } }
 static BOOL CALLBACK once_fn(PINIT_ONCE o, PVOID p, PVOID *c) { (void)o; (void)c; (*(int *)p)++; return TRUE; }
+#include <unistd.h>
+static uint8_t *ww_mem;
+static DWORD WINAPI ww_writer(LPVOID arg) {          /* writes one byte in each 4 KB piece of its quarter of 1 MB */
+    for (int k = 0; k < 64; k++) ww_mem[(uintptr_t)arg * 0x40000 + (uintptr_t)k * 0x1000 + 17] = (uint8_t)k;
+    return 0;
+}
+static int has_page(void **v, ULONG_PTR n, void *p) { for (ULONG_PTR i = 0; i < n; i++) if (v[i] == p) return 1; return 0; }
 
 #ifdef __APPLE__
 #include <pthread/qos.h>
@@ -134,6 +141,30 @@ int main(void) {
     CHECK(VirtualQuery(res + 0x10000, &mi, sizeof mi) && mi.State == MEM_RESERVE, "decommit");
     VirtualAlloc(res + 0x10000, 0x1000, MEM_COMMIT, PAGE_READWRITE);
     CHECK(res[0x10000] == 0, "recommitted page is zero");
+    {   /* 4 KB pieces inside one host page (16 KB on Apple Silicon): rights, decommit, zeroing */
+        size_t hp = (size_t)getpagesize();
+        SYSTEM_INFO si; GetSystemInfo(&si);
+        printf("     host page %zu bytes, reported page %lu\n", hp, (unsigned long)si.dwPageSize);
+        CHECK(si.dwPageSize == 4096, "GetSystemInfo: 4 KB pages (the bookkeeping's)");
+        uint8_t *q = res + 0x40000;                                   /* a 64 KB-aligned host page */
+        CHECK(VirtualAlloc(q + 0x1000, 0x1000, MEM_COMMIT, PAGE_READWRITE) == q + 0x1000, "commit one 4 KB piece of a host page");
+        q[0x1000] = 1; q[0x1fff] = 2;
+        CHECK(VirtualAlloc(q + 0x3000, 0x1000, MEM_COMMIT, PAGE_READONLY) == q + 0x3000 && q[0x3000] == 0, "commit a read-only piece beside it");
+        CHECK(VirtualQuery(q, &mi, sizeof mi) && mi.State == MEM_RESERVE && mi.RegionSize == 0x1000, "the piece before stays reserved (bookkeeping)");
+        CHECK(VirtualProtect(q + 0x1000, 0x1000, PAGE_READONLY, &old) && old == PAGE_READWRITE && IsBadWritePtr(q + 0x1000, 1), "VirtualProtect of one piece: read-only in the bookkeeping");
+        CHECK(VirtualProtect(q + 0x1000, 0x1000, PAGE_READWRITE, &old) && old == PAGE_READONLY, "VirtualProtect back to read-write");
+        q[0x1000] = 3;                                                 /* would fault if the host page had kept read-only */
+        CHECK(VirtualAlloc(q + 0x2000, 0x1000, MEM_COMMIT, PAGE_READWRITE) == q + 0x2000, "commit the piece between");
+        q[0x2000] = 9;
+        CHECK(VirtualFree(q + 0x2000, 0x1000, MEM_DECOMMIT) && q[0x1000] == 3 && q[0x1fff] == 2, "decommit one piece: the neighbour keeps its data");
+        CHECK(VirtualAlloc(q + 0x2000, 0x1000, MEM_COMMIT, PAGE_READWRITE) == q + 0x2000 && q[0x2000] == 0, "the decommitted piece comes back zero");
+        CHECK(VirtualQuery(q + 0x3000, &mi, sizeof mi) && mi.Protect == PAGE_READONLY && mi.RegionSize == 0x1000, "the read-only piece keeps its bookkeeping");
+        uint8_t *big = res + 0x80000;                                  /* commit across host pages, from the middle of one */
+        CHECK(VirtualAlloc(big + 0x3000, 0x6000, MEM_COMMIT, PAGE_READWRITE) == big + 0x3000, "commit 24 KB starting at a 4 KB piece");
+        big[0x3000] = 1; big[0x8fff] = 2;
+        CHECK(VirtualFree(big + 0x4000, 0x4000, MEM_DECOMMIT) && big[0x3000] == 1 && big[0x8fff] == 2, "decommit a whole host page between two kept pieces");
+        CHECK(VirtualAlloc(big + 0x4000, 0x4000, MEM_COMMIT, PAGE_READWRITE) && big[0x4000] == 0 && big[0x7fff] == 0, "the whole host page comes back zero");
+    }
     CHECK(VirtualFree(res, 0, MEM_RELEASE) && VirtualQuery(res, &mi, sizeof mi) && mi.State == MEM_FREE, "release");
     uint8_t *any = VirtualAlloc(NULL, 12345, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
     CHECK(any && ((uintptr_t)any & 0xffff) == 0, "VirtualAlloc(NULL) 64 KB aligned");
@@ -170,19 +201,60 @@ int main(void) {
     }
 #endif
     void *pages[64]; ULONG_PTR cnt = 64; ULONG gr = 0;
-#ifdef __linux__                 /* macOS: no write watch yet (plan/phases/MAC1_port.md) */
-    /* write watch */
-    uint8_t *ww = VirtualAlloc(NULL, 0x400000, MEM_RESERVE | MEM_WRITE_WATCH, PAGE_NOACCESS);
-    VirtualAlloc(ww, 0x100000, MEM_COMMIT, PAGE_READWRITE);
-    CHECK(GetWriteWatch(WRITE_WATCH_FLAG_RESET, ww, 0x100000, pages, &cnt, &gr) == 0 && cnt == 0 && gr == 4096, "write watch: nothing written");
-    ww[0x3000] = 1; ww[0x3001] = 2; ww[0x9000] = 3;
-    cnt = 64;
-    CHECK(GetWriteWatch(WRITE_WATCH_FLAG_RESET, ww, 0x100000, pages, &cnt, &gr) == 0 && cnt == 2 && pages[0] == ww + 0x3000 && pages[1] == ww + 0x9000, "write watch: 2 pages written");
-    cnt = 64;
-    CHECK(GetWriteWatch(0, ww, 0x100000, pages, &cnt, &gr) == 0 && cnt == 0, "write watch: reset");
-    ww[0x9000] = 4; cnt = 64;
-    CHECK(GetWriteWatch(0, ww + 0x8000, 0x2000, pages, &cnt, &gr) == 0 && cnt == 1 && GetWriteWatch(0, ww, 0x1000, pages, &cnt, &gr) == 0 && cnt == 0, "write watch: sub-range");
-#endif
+    {   /* write watch: Linux userfaultfd, macOS mprotect + the fault handler (a written host page reports all its 4 KB pieces) */
+        const uintptr_t G = (uintptr_t)getpagesize(), per = G / 4096;
+        uint8_t *ww = VirtualAlloc(NULL, 0x400000, MEM_RESERVE | MEM_WRITE_WATCH, PAGE_NOACCESS);
+        VirtualAlloc(ww, 0x100000, MEM_COMMIT, PAGE_READWRITE);
+        CHECK(GetWriteWatch(WRITE_WATCH_FLAG_RESET, ww, 0x100000, pages, &cnt, &gr) == 0 && cnt == 0 && gr == 4096, "write watch: nothing written");
+        ww[0x3000] = 1; ww[0x3001] = 2; ww[0x9000] = 3;
+        cnt = 64;
+        CHECK(GetWriteWatch(WRITE_WATCH_FLAG_RESET, ww, 0x100000, pages, &cnt, &gr) == 0 && cnt == 2 * per && has_page(pages, cnt, ww + 0x3000) &&
+              has_page(pages, cnt, ww + 0x9000) && pages[0] == ww + (0x3000 & ~(G - 1)), "write watch: 2 host pages written");
+        cnt = 64;
+        CHECK(GetWriteWatch(0, ww, 0x100000, pages, &cnt, &gr) == 0 && cnt == 0, "write watch: reset");
+        ww[0x9000] = 4; cnt = 64;
+        CHECK(GetWriteWatch(0, ww + 0x8000, 0x2000, pages, &cnt, &gr) == 0 && cnt == (per > 1 ? 2 : 1) && GetWriteWatch(0, ww, 0x1000, pages, &cnt, &gr) == 0 && cnt == 0, "write watch: sub-range");
+        ResetWriteWatch(ww, 0x100000);
+        ww[0x20000] = 5; cnt = 64;                       /* reset one piece: the other pieces of its host page stay written */
+        CHECK(GetWriteWatch(WRITE_WATCH_FLAG_RESET, ww + 0x20000, 0x1000, pages, &cnt, &gr) == 0 && cnt == 1 && pages[0] == ww + 0x20000, "write watch: one piece asked and reset");
+        cnt = 64;
+        CHECK(GetWriteWatch(0, ww + 0x21000, 0x3000, pages, &cnt, &gr) == 0 && cnt == per - 1, "write watch: the rest of its host page still written");
+        ww[0x20000] = 6; cnt = 64;                       /* the reset protected the page again: this write is seen */
+        CHECK(GetWriteWatch(0, ww + 0x20000, 0x1000, pages, &cnt, &gr) == 0 && cnt == 1, "write watch: a write after a partial reset is seen");
+        ResetWriteWatch(ww, 0x100000);
+        {   /* the kernel's own writes: ReadFile and a large fread into clean watched memory */
+            static uint8_t data[200000];
+            for (size_t k = 0; k < sizeof data; k++) data[k] = (uint8_t)(k * 7);
+            FILE *wf = fopen("plat_ww.bin", "wb"); fwrite(data, 1, sizeof data, wf); fclose(wf);
+            HANDLE rh = CreateFileA("plat_ww.bin", GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+            DWORD got = 0;
+            CHECK(rh != INVALID_HANDLE_VALUE && ReadFile(rh, ww + 0x40000, 100000, &got, NULL) && got == 100000 && !memcmp(ww + 0x40000, data, 100000), "ReadFile into write-watched memory");
+            CloseHandle(rh);
+            FILE *rf = fopen("plat_ww.bin", "rb");
+            CHECK(rf && fread(ww + 0x80000, 1, sizeof data, rf) == sizeof data && !memcmp(ww + 0x80000, data, sizeof data), "fread (200 KB) into write-watched memory");
+            if (rf) fclose(rf);
+            DeleteFileA("plat_ww.bin");
+            static void *many[256]; ULONG_PTR c2 = 256;
+            CHECK(GetWriteWatch(WRITE_WATCH_FLAG_RESET, ww + 0x40000, 100000, many, &c2, &gr) == 0 && c2 >= 25, "write watch: the read's pages reported");
+        }
+        ResetWriteWatch(ww, 0x100000);
+        {   /* four threads write every 4 KB piece of 1 MB at once (faults on many threads) */
+            ww_mem = ww; HANDLE th[4];
+            for (int k = 0; k < 4; k++) th[k] = CreateThread(NULL, 0, ww_writer, (LPVOID)(uintptr_t)k, 0, NULL);
+            for (int k = 0; k < 4; k++) { WaitForSingleObject(th[k], INFINITE); CloseHandle(th[k]); }
+            static void *all[512]; ULONG_PTR c3 = 512;
+            CHECK(GetWriteWatch(WRITE_WATCH_FLAG_RESET, ww, 0x100000, all, &c3, &gr) == 0 && c3 == 256, "write watch: 256 pieces written by 4 threads");
+            int same = 1;
+            for (int k = 0; k < 256; k++) same &= ww[(uintptr_t)k * 0x1000 + 17] == (uint8_t)(k % 64);
+            CHECK(same, "write watch: every write landed");
+        }
+        CHECK(VirtualFree(ww + 0x1000, 0x1000, MEM_DECOMMIT) && VirtualAlloc(ww + 0x1000, 0x1000, MEM_COMMIT, PAGE_READWRITE) && ww[0x1000] == 0, "write watch: decommit one piece");
+        cnt = 64;
+        CHECK(GetWriteWatch(0, ww, 0x100000, pages, &cnt, &gr) == 0 && cnt == 0, "write watch: decommit is not a write");
+        ww[0x1000] = 1; cnt = 64;
+        CHECK(GetWriteWatch(0, ww, 0x100000, pages, &cnt, &gr) == 0 && cnt == per, "write watch: a write after the decommit is seen");
+        VirtualFree(ww, 0, MEM_RELEASE);
+    }
     cnt = 64;
     CHECK(GetWriteWatch(0, any, 4096, pages, &cnt, &gr) != 0, "write watch: unwatched memory refused");
     /* fibers */

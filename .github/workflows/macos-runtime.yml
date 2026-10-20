@@ -50,3 +50,31 @@ jobs:
           clang -O1 -w -mmacosx-version-min=14.4 -include plat/plat_pre.h -I plat $(pkg-config --cflags sdl3 openssl) \
             ../tests/plat_selftest.c plat_posix.c -o plat_selftest $(pkg-config --libs sdl3 openssl)
           ./plat_selftest
+
+  # What MoltenVK (Homebrew) offers on the runner's GPU: API version, portability subset, the extensions nvn_vk.c asks for.
+  vulkan-info:
+    runs-on: macos-14
+    timeout-minutes: 15
+    steps:
+      - name: Dependencies (Homebrew)
+        run: brew install --quiet vulkan-loader molten-vk vulkan-tools
+      - name: vulkaninfo
+        run: |
+          vulkaninfo --summary 2>&1 | tee summary.txt
+          vulkaninfo 2>/dev/null > full.txt || true
+          echo "### Vulkan on macos-14 (MoltenVK)" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          grep -E "apiVersion|driverName|driverInfo|deviceName|conformanceVersion" summary.txt | sort -u >> "$GITHUB_STEP_SUMMARY" || true
+          for e in VK_KHR_portability_subset VK_KHR_portability_enumeration VK_EXT_graphics_pipeline_library VK_EXT_extended_dynamic_state3 \
+                   VK_EXT_vertex_input_dynamic_state VK_KHR_push_descriptor VK_EXT_custom_border_color VK_EXT_index_type_uint8 \
+                   VK_KHR_index_type_uint8 VK_EXT_provoking_vertex VK_EXT_shader_object VK_KHR_dynamic_rendering VK_KHR_synchronization2 \
+                   VK_EXT_extended_dynamic_state VK_EXT_extended_dynamic_state2 VK_KHR_maintenance4 VK_EXT_transform_feedback \
+                   VK_KHR_pipeline_library VK_EXT_robustness2 VK_EXT_depth_clip_enable; do
+            if grep -q "$e" full.txt; then echo "has     $e"; else echo "MISSING $e"; fi
+          done | tee -a "$GITHUB_STEP_SUMMARY"
+          grep -E "^\s*(textureCompressionBC|geometryShader|logicOp|wideLines|depthClamp|tessellationShader|dualSrcBlend|multiViewport|samplerAnisotropy|shaderFloat64|triangleFans|imageViewFormatSwizzle|pointPolygons|separateStencilMaskRef|events|vertexAttributeAccessBeyondStride|minVertexInputBindingStrideAlignment)\s*=" full.txt | sort -u | tee -a "$GITHUB_STEP_SUMMARY" || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vulkaninfo-macos-14
+          path: '*.txt'

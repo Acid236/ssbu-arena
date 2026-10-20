@@ -969,7 +969,12 @@ static void crash_file_report(int sig, siginfo_t *si, ucontext_t *u) {
     fprintf(f, "\n");
     fclose(f);
 }
+static void install_crash_handler(void);
 static void crash_signal(int sig, siginfo_t *si, void *uc) {
+    if ((sig == SIGSEGV || sig == SIGBUS) && plat_write_fault(si->si_addr)) {     /* macOS write watch: a first write, resolved */
+        install_crash_handler();                    /* SA_RESETHAND took the handler away on entry */
+        return;
+    }
     ucontext_t *u = uc;
     uintptr_t rip = UC_PC(u), rsp = UC_SP(u), bad = (uintptr_t)si->si_addr;
     printf("\nHOST SIGNAL %d (%s) at address %p\n", sig, sig == SIGSEGV ? "segmentation fault" : sig == SIGBUS ? "bus error" : sig == SIGILL ? "illegal instruction" : sig == SIGFPE ? "arithmetic" : "?", si->si_addr);
