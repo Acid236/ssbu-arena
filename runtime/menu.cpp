@@ -45,6 +45,7 @@ long long nvn_front_presents(void); void nvn_front_osk_redraw(void); /* nvn_gl.c
 const char *nvn_vk_device_name(void);                                /* nvn_vk_menu.c */
 int osk_active(void);                                                /* osk.c */
 int osk_run(const wchar_t *header, const wchar_t *guide, const wchar_t *initial, int max_len, int min_len, int password, wchar_t *out);      /* osk.c */
+extern "C" void display_refresh_info(double *hz, int *lock_k);      /* display.c */
 int net_online(void); int net_mode(void); const char *net_room_code(void); const char *net_lan_code(void); const char *net_upnp_result(void);      /* net_relay.c */
 int r1_ra_phase(void);                                               /* r1_state.c (read only): 0 = run-ahead not running now */
 }
@@ -353,6 +354,16 @@ static void sec_display(int cw, int ch) {
     S.window = wm;
     if (combo("Window", &S.window, k_window, N(k_window))) { display_set_window_mode(S.window); ini("window", k_window[S.window]); }
     tag(0, 0);
+    {   /* a screen that is not k x 60 Hz (75, 144, 165 Hz ...): the game is 60 frames per second, so frames cannot all stay
+         * on screen equally long and motion stutters (testers, 2026-10-20: "frame pacing is terrible, 144 Hz screen") */
+        double hz; int k; display_refresh_info(&hz, &k);
+        if (hz > 30 && k == 0) {
+            ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1), "Your screen runs at %.0f Hz: not a multiple of 60, so motion is uneven.", hz);
+            help("The game runs at 60 frames per second. Set the screen to 120 Hz (or 60 Hz) in Windows Settings > Display > "
+                 "Advanced display > Refresh rate, and the game locks to it: every frame is shown equally long. "
+                 "Or turn on G-Sync / FreeSync and play in fullscreen.");
+        } else if (hz > 30) ImGui::TextDisabled("Screen %.0f Hz: locked, %d refresh%s per game frame.", hz, k, k > 1 ? "es" : "");
+    }
     help("F11 also switches between the window and borderless at any time. Fullscreen = borderless and always on top (no display mode change).");
     int sz = S.size < 0 ? 0 : S.size;
     if (combo("Window size", &sz, k_size_name, N(k_size_name))) {

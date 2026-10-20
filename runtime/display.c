@@ -1119,3 +1119,10 @@ static const ImportDef vi_imports[] = {
 void register_display_imports(void) {
     register_imports(vi_imports, (int)(sizeof vi_imports / sizeof vi_imports[0]));
 }
+
+/* menu.cpp (F1 > Display): the measured refresh rate (0 = not measured) and the display lock's refreshes per game frame
+ * (0 = our own 60 Hz clock: a panel that is not k x 60 Hz, where frames cannot all stay on screen equally long) */
+void display_refresh_info(double *hz, int *lock_k) {
+    *hz = g_vb_period > 0 && g_freq.QuadPart ? (double)g_freq.QuadPart / g_vb_period : 0;
+    *lock_k = (int)g_lock_k;
+}
