@@ -365,6 +365,7 @@ static void match_player_hook(Ctx *c, void *user) {
         char nm[64]; snprintf(nm, sizeof nm, "ui_chara_%s", g_dm_name[idx]);
         wr64(st + 0x88, 0xc100000000000000ull | hash40(nm));
         if (idx == 1 && g_dm_p2type >= 0) wr32(st + 0x78, (uint32_t)g_dm_p2type);
+        wr8(st + 0x90, (uint8_t)idx);                      /* colour: one per player, not the screens' (a Random panel left a random one: the fight started differently each run) */
         if (g_dm.cpu > 0 && rd32(st + 0x78) == 1) { wr8(st + 0x91, (uint8_t)g_dm.cpu); wr32(st + 0x224, 0xffffffffu); }   /* level 1..9; the game maps it to the power in record + 0x79 (0, 15, 21, 31, 42, 48, 60, 75, 100) */
         g_dm_applied |= 1 << idx;
     }
