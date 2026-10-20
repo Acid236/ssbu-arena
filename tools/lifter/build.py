@@ -220,7 +220,10 @@ def compile_game_data(objdir, shim):
         if not os.path.exists(src):
             print('%s is missing: an earlier step of scripts/setup.py writes it (tables, sdk, modules)' % src)
             return None
-        obj = os.path.join(objdir, ('_shim' if src == shim else os.path.basename(src)[:-2]) + '.obj')
+        # a shim other than the default gets an object of its own name: setup.py --rollback links game_shim_r1.c into the
+        # same data folder, and the default shim's newer object would otherwise be taken for it (r1_m1 / r1_m2 undefined)
+        name = '_shim' if os.path.basename(shim) == 'game_shim_eh.c' else '_shim_' + os.path.basename(shim)[:-2]
+        obj = os.path.join(objdir, (name if src == shim else os.path.basename(src)[:-2]) + '.obj')
         objs.append(obj)
         if not os.path.exists(obj) or os.path.getmtime(obj) < max(os.path.getmtime(src), newest_h):
             jobs.append([CLANG] + flags + [src, '-o', obj])

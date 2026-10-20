@@ -106,11 +106,27 @@ python tools/net/ssbu_lobby.py --bind 0.0.0.0 --port 39500 [--verbose]
 - Tested with two game instances on one PC: lobby, LAN and host/join modes. Full matches ran with both players' inputs, and the fighters' states were identical frame by frame on both sides.
 - NOT yet tested between two PCs, over the internet, against a real UPnP router, or with STUN.
 - No encryption and no authentication. Play only with people you know.
-- By default it uses the game's own delay-based netcode. Rollback netcode is in the code and in testing (off by default,
-  test switch `SSBU_RB_NET`): two games with a 150 ms round trip finish whole matches in the same state with 0 desyncs.
-  It is not a menu option yet; frames that roll back 3 or more frames still take longer than 16.7 ms.
+- By default it uses the game's own delay-based netcode. **Rollback netcode** (experimental) is an option, see below.
 - For now the room code is shown only in the log, on lines starting with `[online]`.
 - On first start, Windows may ask to allow the game through the firewall. LAN and host modes need it.
+
+## Rollback netcode (experimental)
+
+Smooth fights at high ping: each game runs the match locally and only the players' inputs travel; a late input rolls the
+game back a few frames and replays them, instead of slowing both players down.
+
+1. **Build it once:** open `Install SSBU.bat`, tick **"Rollback netcode for online play"**, press **Install** (or
+   **Resume**). It builds a second copy of the game with the extra bookkeeping rollback needs (`ssbu_game_r1.dll`,
+   about as long as the first build) and puts `ssbu_native_rb.exe` beside it.
+2. **Switch it on:** in the game, **F1 -> Experimental -> Rollback netcode: ON**, then restart the game (Play SSBU.bat).
+3. **Both players** need it on, the same game update (13.0.4 or 13.0.5) and the same version of this project.
+4. Play as usual through **Local Wireless**: each player picks only their own fighter; the two games agree on the stage,
+   rules and a shared random seed before the match starts (a box "Online match" shows while they wait).
+
+Limits today: rollbacks of 3 or more frames take a little longer than one frame (a short hitch at very high ping);
+Windows only; tested between two games on one PC with simulated 150 ms ping and loss (0 desyncs), not yet much between
+real players over the internet. Please report how it feels.
+
 
 ## Credit
 
