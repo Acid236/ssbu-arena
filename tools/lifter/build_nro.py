@@ -23,7 +23,7 @@ RO = os.path.join(HERE, 'ro_study')
 CLANG = os.environ.get('RECOMP_CLANG', r'C:\llvm-8.0.0\bin\clang.exe')
 TARGET_LINUX = os.environ.get('RECOMP_TARGET') == 'linux'      # see build.py
 TARGET_MACOS = os.environ.get('RECOMP_TARGET') == 'macos'
-PLAT_FLAGS = (['-fPIC', '-fvisibility=hidden', '-include', os.path.join(HERE, 'plat', 'plat_pre.h')] + (['-mmacosx-version-min=14.4'] if TARGET_MACOS else [])
+PLAT_FLAGS = (['-fPIC', '-fvisibility=hidden', '-include', os.path.join(HERE, 'plat', 'plat_pre.h')] + (['-mmacosx-version-min=14.4'] if TARGET_MACOS else ['-mcx16'])
               if TARGET_LINUX or TARGET_MACOS else [])
 LIB_EXT = '.dylib' if TARGET_MACOS else '.so' if TARGET_LINUX else '.dll'     # nnro.c asks for <name>.dll; plat_posix.c maps it
 GEN_HEADERS = ['runtime.h', 'neon.h', 'fpexact.h']

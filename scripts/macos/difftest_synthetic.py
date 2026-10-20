@@ -43,6 +43,7 @@ def main():
     ap.add_argument('--work', required=True)
     ap.add_argument('--clang', default='clang')
     ap.add_argument('--max-different', type=int, default=0)
+    ap.add_argument('--cflags', default='', help='more compiler flags, e.g. -mcx16 (the Linux build's)')
     ap.add_argument('--opt', default='-O0', help='optimisation of the test program (-O1: as the game library is built)')
     a = ap.parse_args()
     work = os.path.abspath(a.work)
@@ -64,7 +65,7 @@ def main():
         return r.stdout
 
     run([sys.executable, 'difftest.py', 'gen'])
-    run([a.clang, a.opt, '-w', '-fno-strict-aliasing', '-I', '.', 'difftest_gen.c', 'difftest_host.c', '-o', exe] + ([] if os.name == 'nt' else ['-lm']))
+    run([a.clang, a.opt, '-w', '-fno-strict-aliasing', '-I', '.', 'difftest_gen.c', 'difftest_host.c', '-o', exe] + a.cflags.split() + ([] if os.name == 'nt' else ['-lm']))
     out = run([sys.executable, 'difftest.py', 'check'])
     m = re.search(r'tests: (\d+)\s+identical: (\d+)\s+different: (\d+)', out)
     if not m:

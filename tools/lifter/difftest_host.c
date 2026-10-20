@@ -68,6 +68,9 @@ int main(int argc, char **argv) {
 #ifdef _WIN32
     uint8_t *mem = VirtualAlloc((void *)REGION, REGION_SIZE, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
 #else
+#ifndef MAP_FIXED_NOREPLACE
+#define MAP_FIXED_NOREPLACE 0                         /* macOS: the address is a hint, checked below */
+#endif
     uint8_t *mem = mmap((void *)REGION, REGION_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
     if (mem == MAP_FAILED) mem = NULL;
 #endif
