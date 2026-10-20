@@ -508,10 +508,11 @@ ULONG IMFActivate_Release(IMFActivate *a) { LONG n = InterlockedDecrement(&a->re
 HRESULT IMFActivate_GetString(IMFActivate *a, const GUID *key, LPWSTR out, UINT32 cch, UINT32 *len) {
     if (!IsEqualGUID(key, &MFT_FRIENDLY_NAME_Attribute) || !cch) return MF_E_ATTRIBUTENOTFOUND;
 #ifdef _WIN32
-    int k = swprintf(out, cch, L"%hs (FFmpeg libavcodec %hs)",      /* the Windows C library: %s would be a wide string */
+#define FFMF_NAME_FMT L"%hs (FFmpeg libavcodec %hs)"     /* the Windows C library: a plain %s would be a wide string */
 #else
-    int k = swprintf(out, cch, L"%s (FFmpeg libavcodec %s)",
-#endif a->kind == 1 ? "H.264 decoder" : "Vorbis decoder", av_version_info());
+#define FFMF_NAME_FMT L"%s (FFmpeg libavcodec %s)"
+#endif
+    int k = swprintf(out, cch, FFMF_NAME_FMT, a->kind == 1 ? "H.264 decoder" : "Vorbis decoder", av_version_info());
     if (k < 0) { out[0] = 0; k = 0; }
     if (len) *len = (UINT32)k;
     return S_OK;
