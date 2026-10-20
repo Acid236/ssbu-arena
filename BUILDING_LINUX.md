@@ -19,7 +19,7 @@ Tested on one PC: CachyOS (Arch-based, kernel 7.2), 24 threads, 31 GB RAM, NVIDI
 
 | | |
 |---|---|
-| Build from the dump | works: game library, 98 script modules, executable; `check` step passes (SDK self-test, pad self-test 56/56, C++ runtime self-test 145/145, differential test 32,043 / 32,043) |
+| Build from the dump | works: game library, 98 script modules, executable; `check` step passes (SDK self-test, pad self-test 56/56, C++ runtime self-test 145/145, differential test 32,043 / 32,043; it runs only with `--full-check`) |
 | Opening movie, title, menus, character and stage select | work |
 | F1 settings menu, on-screen keyboard | not on Linux yet (both draw with Windows APIs). Text input, for example naming a Mii, opens a zenity or kdialog dialog instead |
 | A whole Smash match (scripted input, 1v1 vs CPU) | works: steady 60 fps, sound, no audio underruns |
@@ -92,7 +92,8 @@ Use the venv's Python, as shown. The build goes into `build-linux/`, in eleven s
 
 The build can be stopped at any time (Ctrl+C, or a crash). Run the same command again and it continues where it
 stopped; finished steps are skipped. Every invocation needs `--dump`. Other options: `--status`, `--redo <step>`,
-`--from <step>`, `--jobs N`, `--help`.
+`--from <step>`, `--jobs N`, `--full-check` (the check step also runs the translator's long differential test), `--help`.
+Files that fail to compile (often for lack of memory) are compiled again with fewer jobs before the build stops.
 
 When something is missing, step `deps` stops at once with what to install. It compiles and runs a small test program
 against every library, so a broken package shows there and not an hour later.
