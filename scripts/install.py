@@ -25,7 +25,8 @@ also written to build\\install_state.json; scripts/setup.py keeps its own build\
               runtime\\fonts_open are used.
  6. tools     LLVM/clang 9 and the prebuilt runtime (or SDL3, Vulkan-Headers, glslang, suyu, MSVC to build everything).
  7. dlc       build\\config\\dlc.txt from the DLC file names (the runtime unlocks that content; names only).
- 7. media     libopus (music) into deps\\opus; the Store codecs for the movies are checked (links printed when missing).
+ 7. media     libopus (music) into deps\\opus; FFmpeg (the movies where Windows cannot play WebM) into deps\\ffmpeg, both
+              SHA-256 checked; the Store codecs for the movies are checked (links printed when missing).
  8. build     scripts/setup.py: deps stage convert modules tables lift sdk compile nro link check.
  9. shortcuts "SSBU native" on the desktop and in the Start menu, "SSBU native - Installer" in the Start menu (scripts/shortcuts.py).
 10. unblock   Unblock-File over tools, scripts and the built exe / dlls (cheap, idempotent).
@@ -91,8 +92,11 @@ TOOLS = {   # checked 2026-10-19: SDL3 and glslang equal GitHub's own asset dige
     'glslang': ('https://github.com/KhronosGroup/glslang/releases/download/16.6.0/glslang-16.6.0-windows-x86_64-release.zip',
                 '82bf434e69b9bb4829de7e2b4bc2c5e7a7861e53d66cf75e5cc70f5f694a8d9b', 'glslang',
                 os.path.join('include', 'glslang', 'Include', 'glslang_c_interface.h')),
-    'llvm': ('https://releases.llvm.org/9.0.0/LLVM-9.0.0-win64.exe',
-             '71ed99a6720945d76b6772584735f2ed472f12719dff184a0b1a6a35047b8863', 'llvm', os.path.join('bin', 'clang.exe')),
+    # LLVM 9 as a plain zip (no installer: no administrator prompt, and nothing to uninstall when another LLVM is on the
+    # PC, which made the official installer fail with "uninstall failed"): the files of the official LLVM-9.0.0-win64.exe
+    # (SHA-256 71ed99a6...8863, signed) extracted with 7-Zip, unchanged, only what the build uses (README.txt inside)
+    'llvm': ('https://github.com/Denkishi/ssbu-recomp/releases/download/llvm-9.0.0-portable/llvm-9.0.0-win64-portable.zip',
+             '0e0c34046589a73efef3e2a4c06335815681afbc7c883b665cdbed98669a22e3', 'llvm', os.path.join('bin', 'clang.exe')),
     # Dear ImGui (MIT), optional: GitHub publishes no digest for tag archives, so this hash is the archive checked on
     # 2026-10-19 (2,021,831 bytes)
     'imgui': ('https://github.com/ocornut/imgui/archive/refs/tags/v1.91.9b.zip',
@@ -102,8 +106,8 @@ TOOLS = {   # checked 2026-10-19: SDL3 and glslang equal GitHub's own asset dige
 # The prebuilt runtime package of the GitHub Release of this version (scripts/make_release.py): (URL, SHA-256 of the zip).
 # (None, None) until the maintainer has uploaded the package made from this commit and written its hash here; the
 # download is refused when the hash does not match, and setup.py uses the package only with the tree it was built from.
-RUNTIME_RELEASE = ('https://github.com/Denkishi/ssbu-recomp/releases/download/runtime-f3ac7de/ssbu-runtime-f3ac7de0fa.zip',
-                   '8e4127070e5f607796f9d4070f6078bb3e68805bd069a7ea65c98a285bd3497a')
+RUNTIME_RELEASE = ('https://github.com/Denkishi/ssbu-recomp/releases/download/runtime-fb7662a/ssbu-runtime-fb7662a384.zip',
+                   '02c3b860b0880ed2ed64ee41dd9fea74164500cd7c3b845e3085cdefbff99b02')
 
 SETUP_STEPS = ['deps', 'stage', 'convert', 'modules', 'tables', 'lift', 'sdk', 'compile', 'nro', 'link', 'check']
 # expected seconds, measured 2026-10-19 on a PC with 12 jobs and 32 threads (compile and nro scale with 12 / jobs)
@@ -631,6 +635,8 @@ def fetch(name):
         os.remove(arc)
         raise Stop('%s: the download does not match its SHA-256 (got %s): refused' % (name, h))
     if arc.endswith('.zip'):
+        if os.path.isdir(dst):                  # an unfinished folder of an earlier try (no probe file in it): replaced
+            shutil.rmtree(dst, ignore_errors=True)
         tmp = dst + '.tmp'
         with zipfile.ZipFile(arc) as z:
             z.extractall(tmp)
@@ -796,10 +802,18 @@ def step_media(cx):
     else:
         got = fetch_media.fetch_opus(DEPS)
         msg = 'libopus ready' if got else 'no music (libopus could not be fetched; the game runs silent)'
+    # FFmpeg: the movies' fallback where Windows cannot play WebM (codecs missing or broken, Windows N); always fetched,
+    # since the Store check below cannot tell a broken copy of the codecs from a working one
+    if a.dry_run:
+        ff = fetch_media.ffmpeg_ready(DEPS)
+        msg += '; FFmpeg is already in deps\\ffmpeg' if ff else '; would download FFmpeg (movie fallback, 3 MB) into deps\\ffmpeg, SHA-256 checked'
+    else:
+        ff = fetch_media.fetch_ffmpeg(DEPS)
+        msg += '; FFmpeg ready (movie fallback)' if ff else '; no FFmpeg (movies only with Windows\' own codecs)'
     codecs = fetch_media.check_codecs()
     missing = [k for k, v in codecs.items() if v is not True]
     if missing:
-        msg += '; movie codecs missing or unknown (Store links printed above): ' + ', '.join(missing)
+        msg += '; Store codecs missing or unknown: ' + ', '.join(missing) + (' (FFmpeg plays the movies)' if ff else ' (Store links printed above)')
     return ('dry' if a.dry_run else 'done'), msg
 
 
@@ -970,7 +984,17 @@ class Ctx:
         self.dlc, self.setup_args, self.blockers = [], [], []
         self.restart_from = None
         self.rebuild_from = a.reexec if a.reexec and a.reexec != '-' else None
-        self.jobs = a.jobs or min(24, os.cpu_count() or 4)
+        self.jobs = a.jobs or default_jobs()
+
+
+def default_jobs():
+    """Compiler jobs when none was given: precheck's rule (about 1.5 GB of RAM per job, at most the logical CPUs), at most
+    24. Only the CPU count made a 32-thread PC run 24 clang processes at once, and big files then failed for lack of memory."""
+    try:
+        import precheck
+        return max(1, min(24, precheck.suggested_jobs(precheck._ram_gb())))
+    except Exception:                            # noqa: BLE001
+        return min(8, os.cpu_count() or 4)
 
 
 def make_plan(cx):

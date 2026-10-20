@@ -425,8 +425,17 @@ def step_deps(cx):
     say('  python packages: numpy lz4 zstandard%s: ok' % ('' if a.runtime else ' Pillow unicorn'))
 
     deps = os.path.join(REPO, 'deps')
-    llvm = find_first([a.llvm, os.environ.get('LLVM_ROOT'), r'C:\llvm-9.0.0', r'C:\Program Files\LLVM', os.path.join(deps, 'llvm')],
-                      lambda d: os.path.exists(os.path.join(d, 'bin', 'clang.exe')))
+    def is_9(d):                                   # another LLVM version installed on the PC is not used unless asked for
+        if not os.path.exists(os.path.join(d, 'bin', 'clang.exe')):
+            return False
+        if d in (a.llvm, os.environ.get('LLVM_ROOT')):
+            return True
+        try:
+            v = subprocess.run([os.path.join(d, 'bin', 'clang.exe'), '--version'], capture_output=True, text=True).stdout
+        except OSError:
+            return False
+        return 'version 9.' in v or 'version 8.' in v
+    llvm = find_first([a.llvm, os.environ.get('LLVM_ROOT'), os.path.join(deps, 'llvm'), r'C:\llvm-9.0.0', r'C:\Program Files\LLVM'], is_9)
     if not llvm:
         raise Fail('LLVM/clang 9.0.0 not found (--llvm <folder with bin\\clang.exe>)')
     clang = os.path.join(llvm, 'bin', 'clang.exe')
@@ -968,7 +977,21 @@ def build_env(cx):
         return cx.env(RECOMP_GEN='gen_eh_o2', RECOMP_OBJ='obj_eh_o1', RECOMP_DLL=game_lib(cx), RECOMP_NRO_SUFFIX='_eh_o2', RECOMP_TARGET='linux')
     if cx.mac:
         return cx.env(RECOMP_GEN='gen_eh_o2', RECOMP_OBJ='obj_eh_o1', RECOMP_DLL=game_lib(cx), RECOMP_NRO_SUFFIX='_eh_o2', RECOMP_TARGET='macos')
-    return cx.env(RECOMP_GEN='gen_eh_o2', RECOMP_OBJ='obj_eh_o1', RECOMP_DLL='ssbu_game_eh_o1.dll', RECOMP_NRO_SUFFIX='_eh_o2')
+    # FFMPEG_ROOT: build.py compiles the movie fallback (mf_ffmpeg.c) with the headers install.py put in deps\ffmpeg
+    return cx.env(RECOMP_GEN='gen_eh_o2', RECOMP_OBJ='obj_eh_o1', RECOMP_DLL='ssbu_game_eh_o1.dll', RECOMP_NRO_SUFFIX='_eh_o2',
+                  FFMPEG_ROOT=os.environ.get('FFMPEG_ROOT') or os.path.join(REPO, 'deps', 'ffmpeg'))
+
+
+def copy_ffmpeg(cx):
+    """The movie fallback's FFmpeg DLLs (deps\\ffmpeg\\bin, install.py) beside the exe, where mf_ffmpeg.c loads them from.
+    Returns how many were copied (0: none there; the movies then play only where Windows' own codecs can)."""
+    src = os.path.join(os.environ.get('FFMPEG_ROOT') or os.path.join(REPO, 'deps', 'ffmpeg'), 'bin')
+    names = [n for n in (os.listdir(src) if os.path.isdir(src) else []) if n.lower().endswith('.dll')]
+    for n in names:
+        shutil.copy2(os.path.join(src, n), os.path.join(cx.work, n))
+    say('  FFmpeg (movie fallback): %s' % ('%d DLLs beside the exe' % len(names) if names else
+                                           'not in deps\\ffmpeg: movies only where Windows\' own codecs can play them'))
+    return len(names)
 
 
 def step_compile(cx):
@@ -1011,6 +1034,7 @@ def step_link(cx):
             EXE, ', ' + opus[0] + ' (music)' if opus else '', os.path.getsize(os.path.join(cx.work, 'ssbu_game_eh_o1.dll')) / 1048576.0))
         if not opus:
             say('  WARNING: no libopus (neither in the runtime package nor in deps\\opus): music and the other Opus sounds will be silent')
+        copy_ffmpeg(cx)
         return
     cx.run('link', [os.environ.get('COMSPEC', 'cmd.exe'), '/c', os.path.join(cx.work, 'build_glslang.bat')], env=cx.env())
     cx.run('link', [sys.executable, 'build.py', 'link'], env=cx.env(**{k: v for k, v in build_env(cx).items() if k != 'RECOMP_NRO_SUFFIX'}, RECOMP_EXE=EXE))
@@ -1026,6 +1050,7 @@ def step_link(cx):
                                                                                          ', ' + name if opus else ''))
     if not opus:
         say('  WARNING: no libopus: music and the other Opus sounds will be silent (deps step above; BUILDING.md)')
+    copy_ffmpeg(cx)
 
 
 def link_linux(cx):
@@ -1091,6 +1116,9 @@ def step_check(cx):
         say('  WARNING: the C++ runtime self-test reports failures (logs/check_cxxrt.log)')
     # the lifter's differential test against the Unicorn emulator, on a sample of the instruction shapes of main
     py, w = sys.executable, cx.work
+    if not getattr(cx.a, 'full_check', False):
+        say('  differential test of the translator: skipped (it is the same on every PC; --full-check runs it)')
+        return
     if not cx.tools.get('msvc', True):
         say('  differential test: skipped (it needs the MSVC Build Tools and the Windows SDK, which this PC does not have)')
         return
@@ -1157,6 +1185,8 @@ def main():
     ap.add_argument('--nocrt', action='store_true', help='build the game libraries with LLVM alone (the exe is still built here)')
     ap.add_argument('--redo', help='repeat this step')
     ap.add_argument('--from', dest='from_step', help='repeat this step and all after it')
+    ap.add_argument('--full-check', action='store_true', help='the check step also runs the lifter\'s differential test against '
+                    'Unicorn (minutes on a fast PC, up to an hour on a weak one; it tests the translator, the same everywhere)')
     ap.add_argument('--only', help='run only this step')
     ap.add_argument('--dry-run', action='store_true', help='check the tools and the dump (step deps), then list what would run')
     ap.add_argument('--status', action='store_true'), ap.add_argument('--steps', action='store_true'), ap.add_argument('--run', action='store_true')

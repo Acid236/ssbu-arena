@@ -12,7 +12,10 @@
   installs it for your user if missing; Windows' own tar.exe is the fallback).
 * Movies: the menus' and the game's movies are VP9 in WebM; Windows decodes them with two free Microsoft Store
   extensions. check_codecs() reports whether they are installed. This program cannot install them: the Store asks you
-  to (the links are printed).
+  to (the links are printed). Where they are missing or broken (and on Windows N), the runtime plays the movies with
+  FFmpeg instead (runtime/mf_ffmpeg.c): fetch_ffmpeg() downloads that pinned LGPL FFmpeg build (a GitHub Release asset
+  of this project, made by scripts/ffmpeg/), checks the package's and each DLL's SHA-256 and the DLLs' imports, and
+  puts it in <deps>/ffmpeg/ (bin/ the DLLs setup.py copies beside the exe, include/ the headers build.py compiles with).
 
 Standard library only, except `zstandard` for the .zst (see above). The download idea (a pinned prebuilt audio library,
 verified before use) follows WindowSmash's tools/install_windowsmash.ps1 by SNO2207; this is a separate implementation.
@@ -40,6 +43,20 @@ OPUS_LICENSE_MEMBER = 'ucrt64/share/licenses/opus/COPYING'
 OPUS_EXPORTS = ('opus_decoder_get_size', 'opus_decoder_init', 'opus_decode')     # what runtime/nnaudio.c resolves
 # DLLs every Windows 10/11 has: the only imports accepted (lower case; api-ms-win-crt-* are the Universal CRT forwarders)
 SYSTEM_DLLS = {'kernel32.dll', 'ntdll.dll', 'user32.dll', 'advapi32.dll', 'ucrtbase.dll', 'msvcrt.dll', 'bcrypt.dll'}
+
+# The movie fallback (runtime/mf_ffmpeg.c): an LGPL FFmpeg 8.1.3 with only the WebM demuxer and the VP9 / H.264 / Vorbis /
+# Opus decoders, built by scripts/ffmpeg/build_ffmpeg_win.sh and packed by scripts/ffmpeg/package_ffmpeg.py (bin/ with the
+# five DLLs, include/ with the headers the runtime is compiled against, COPYING.LGPLv2.1, README.txt).
+FFMPEG_ZIP = 'ssbu-ffmpeg-8.1.3-lgpl-win64.zip'
+FFMPEG_URL = 'https://github.com/Denkishi/ssbu-recomp/releases/download/ffmpeg-8.1.3-lgpl/' + FFMPEG_ZIP
+FFMPEG_ZIP_SHA256 = '47f0bb9ec3e1d3095625bb3272e7005d203b33e415d475fe051e9fe66ea69171'
+FFMPEG_DLLS = {     # load order: each one imports only the ones before it and Windows' own DLLs
+    'avutil-60.dll': '5e492b29140b9cb5801ba2c0c4a5c6b2f29984638ee488c0c520991ad83f34c6',
+    'swresample-6.dll': 'e400d8dfaee5873677de9766ce7d65b6eb51aa5a0521392e70d13f7019ffa2e7',
+    'swscale-9.dll': 'cac9a364f305c31af13bf6de75060ef2d32d4a528cdf32fe586b6ae4e36e0547',
+    'avcodec-62.dll': 'f9a2e399f407a1ac33abfbf1b36347c288463cb8ba4b9fdb2da1f02b2ff3cd5c',
+    'avformat-62.dll': '96a1d5998096c87b41252ab2274853fe8c9e5fa529eb84bef3f51d3e3ab5cfc7',
+}
 
 CODECS = [
     ('Microsoft.VP9VideoExtensions', 'VP9 Video Extensions', 'https://apps.microsoft.com/detail/9n4d0msmp0pt',
@@ -236,6 +253,76 @@ def fetch_opus(deps_dir=None, force=False, url=OPUS_URL, pkg_sha256=OPUS_PKG_SHA
         return None
 
 
+# ----------------------------------------------------------------------------------------------- fetch_ffmpeg
+def ffmpeg_ready(deps_dir=None):
+    """True when <deps>/ffmpeg/bin holds the five pinned DLLs and include/ the headers (nothing is downloaded)."""
+    d = os.path.join(deps_dir or os.path.join(REPO_DIR, 'deps'), 'ffmpeg')
+    try:
+        return (os.path.isfile(os.path.join(d, 'include', 'libavcodec', 'avcodec.h')) and
+                all(sha256_file(os.path.join(d, 'bin', n)) == h for n, h in FFMPEG_DLLS.items()))
+    except OSError:
+        return False
+
+
+def fetch_ffmpeg(deps_dir=None, force=False, url=FFMPEG_URL, zip_sha256=FFMPEG_ZIP_SHA256):
+    """Put the movie fallback's FFmpeg (bin/ DLLs, include/, licence) in <deps_dir>/ffmpeg/ and return that folder; None
+    if it could not be done (a message says why: the movies then play only where Windows' own codecs can, as before)."""
+    deps_dir = deps_dir or os.path.join(REPO_DIR, 'deps')
+    dest = os.path.join(deps_dir, 'ffmpeg')
+    try:
+        if not force and ffmpeg_ready(deps_dir):
+            say('FFmpeg (movie fallback): already in %s (checked)' % dest)
+            return dest
+        say('FFmpeg (movie fallback): downloading %s' % url)
+        req = urllib.request.Request(url, headers={'User-Agent': 'ssbu-recomp-fetch-media'})
+        with urllib.request.urlopen(req, timeout=180) as r:
+            blob = r.read()
+        got = sha256_bytes(blob)
+        if got != zip_sha256:
+            say('FFmpeg: the downloaded package does not match its pinned SHA-256 (got %s); NOT used.' % got)
+            return None
+        import zipfile
+        tmp = dest + '.tmp'
+        shutil.rmtree(tmp, ignore_errors=True)
+        with zipfile.ZipFile(io.BytesIO(blob)) as z:
+            for m in z.infolist():
+                name = m.filename
+                if m.is_dir():
+                    continue
+                parts = name.split('/')
+                if name.startswith('/') or '..' in parts or ':' in name or not (parts[0] in ('bin', 'include') or len(parts) == 1):
+                    say('FFmpeg: unexpected file in the package (%s); NOT used.' % name)
+                    return None
+                out = os.path.join(tmp, *parts)
+                os.makedirs(os.path.dirname(out), exist_ok=True)
+                with open(out, 'wb') as f:
+                    f.write(z.read(m))
+        own = set(n.lower() for n in FFMPEG_DLLS)
+        for n, h in FFMPEG_DLLS.items():
+            p = os.path.join(tmp, 'bin', n)
+            if not os.path.isfile(p) or sha256_file(p) != h:
+                shutil.rmtree(tmp, ignore_errors=True)
+                say('FFmpeg: %s is missing from the package or does not match its pinned SHA-256; NOT used.' % n)
+                return None
+            machine, imports, _ = pe_info(p)
+            bad = [i for i in imports if not (i.lower() in SYSTEM_DLLS or i.lower() in own or i.lower().startswith('api-ms-win-'))]
+            if machine != 0x8664 or bad:
+                shutil.rmtree(tmp, ignore_errors=True)
+                say('FFmpeg: %s rejected (%s); NOT used.' % (n, 'not x64' if machine != 0x8664 else 'imports ' + ', '.join(bad)))
+                return None
+        with open(os.path.join(tmp, 'SOURCE.txt'), 'w') as f:
+            f.write('FFmpeg 8.1.3 (LGPL 2.1+, COPYING.LGPLv2.1) from %s\npackage sha256 %s\nHow it was built: README.txt, '
+                    'scripts/ffmpeg/build_ffmpeg_win.sh\n' % (url, zip_sha256))
+        shutil.rmtree(dest, ignore_errors=True)
+        os.replace(tmp, dest)
+        say('FFmpeg (movie fallback): ok, %s (5 DLLs checked; they import only Windows\' own DLLs and each other)' % dest)
+        return dest
+    except Exception as e:
+        say('FFmpeg (movie fallback): could not be fetched (%s). The movies play where Windows\' own codecs can; '
+            'run the installer again later to add it.' % e)
+        return None
+
+
 # ----------------------------------------------------------------------------------------------- check_codecs
 def check_codecs(verbose=True):
     """{package name: True/False/None} for the Store codec extensions (None: could not ask). Prints what to do if missing."""
@@ -257,8 +344,8 @@ def check_codecs(verbose=True):
             if st is not True:
                 say('        get it (free) from the Microsoft Store: %s   (or open %s)' % (web, store))
         if not all(v is True for v in res.values()):
-            say('Without them the game\'s movies do not play. This program cannot install them: the Microsoft Store does it\n'
-                'only when you press Get / Install there (once per PC; no restart needed).')
+            say('Without them the game plays its movies with FFmpeg (downloaded with the rest; nothing to do). To use Windows\'\n'
+                'own decoders instead, get them from the Microsoft Store (Get / Install there; once per PC, no restart).')
     return res
 
 
@@ -268,10 +355,13 @@ def main():
     ap.add_argument('--force', action='store_true', help='download again even if a valid libopus-0.dll is there')
     ap.add_argument('--check-codecs', action='store_true', help='only report the Store codecs, download nothing')
     ap.add_argument('--no-codecs', action='store_true', help='do not check the Store codecs')
+    ap.add_argument('--no-ffmpeg', action='store_true', help='do not fetch the FFmpeg movie fallback')
     a = ap.parse_args()
     ok = True
     if not a.check_codecs:
         ok = fetch_opus(a.deps, a.force) is not None
+        if not a.no_ffmpeg and os.name == 'nt':
+            ok = fetch_ffmpeg(a.deps, a.force) is not None and ok
     if not a.no_codecs:
         check_codecs()
     return 0 if ok else 1

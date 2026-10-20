@@ -492,6 +492,8 @@ static HRESULT mm_open(const uint8_t *param) {
     CreateDirectoryA(album_dir(), NULL);
     snprintf(g_mm.tmp_path, sizeof g_mm.tmp_path, "%s\\recording.tmp.mp4", album_dir());
     MultiByteToWideChar(CP_ACP, 0, g_mm.tmp_path, -1, wpath, MAX_PATH);
+    int movie_mf_present(void);                              /* nnmovie_mf.c: Media Foundation is delay-loaded (absent on Windows N) */
+    if (!movie_mf_present()) return E_FAIL;
     HRESULT hr = MFStartup(MF_VERSION, MFSTARTUP_FULL);
     if (SUCCEEDED(hr)) hr = MFCreateSinkWriterFromURL(wpath, NULL, NULL, &g_mm.writer);
     if (SUCCEEDED(hr)) hr = MFCreateMediaType(&t);

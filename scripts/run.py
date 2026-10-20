@@ -124,7 +124,10 @@ def main():
         else:
             print('note: %s is older than %s and may run an older runtime (--refresh copies it again)' % (a.exe, main_exe))
     env = {k: v for k, v in os.environ.items() if not k.startswith(('RECOMP_', 'SSBU_'))}
-    env['SSBU_ROMFS'] = state['dump']['romfs']
+    romfs = state['dump']['romfs']
+    if not os.path.isdir(romfs) and os.path.isdir(os.path.join(a.build, 'dump', 'romfs')):
+        romfs = os.path.join(a.build, 'dump', 'romfs')       # the folder was moved: state.json still names the old place
+    env['SSBU_ROMFS'] = romfs
     env['SSBU_USERDATA'] = os.path.abspath(a.userdata)
     for sub, var in (('fonts', 'SSBU_FONTS'), ('zoneinfo', 'SSBU_TZDIR')):
         p = os.path.join(a.build, 'sysdata', sub)

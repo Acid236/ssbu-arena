@@ -20,6 +20,14 @@
 
 #undef fopen
 
+/* Windows (mf_ffmpeg.c compiles this file there, as the fallback for PCs whose Media Foundation cannot play the movies):
+ * every object starts with a tag word, which tells it from a Media Foundation COM object (whose first word is its vtable)
+ * in nnmovie_mf.c. Here, nothing. */
+#ifndef FFMF_HEAD
+#define FFMF_HEAD
+#define FFMF_INIT(p) ((void)0)
+#endif
+
 #define FCC_GUID(a, b, c, d) {(uint32_t)(a) | ((uint32_t)(b) << 8) | ((uint32_t)(c) << 16) | ((uint32_t)(d) << 24), 0x0000, 0x0010, {0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71}}
 #define NUM_GUID(n) {(uint32_t)(n), 0x0000, 0x0010, {0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71}}
 const GUID GUID_NULL = {0, 0, 0, {0}};
@@ -55,12 +63,12 @@ static const GUID k_vorbis = {0x8D2FD10B, 0x5841, 0x4a6b, {0x89, 0x05, 0x58, 0x8
 HRESULT MFStartup(ULONG version, DWORD flags) { (void)version; (void)flags; return S_OK; }      /* nothing to start: no version check */
 
 /* ---- memory stream, byte stream, attributes */
-struct IStream { volatile LONG refs; uint8_t *data; size_t size; };
-struct IMFAttributes { volatile LONG refs; };
-struct IMFByteStream { volatile LONG refs; IStream *st; IMFAttributes attrs; };
+struct IStream { FFMF_HEAD volatile LONG refs; uint8_t *data; size_t size; };
+struct IMFAttributes { FFMF_HEAD volatile LONG refs; };
+struct IMFByteStream { FFMF_HEAD volatile LONG refs; IStream *st; IMFAttributes attrs; };
 IStream *SHCreateMemStream(const BYTE *data, UINT size) {
     IStream *s = calloc(1, sizeof *s);
-    s->refs = 1; s->size = size;
+    s->refs = 1; s->size = size; FFMF_INIT(s);
     s->data = av_malloc(size ? size : 1);
     if (!s->data) { free(s); return NULL; }
     if (size) memcpy(s->data, data, size);
@@ -70,6 +78,7 @@ ULONG IStream_Release(IStream *s) { LONG n = InterlockedDecrement(&s->refs); if 
 HRESULT MFCreateMFByteStreamOnStream(IStream *s, IMFByteStream **out) {
     IMFByteStream *b = calloc(1, sizeof *b);
     b->refs = 1; b->st = s; InterlockedIncrement(&s->refs);
+    FFMF_INIT(b); FFMF_INIT(&b->attrs);
     *out = b;
     return S_OK;
 }
@@ -83,8 +92,8 @@ ULONG IMFAttributes_Release(IMFAttributes *a) { return IMFByteStream_Release((IM
 
 /* ---- media types: a small attribute list */
 typedef struct { GUID key; int kind; UINT64 u; GUID g; } MTAttr;    /* kind 1 u32, 2 u64, 3 guid */
-struct IMFMediaType { volatile LONG refs; int n; MTAttr a[16]; };
-HRESULT MFCreateMediaType(IMFMediaType **out) { IMFMediaType *t = calloc(1, sizeof *t); t->refs = 1; *out = t; return S_OK; }
+struct IMFMediaType { FFMF_HEAD volatile LONG refs; int n; MTAttr a[16]; };
+HRESULT MFCreateMediaType(IMFMediaType **out) { IMFMediaType *t = calloc(1, sizeof *t); t->refs = 1; FFMF_INIT(t); *out = t; return S_OK; }
 ULONG IMFMediaType_Release(IMFMediaType *t) { LONG n = InterlockedDecrement(&t->refs); if (!n) free(t); return (ULONG)n; }
 static MTAttr *mt_find(IMFMediaType *t, const GUID *k, int add) {
     for (int i = 0; i < t->n; i++) if (IsEqualGUID(&t->a[i].key, k)) return &t->a[i];
@@ -101,17 +110,17 @@ HRESULT IMFMediaType_SetUINT64(IMFMediaType *t, const GUID *k, UINT64 v) { MTAtt
 HRESULT IMFMediaType_GetUINT64(IMFMediaType *t, const GUID *k, UINT64 *v) { MTAttr *a = mt_find(t, k, 0); if (!a || a->kind != 2) return MF_E_ATTRIBUTENOTFOUND; *v = a->u; return S_OK; }
 
 /* ---- samples and buffers: a sample holds at most one buffer, a buffer one contiguous block */
-struct IMFMediaBuffer { volatile LONG refs; uint8_t *data; DWORD max, len; };
-struct IMFSample { volatile LONG refs; IMFMediaBuffer *b; LONGLONG time; };
+struct IMFMediaBuffer { FFMF_HEAD volatile LONG refs; uint8_t *data; DWORD max, len; };
+struct IMFSample { FFMF_HEAD volatile LONG refs; IMFMediaBuffer *b; LONGLONG time; };
 HRESULT MFCreateMemoryBuffer(DWORD max, IMFMediaBuffer **out) {
     IMFMediaBuffer *b = calloc(1, sizeof *b);
     if (!b || !(b->data = malloc(max ? max : 1))) { free(b); *out = NULL; return E_OUTOFMEMORY; }
-    b->refs = 1; b->max = max;
+    b->refs = 1; b->max = max; FFMF_INIT(b);
     *out = b;
     return S_OK;
 }
 ULONG IMFMediaBuffer_Release(IMFMediaBuffer *b) { LONG n = InterlockedDecrement(&b->refs); if (!n) { free(b->data); free(b); } return (ULONG)n; }
-HRESULT MFCreateSample(IMFSample **out) { IMFSample *s = calloc(1, sizeof *s); if (!s) return E_OUTOFMEMORY; s->refs = 1; *out = s; return S_OK; }
+HRESULT MFCreateSample(IMFSample **out) { IMFSample *s = calloc(1, sizeof *s); if (!s) return E_OUTOFMEMORY; s->refs = 1; FFMF_INIT(s); *out = s; return S_OK; }
 static IMFSample *sample_new(size_t len) {          /* a sample with one buffer of len bytes, all of them in use */
     IMFSample *s = NULL;
     MFCreateSample(&s);
@@ -156,6 +165,7 @@ typedef struct {
     PktQ q;
 } RStream;
 struct IMFSourceReader {
+    FFMF_HEAD
     volatile LONG refs;
     IMFByteStream *bs;
     int64_t pos;
@@ -202,7 +212,7 @@ HRESULT MFCreateSourceReaderFromByteStream(IMFByteStream *b, IMFAttributes *attr
     (void)attrs;
     *out = NULL;
     IMFSourceReader *r = calloc(1, sizeof *r);
-    r->refs = 1; r->bs = b; InterlockedIncrement(&b->refs);
+    r->refs = 1; r->bs = b; InterlockedIncrement(&b->refs); FFMF_INIT(r);
     uint8_t *iobuf = av_malloc(1 << 16);
     r->io = avio_alloc_context(iobuf, 1 << 16, 0, r, mem_read, NULL, mem_seek);
     r->fmt = avformat_alloc_context();
@@ -459,8 +469,9 @@ HRESULT IMFSourceReader_ReadSample(IMFSourceReader *r, DWORD stream, DWORD contr
  *   - this transform provides its output samples (MFT_OUTPUT_STREAM_PROVIDES_SAMPLES): ProcessOutput gets no buffer;
  *   - DRAIN: the pictures still inside come out, then NEED_MORE_INPUT; FLUSH: everything inside is dropped.
  * Synchronous, one thread per call; nnmovie_mf.c calls a decoder's transform under that decoder's lock. */
-struct IMFActivate { volatile LONG refs; int kind; };       /* 1 = H.264 video decoder, 2 = Vorbis (listed, not activated) */
+struct IMFActivate { FFMF_HEAD volatile LONG refs; int kind; };       /* 1 = H.264 video decoder, 2 = Vorbis (listed, not activated) */
 struct IMFTransform {
+    FFMF_HEAD
     volatile LONG refs;
     AVCodecContext *cc;
     AVCodecParserContext *parser;
@@ -484,7 +495,7 @@ HRESULT MFTEnumEx(GUID category, UINT32 flags, const MFT_REGISTER_TYPE_INFO *in,
     if (!kind) return S_OK;
     IMFActivate **a = CoTaskMemAlloc(sizeof *a);
     if (!a || !(a[0] = calloc(1, sizeof **a))) { CoTaskMemFree(a); return E_OUTOFMEMORY; }
-    a[0]->refs = 1; a[0]->kind = kind;
+    a[0]->refs = 1; a[0]->kind = kind; FFMF_INIT(a[0]);
     *acts = a; *n = 1;
     return S_OK;
 }
@@ -496,7 +507,12 @@ HRESULT MFTRegisterLocal(IClassFactory *f, const GUID *category, LPCWSTR name, U
 ULONG IMFActivate_Release(IMFActivate *a) { LONG n = InterlockedDecrement(&a->refs); if (!n) free(a); return (ULONG)n; }
 HRESULT IMFActivate_GetString(IMFActivate *a, const GUID *key, LPWSTR out, UINT32 cch, UINT32 *len) {
     if (!IsEqualGUID(key, &MFT_FRIENDLY_NAME_Attribute) || !cch) return MF_E_ATTRIBUTENOTFOUND;
-    int k = swprintf(out, cch, L"%s (FFmpeg libavcodec %s)", a->kind == 1 ? "H.264 decoder" : "Vorbis decoder", av_version_info());
+#ifdef _WIN32
+#define FFMF_NAME_FMT L"%hs (FFmpeg libavcodec %hs)"     /* the Windows C library: a plain %s would be a wide string */
+#else
+#define FFMF_NAME_FMT L"%s (FFmpeg libavcodec %s)"
+#endif
+    int k = swprintf(out, cch, FFMF_NAME_FMT, a->kind == 1 ? "H.264 decoder" : "Vorbis decoder", av_version_info());
     if (k < 0) { out[0] = 0; k = 0; }
     if (len) *len = (UINT32)k;
     return S_OK;
@@ -512,7 +528,7 @@ HRESULT IMFActivate_ActivateObject(IMFActivate *a, const GUID *iid, void **out) 
     const AVCodec *codec = avcodec_find_decoder(AV_CODEC_ID_H264);
     IMFTransform *t = calloc(1, sizeof *t);
     if (!codec || !t) { free(t); return MF_E_TOPO_CODEC_NOT_FOUND; }
-    t->refs = 1;
+    t->refs = 1; FFMF_INIT(t);
     t->cc = avcodec_alloc_context3(codec);
     t->pkt = av_packet_alloc();
     mft_reset_parser(t);

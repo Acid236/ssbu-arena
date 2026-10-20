@@ -69,7 +69,13 @@
  * reader returned; SSBU_MOVIE_LOG=1 logs every decoder call; SSBU_MOVIE_TEST_RESYNC=<flag>,<n> makes the game
  * re-synchronise (pause, seek, resume) the movie at the n-th video sample, see dec_SendInputBufferForDecode;
  * SSBU_MOVIE_SAVE_H264=<file> saves the H.264 stream a final smash movie sends; SSBU_MOVIE_H264_TEST=<file> (test only)
- * decodes such a file through the H.264 path the way the game drives it and exits, see h264_selftest. */
+ * decodes such a file through the H.264 path the way the game drives it and exits, see h264_selftest.
+ *
+ * Windows, when Media Foundation cannot play a movie (it cannot open the WebM: no or broken Web Media Extensions, Windows
+ * N; or it has no decoder for a track: no VP9 Video Extensions, no Vorbis decoder; or the first read fails; or there is
+ * no H.264 decoder transform): the FFmpeg fallback (mf_ffmpeg.c, plat_mf.c on FFmpeg's DLLs) takes that movie over,
+ * when its DLLs are there. A movie Media Foundation plays goes exactly the way it went before. SSBU_MOVIE_FFMPEG=1
+ * uses FFmpeg for every movie (tests), SSBU_MOVIE_FFMPEG=0 never. */
 #define COBJMACROS
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -83,6 +89,13 @@
 #include <string.h>
 #include "runtime.h"
 #include "hostrt.h"
+/* The FFmpeg fallback: built when FFmpeg's headers are on the include path (build.py: FFMPEG_ROOT/include). */
+#if defined(_WIN32) && defined(__has_include)
+#if __has_include(<libavcodec/avcodec.h>)
+#define MOVIE_FFMPEG 1
+#include "mf_ffmpeg.h"
+#endif
+#endif
 
 void input_mark(const char *what);                       /* nnhid.c: anchor for scripted input */
 
@@ -122,14 +135,71 @@ static uint64_t g_alloc_fn, g_free_fn, g_alloc_user;  /* movie::SetAllocator */
 static volatile LONG g_mf_started;
 static __declspec(thread) int t_com_init;
 
+/* Whether Media Foundation is on this PC at all. The exe delay-loads MFPlat.dll / MFReadWrite.dll (build.py), so it also
+ * starts on Windows N without the Media Feature Pack; nothing of Media Foundation may be called there (nnalbum.c asks too). */
+int movie_mf_present(void) {
+#ifdef _WIN32
+    static volatile LONG known = -1;
+    if (known < 0) {
+        int ok = LoadLibraryW(L"mfplat.dll") != NULL && LoadLibraryW(L"mfreadwrite.dll") != NULL;
+        if (getenv("SSBU_MOVIE_TEST_NO_MF")) ok = 0;      /* TEST ONLY: run as on Windows N */
+        if (!ok) printf("movie: Media Foundation is not on this PC (Windows N without the Media Feature Pack?)\n");
+        InterlockedExchange(&known, ok);
+    }
+    return known > 0;
+#else
+    return 1;
+#endif
+}
+
 static void vorbis_store_register(void);
 static void com_init(void) {
     if (!t_com_init) { CoInitializeEx(NULL, COINIT_MULTITHREADED); t_com_init = 1; }
-    if (!g_mf_started && InterlockedCompareExchange(&g_mf_started, 1, 0) == 0) {
+    if (!g_mf_started && movie_mf_present() && InterlockedCompareExchange(&g_mf_started, 1, 0) == 0) {
         HRESULT hr = MFStartup(MF_VERSION, MFSTARTUP_FULL);
         printf("movie: MFStartup %08lx\n", hr);
         vorbis_store_register();
     }
+}
+
+/* The FFmpeg fallback (Windows): SSBU_MOVIE_FFMPEG=1 always, =0 never, otherwise when Media Foundation fails. */
+#ifdef MOVIE_FFMPEG
+static int ffmf_mode(void) {
+    static int mode = -2;
+    if (mode == -2) { const char *v = getenv("SSBU_MOVIE_FFMPEG"); mode = v && *v ? (atoi(v) ? 1 : 0) : -1; }
+    return mode;
+}
+static int ffmf_forced(void) { return ffmf_mode() == 1 && ffmf_available(); }
+static int ffmf_allowed(void) { return ffmf_mode() != 0 && ffmf_available(); }
+/* TEST ONLY, SSBU_MOVIE_TEST_MF: Media Foundation made to fail the way PCs without working codecs do, so the fallback's
+ * ways in can be run here: 1 = it cannot open the WebM (c00d36c4), 2 = no decoder for any track, 3 = the first read fails. */
+static int ffmf_test(void) {
+    static int t = -1;
+    if (t < 0) { const char *v = getenv("SSBU_MOVIE_TEST_MF"); t = v ? atoi(v) : 0; if (t) printf("movie: TEST: SSBU_MOVIE_TEST_MF=%d\n", t); }
+    return t;
+}
+#endif
+/* A new Media Foundation object of the same side as `like` (a reader or a transform): FFmpeg's or Media Foundation's. */
+static HRESULT new_media_type(const void *like, IMFMediaType **t) {
+#ifdef MOVIE_FFMPEG
+    if (like && FFMF_IS(like)) return ffmf_MFCreateMediaType(t);
+#endif
+    (void)like;
+    return MFCreateMediaType(t);
+}
+static HRESULT new_sample(const void *like, IMFSample **smp) {
+#ifdef MOVIE_FFMPEG
+    if (like && FFMF_IS(like)) return ffmf_MFCreateSample(smp);
+#endif
+    (void)like;
+    return MFCreateSample(smp);
+}
+static HRESULT new_buffer(const void *like, DWORD size, IMFMediaBuffer **b) {
+#ifdef MOVIE_FFMPEG
+    if (like && FFMF_IS(like)) return ffmf_MFCreateMemoryBuffer(size, b);
+#endif
+    (void)like;
+    return MFCreateMemoryBuffer(size, b);
 }
 
 /* Call a guest function with up to five arguments; the caller's registers are preserved. */
@@ -528,14 +598,28 @@ static void release_ahead(Ext *e, int track) {        /* track < 0: all */
     }
 }
 
-static int ext_open_bytes(Ext *e, unsigned char *data, size_t size) {
-    com_init();
+#ifdef MOVIE_FFMPEG
+/* The FFmpeg fallback's reader over a copy of the file (e->bs and e->rd must be free). */
+static HRESULT ext_open_reader_ffmpeg(Ext *e, const unsigned char *data, size_t size) {
+    IStream *st = ffmf_SHCreateMemStream(data, (UINT)size);
+    if (!st) return E_OUTOFMEMORY;
+    HRESULT hr = ffmf_MFCreateMFByteStreamOnStream(st, &e->bs);
+    ffmf_IStream_Release(st);
+    if (FAILED(hr)) return hr;
+    hr = ffmf_MFCreateSourceReaderFromByteStream(e->bs, NULL, &e->rd);
+    if (FAILED(hr)) { IMFByteStream_Release(e->bs); e->bs = NULL; e->rd = NULL; }
+    return hr;
+}
+#endif
+/* Media Foundation's reader over a copy of the file (e->bs stays set on failure, as before: the destructor frees it). */
+static HRESULT ext_open_reader_mf(Ext *e, unsigned char *data, size_t size) {
     HRESULT hr;
+    if (!movie_mf_present()) return (HRESULT)0xc00d36c4;     /* as when it cannot open WebM: the fallback, or the notice */
     IStream *st = SHCreateMemStream(data, (UINT)size);
-    if (!st) { printf("movie: SHCreateMemStream failed (%zu bytes)\n", size); return 0; }
+    if (!st) { printf("movie: SHCreateMemStream failed (%zu bytes)\n", size); return E_OUTOFMEMORY; }
     hr = MFCreateMFByteStreamOnStream(st, &e->bs);
     IStream_Release(st);
-    if (FAILED(hr)) { printf("movie: MFCreateMFByteStreamOnStream %08lx\n", hr); return 0; }
+    if (FAILED(hr)) { printf("movie: MFCreateMFByteStreamOnStream %08lx\n", hr); return hr; }
     IMFAttributes *ba = NULL;
     if (SUCCEEDED(IMFByteStream_QueryInterface(e->bs, &IID_IMFAttributes, (void **)&ba))) {
         const char *ext = strrchr(e->path, '.');
@@ -546,7 +630,51 @@ static int ext_open_bytes(Ext *e, unsigned char *data, size_t size) {
         IMFAttributes_Release(ba);
     }
     hr = MFCreateSourceReaderFromByteStream(e->bs, NULL, &e->rd);
-    if (FAILED(hr)) { printf("movie: MFCreateSourceReaderFromByteStream %08lx\n", hr); return 0; }
+#ifdef MOVIE_FFMPEG
+    if (SUCCEEDED(hr) && ffmf_test() == 1) { IMFSourceReader_Release(e->rd); e->rd = NULL; hr = (HRESULT)0xc00d36c4; }   /* TEST ONLY */
+#endif
+    if (FAILED(hr)) printf("movie: MFCreateSourceReaderFromByteStream %08lx\n", hr);
+    return hr;
+}
+
+static int ext_probe_tracks(Ext *e, size_t size);
+static int ext_open_bytes(Ext *e, unsigned char *data, size_t size) {
+    com_init();
+    HRESULT hr;
+#ifdef MOVIE_FFMPEG
+    if (ffmf_forced()) {
+        hr = ext_open_reader_ffmpeg(e, data, size);
+        printf("movie: SSBU_MOVIE_FFMPEG=1: the FFmpeg fallback opens %s: %08lx\n", e->path, hr);
+    } else {
+        hr = ext_open_reader_mf(e, data, size);
+        if (FAILED(hr) && ffmf_allowed()) {
+            HRESULT mf = hr;
+            if (e->bs) { IMFByteStream_Release(e->bs); e->bs = NULL; }
+            e->rd = NULL;
+            hr = ext_open_reader_ffmpeg(e, data, size);
+            printf("movie: Media Foundation cannot open %s (%08lx): the FFmpeg fallback %s (%08lx)\n", e->path, mf, SUCCEEDED(hr) ? "plays it" : "cannot either", hr);
+            if (FAILED(hr)) hr = mf;
+        }
+    }
+#else
+    hr = ext_open_reader_mf(e, data, size);
+#endif
+    if (FAILED(hr)) {
+        if (hr == (HRESULT)0xc00d36c4) {      /* MF_E_UNSUPPORTED_BYTESTREAM_TYPE: Windows cannot open WebM at all -> the game waits on a black movie screen */
+            void menu_notice(const char *text);
+            printf("movie: Windows has no WebM support: install 'Web Media Extensions' and 'VP9 Video Extensions' from the Microsoft Store "
+                   "(Windows N editions: also the Media Feature Pack), then start the game again\n");
+            menu_notice("The game's movies cannot play on this PC, so it stays on a black screen.\n\n"
+                        "Install from the Microsoft Store (free): Web Media Extensions and VP9 Video Extensions\n"
+                        "(Windows 'N' editions also need the Media Feature Pack), then start the game again.");
+        }
+        return 0;
+    }
+    return ext_probe_tracks(e, size);
+}
+
+/* The tracks of the reader just opened, into e->tr (none selected). */
+static int ext_probe_tracks(Ext *e, size_t size) {
 
     PROPVARIANT var; PropVariantInit(&var);
     if (SUCCEEDED(IMFSourceReader_GetPresentationAttribute(e->rd, (DWORD)MF_SOURCE_READER_MEDIASOURCE, &MF_PD_DURATION, &var)) && var.vt == VT_UI8)
@@ -598,13 +726,62 @@ static int ext_open_bytes(Ext *e, unsigned char *data, size_t size) {
     return 1;
 }
 
+#ifdef MOVIE_FFMPEG
+/* Media Foundation opened the movie but cannot decode it (no decoder for track `track`, or the first read failed): the
+ * same file goes to the FFmpeg fallback, read back from the byte stream, and the tracks selected so far are selected
+ * there again. Only before any sample was handed out. 1 when done. Caller holds the lock. */
+static int ext_select(Ext *e, int i, int on);
+static int ext_switch_to_ffmpeg(Ext *e, int track, HRESULT why) {
+    if (!e->rd || !e->bs || FFMF_IS(e->rd) || e->samples_read || !ffmf_allowed()) return 0;
+    QWORD len = 0;
+    if (FAILED(IMFByteStream_GetLength(e->bs, &len)) || !len || len > ((QWORD)2 << 30)) return 0;
+    unsigned char *data = malloc((size_t)len);
+    QWORD off = 0;
+    if (data && SUCCEEDED(IMFByteStream_SetCurrentPosition(e->bs, 0)))
+        while (off < len) {
+            ULONG got = 0, want = len - off > (1u << 24) ? (1u << 24) : (ULONG)(len - off);
+            if (FAILED(IMFByteStream_Read(e->bs, data + off, want, &got)) || !got) break;
+            off += got;
+        }
+    if (!data || off != len) { printf("movie: %s: the file cannot be read back for the FFmpeg fallback\n", e->path); free(data); return 0; }
+    IMFSourceReader *mf_rd = e->rd;
+    IMFByteStream *mf_bs = e->bs;
+    release_pending(e);
+    release_ahead(e, -1);
+    e->rd = NULL; e->bs = NULL;
+    HRESULT hr = ext_open_reader_ffmpeg(e, data, (size_t)len);
+    free(data);
+    int n = 0;
+    if (SUCCEEDED(hr))
+        for (IMFMediaType *t = NULL; n < MAX_TRACKS && SUCCEEDED(IMFSourceReader_GetNativeMediaType(e->rd, (DWORD)n, 0, &t)); n++) IMFMediaType_Release(t);
+    if (FAILED(hr) || n != e->ntracks) {
+        printf("movie: %s: the FFmpeg fallback cannot take it over (%08lx, %d tracks for %d)\n", e->path, hr, n, e->ntracks);
+        if (e->rd) IMFSourceReader_Release(e->rd);
+        if (e->bs) IMFByteStream_Release(e->bs);
+        e->rd = mf_rd; e->bs = mf_bs;
+        return 0;
+    }
+    IMFSourceReader_Release(mf_rd);
+    IMFByteStream_Release(mf_bs);
+    if (track >= 0) printf("movie: %s: Media Foundation cannot decode track %d (%s, %08lx): the FFmpeg fallback plays this movie\n", e->path, track, e->tr[track].mime, why);
+    else printf("movie: %s: Media Foundation's first read failed (%08lx): the FFmpeg fallback plays this movie\n", e->path, why);
+    IMFSourceReader_SetStreamSelection(e->rd, (DWORD)MF_SOURCE_READER_ALL_STREAMS, FALSE);
+    for (int j = 0; j < e->ntracks; j++) {
+        e->tr[j].eos = 0; e->tr[j].failed = 0;
+        if (e->tr[j].selected && j != track) { e->tr[j].selected = 0; ext_select(e, j, 1); }
+    }
+    e->eos = 0;
+    return 1;
+}
+#endif
+
 static int ext_select(Ext *e, int i, int on) {
     if (!e->rd || i < 0 || i >= e->ntracks) return ST_INVALID;
     Track *tr = &e->tr[i];
     HRESULT hr = IMFSourceReader_SetStreamSelection(e->rd, (DWORD)i, on ? TRUE : FALSE);
     if (on && SUCCEEDED(hr) && tr->kind != 2) {
         IMFMediaType *t = NULL;
-        MFCreateMediaType(&t);
+        new_media_type(e->rd, &t);
         if (tr->kind == 0) {
             IMFMediaType_SetGUID(t, &MF_MT_MAJOR_TYPE, &MFMediaType_Video);
             IMFMediaType_SetGUID(t, &MF_MT_SUBTYPE, &MFVideoFormat_NV12);
@@ -618,12 +795,15 @@ static int ext_select(Ext *e, int i, int on) {
         hr = IMFSourceReader_SetCurrentMediaType(e->rd, (DWORD)i, NULL, t);
         IMFMediaType_Release(t);
         if (FAILED(hr) && tr->kind == 1) {            /* let the reader pick the PCM layout */
-            MFCreateMediaType(&t);
+            new_media_type(e->rd, &t);
             IMFMediaType_SetGUID(t, &MF_MT_MAJOR_TYPE, &MFMediaType_Audio);
             IMFMediaType_SetGUID(t, &MF_MT_SUBTYPE, &MFAudioFormat_PCM);
             hr = IMFSourceReader_SetCurrentMediaType(e->rd, (DWORD)i, NULL, t);
             IMFMediaType_Release(t);
         }
+#ifdef MOVIE_FFMPEG
+        if (ffmf_test() == 2 && !FFMF_IS(e->rd)) hr = MF_E_TOPO_CODEC_NOT_FOUND;     /* TEST ONLY: no Media Foundation decoder */
+#endif
         if (SUCCEEDED(hr)) {
             IMFMediaType *cur = NULL;
             if (SUCCEEDED(IMFSourceReader_GetCurrentMediaType(e->rd, (DWORD)i, &cur))) {
@@ -632,6 +812,9 @@ static int ext_select(Ext *e, int i, int on) {
                 IMFMediaType_Release(cur);
             }
         } else {
+#ifdef MOVIE_FFMPEG
+            if (ext_switch_to_ffmpeg(e, i, hr)) return ext_select(e, i, on);
+#endif
             printf("movie: track %d (%s): no Media Foundation decoder path to %s (%08lx); track left unselected\n", i, tr->mime, tr->kind == 0 ? "NV12" : "PCM", hr);
             if (tr->kind == 1 && strcmp(tr->mime, "audio/vorbis") == 0) vorbis_hint();
             IMFSourceReader_SetStreamSelection(e->rd, (DWORD)i, FALSE);
@@ -677,12 +860,21 @@ static int ext_fill(Ext *e) {
         for (int guard = 0; !e->ahead[i].have && !tr->eos && guard < 256; guard++) {
             DWORD idx = 0, flags = 0; LONGLONG ts = 0; IMFSample *s = NULL;
             HRESULT hr = IMFSourceReader_ReadSample(e->rd, (DWORD)i, 0, &idx, &flags, &ts, &s);
+#ifdef MOVIE_FFMPEG
+            if (ffmf_test() == 3 && !FFMF_IS(e->rd)) { if (s) IMFSample_Release(s); s = NULL; hr = E_FAIL; }    /* TEST ONLY: a broken decoder */
+#endif
             {   /* test: SSBU_MOVIE_FAIL_AT=<n> makes the read after n samples fail */
                 static int fail_at = -1;
                 if (fail_at < 0) { const char *v = getenv("SSBU_MOVIE_FAIL_AT"); fail_at = v ? atoi(v) : 0; }
                 if (fail_at > 0 && e->samples_read >= (unsigned long long)fail_at) { if (s) { IMFSample_Release(s); s = NULL; } hr = E_FAIL; }
             }
             if (FAILED(hr) || (flags & MF_SOURCE_READERF_ERROR)) {
+#ifdef MOVIE_FFMPEG
+                if (!e->samples_read && !FFMF_IS(e->rd)) {
+                    if (s) { IMFSample_Release(s); s = NULL; }
+                    if (ext_switch_to_ffmpeg(e, -1, FAILED(hr) ? hr : E_FAIL)) return ext_fill(e);
+                }
+#endif
                 tr->failed = 1;                           /* the decoder of this track reports it: dec_error_check */
                 printf("movie: ReadSample(track %d) failed (%08lx, flags %lx) after %llu samples: treating as its end\n", i, hr, flags, e->samples_read);
                 if (s) IMFSample_Release(s);
@@ -1041,7 +1233,16 @@ static UINT32 h264_enum(IMFActivate ***act) {         /* the transforms h264_ope
     MFT_REGISTER_TYPE_INFO in = {MFMediaType_Video, MFVideoFormat_H264};
     UINT32 n = 0;
     *act = NULL;
-    if (FAILED(MFTEnumEx(MFT_CATEGORY_VIDEO_DECODER, MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_LOCALMFT | MFT_ENUM_FLAG_SORTANDFILTER, &in, NULL, act, &n))) n = 0;
+#ifdef MOVIE_FFMPEG
+    if (!ffmf_forced())
+#endif
+    if (!movie_mf_present() || FAILED(MFTEnumEx(MFT_CATEGORY_VIDEO_DECODER, MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_LOCALMFT | MFT_ENUM_FLAG_SORTANDFILTER, &in, NULL, act, &n))) n = 0;
+#ifdef MOVIE_FFMPEG
+    if (!n && ffmf_allowed()) {                       /* none (Windows N, or SSBU_MOVIE_FFMPEG=1): FFmpeg's */
+        CoTaskMemFree(*act); *act = NULL;
+        if (FAILED(ffmf_MFTEnumEx(MFT_CATEGORY_VIDEO_DECODER, MFT_ENUM_FLAG_SYNCMFT, &in, NULL, act, &n))) n = 0;
+    }
+#endif
     return n;
 }
 /* Whether this PC has an H.264 decoder transform at all (asked once). Without one, CreateH264DecoderConfigurationData
@@ -1097,7 +1298,7 @@ static int h264_open(Dec *d) {
     CoTaskMemFree(act);
     if (!d->mft) { printf("movie: no H.264 decoder transform (%u found, none could be created)\n", n); return 0; }
     IMFMediaType *t = NULL;
-    HRESULT hr = MFCreateMediaType(&t);
+    HRESULT hr = new_media_type(d->mft, &t);
     if (SUCCEEDED(hr)) {
         IMFMediaType_SetGUID(t, &MF_MT_MAJOR_TYPE, &MFMediaType_Video);
         IMFMediaType_SetGUID(t, &MF_MT_SUBTYPE, &MFVideoFormat_H264);
@@ -1124,8 +1325,8 @@ static void h264_collect(Dec *d) {
         if (!d->mft_provides) {
             IMFMediaBuffer *mb = NULL;
             DWORD size = d->mft_out_size ? d->mft_out_size : (DWORD)((d->w + 32) * (d->plane_h > d->h ? d->plane_h : d->h) * 2);
-            if (FAILED(MFCreateMemoryBuffer(size, &mb))) return;
-            if (FAILED(MFCreateSample(&ob.pSample))) { IMFMediaBuffer_Release(mb); return; }
+            if (FAILED(new_buffer(d->mft, size, &mb))) return;
+            if (FAILED(new_sample(d->mft, &ob.pSample))) { IMFMediaBuffer_Release(mb); return; }
             IMFSample_AddBuffer(ob.pSample, mb);
             IMFMediaBuffer_Release(mb);
         }
@@ -1194,13 +1395,13 @@ static int h264_send(Dec *d, int i, int off, int size, int64_t ts, uint32_t flag
         IMFMediaBuffer *mb = NULL;
         IMFSample *s = NULL;
         BYTE *p = NULL;
-        if (SUCCEEDED(MFCreateMemoryBuffer((DWORD)total, &mb)) && SUCCEEDED(IMFMediaBuffer_Lock(mb, &p, NULL, NULL))) {
+        if (SUCCEEDED(new_buffer(d->mft, (DWORD)total, &mb)) && SUCCEEDED(IMFMediaBuffer_Lock(mb, &p, NULL, NULL))) {
             if (pre) memcpy(p, d->csd, pre);
             if (sc) { static const unsigned char code[4] = {0, 0, 0, 1}; memcpy(p + pre, code, 4); pre += 4; }
             memcpy(p + pre, data, (size_t)size);
             IMFMediaBuffer_Unlock(mb);
             IMFMediaBuffer_SetCurrentLength(mb, (DWORD)total);
-            if (SUCCEEDED(MFCreateSample(&s))) {
+            if (SUCCEEDED(new_sample(d->mft, &s))) {
                 IMFSample_AddBuffer(s, mb);
                 IMFSample_SetSampleTime(s, ts * 10);
                 HRESULT hr = IMFTransform_ProcessInput(d->mft, 0, s, 0);
