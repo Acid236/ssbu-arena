@@ -473,7 +473,25 @@ static VkFlags fmt_aspect(VkFormat f) {
     default: return VK_IMAGE_ASPECT_COLOR_BIT;
     }
 }
+/* 2026-10-20 (render bugs V): NVN vertex format 0x69 (A2B10G10R10 SNORM: the stages' normals / tangents) on a GPU without it as
+ * a vertex format, or on AMD (signed 2_10_10_10 fetches: alpha read as unsigned on older AMD hardware / drivers, broken
+ * fetches in some Windows drivers; a suspect, NOT confirmed, of the player report of 2026-10-20: a stage drawn wrong on an
+ * AMD GPU while the fighters were right): the attribute is fetched as R32_UINT and the vertex code decodes it
+ * (mx_translate: bit 16 + n of the stage key's int_attrs). SSBU_VK_TEST bit 512 (test only): the same on any GPU. */
+static int vfmt_snorm_emu(void) {
+    static int on = -1;
+    if (on < 0) {
+        VkFormatProperties fp; memset(&fp, 0, sizeof fp);
+        vkGetPhysicalDeviceFormatProperties(V.gpu, VK_FORMAT_A2B10G10R10_SNORM_PACK32, &fp);
+        int test = getenv("SSBU_VK_TEST") && (atoi(getenv("SSBU_VK_TEST")) & 512);
+        on = test || !(fp.bufferFeatures & VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT) || V.props.vendorID == 0x1002;      /* AMD: 2_10_10_10 signed fetches have a history of driver faults (alpha read unsigned, broken fetches): decoded by us there */
+        printf("nvn_vk: vertex format A2B10G10R10_SNORM (NVN 0x69): %s%s\n", (fp.bufferFeatures & VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT) ? "a vertex format on this GPU" : "NOT a vertex format on this GPU",
+               on ? (V.props.vendorID == 0x1002 ? ": AMD: fetched as R32_UINT and decoded by the vertex code" : ": fetched as R32_UINT and decoded by the vertex code") : "");
+    }
+    return on;
+}
 static VkFormat vertex_vkfmt(int nf) {
+    if (nf == 0x69 && vfmt_snorm_emu()) return VK_FORMAT_R32_UINT;
     if ((nf >= 0x01 && nf <= 0x30) || (nf >= 0x6D && nf <= 0x78)) return comp_fmt(nf >= 0x6D ? 4 : (nf - 1) / 12 + 1, nf >= 0x6D ? nf - 0x6D : (nf - 1) % 12);
     if (nf >= 0x51 && nf <= 0x68) {
         int comps = (nf - 0x51) / 6 + 1, t = (nf - 0x51) % 6;
@@ -1124,7 +1142,7 @@ static VStage *vstage_get(Prog *p, int s, const uint32_t *key, uint32_t fo) {
     Stage *st = &p->st[s];
     VStage *v = st->vk;
     if (!st->code) return NULL;
-    uint32_t dep_a = v && s == 0 ? v->dep : 0;
+    uint32_t dep_a = v && s == 0 ? v->dep | v->dep << 16 : 0;      /* 2026-10-20: bit 16 + n of key[0]: attribute n decoded from A2B10G10R10 SNORM (key_fits of nvn_vk_m4.c) */
     if (v && ((key[0] ^ v->key[0]) & dep_a) == 0 && ((key[1] ^ v->key[1]) & dep_a) == 0 && ((key[2] ^ v->key[2]) & v->tex_units) == 0 && ((key[3] ^ v->key[3]) & v->tex_units) == 0 && v->fo == fo) return v->ok ? v : NULL;
     const uint8_t *cdata = st->ctl[3] && st->ctl[4] ? st->code - (s == 5 ? 0 : 0x30) + st->ctl[4] : NULL;       /* a compute stage has no program header */
     uint64_t h = fnv(0xcbf29ce484222325ULL ^ (uint64_t)s, st->code, (size_t)st->code_len);
@@ -1536,7 +1554,14 @@ static void resolve_sampler(int s, VStage *v, int i) {
                  (dim == DIM_CUBE && have == DIM_CUBEA) || (dim == DIM_CUBEA && have == DIM_CUBE) || (dim == DIM_1D && have == DIM_1DA) || (dim == DIM_1DA && have == DIM_1D) ||
                  ((dim == DIM_CUBE || dim == DIM_CUBEA) && (have == DIM_2DA) && e.nlay >= 6 && vt->w == vt->h);
         if (ok && vt->samples == 1) {
-            if (attached && have_targets_live()) { if (!vt->feedback) { vt->feedback = 1; R.feedback++; pass_end(); } vt_layout(vt, VK_IMAGE_LAYOUT_GENERAL); }
+            if (attached && have_targets_live()) { if (!vt->feedback) { vt->feedback = 1; R.feedback++; pass_end();
+                    {   /* 2026-10-20 (render bugs V): the first feedback passes in the log: which shader samples which bound target */
+                        static int nfb;
+                        if (nfb++ < 24) printf("nvn_vk_fb: frame %lld, program #%d, %s unit %u samples a bound %s target (format 0x%x, %d x %d, view kind %d), depth test %d write %d, colour mask %x, targets %d\n",
+                                               (long long)nvn_front_frame_next(), R.prog[s] ? R.prog[s]->serial : -1, s ? "fragment" : "vertex", u, R.depth.tex == t ? "DEPTH" : "COLOUR",
+                                               t->b.format, t->b.width, t->b.height, dim, (int)(R.ds & 1), (int)((R.ds >> 1) & 1), (unsigned)R.chanmask, R.ncol);
+                    } }
+                vt_layout(vt, VK_IMAGE_LAYOUT_GENERAL); }
             else vt_layout(vt, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
             g_dtex[g_ndtex].view = vt_view(vt, &e, dim, 0); g_dtex[g_ndtex].layout = vt->layout; if (di) di->dummy = 0;
         } else { static int n; R.dummy_kind++;
@@ -2294,6 +2319,7 @@ static int draw_prepare(unsigned prim) {
         if (((nf >= 1 && nf <= 0x30) || (nf >= 0x6D && nf <= 0x78)) && (k == 2 || k == 3 || k == 7 || k == 8 || k == 10 || k == 11)) { ints |= 1u << i; if (k == 3 || k == 8 || k == 11) sints |= 1u << i; }
         if (nf == 0x3E) ints |= 1u << i;
         if (nf == 0x6A) { ints |= 1u << i; sints |= 1u << i; }
+        if (nf == 0x69 && vfmt_snorm_emu()) ints |= 1u << (16 + i);      /* fetched as R32_UINT, decoded by the vertex code */
     }
     uint32_t key0[4] = {ints, sints, R.tex_int[0], R.tex_sint[0]}, key1[4] = {0, 0, R.tex_int[1], R.tex_sint[1]};
     int depth_only = !R.prog[1];
@@ -2384,6 +2410,11 @@ static int draw_prepare(unsigned prim) {
             int nf = (int)(a & 0xff), stream = (int)((a >> 8) & 31);
             VkFormat f = nf ? vertex_vkfmt(nf) : VK_FORMAT_UNDEFINED;
             if (nf && !f) { static char msg[64]; snprintf(msg, sizeof msg, "vertex attribute format 0x%x", nf); nvn_vk_missing(msg); }
+            if (nf && f) {   /* 2026-10-20 (render bugs V): each vertex format once in the log, with this GPU's support for it */
+                static uint8_t seen[256];
+                if (!seen[nf & 255]) { VkFormatProperties fp; memset(&fp, 0, sizeof fp); vkGetPhysicalDeviceFormatProperties(V.gpu, f, &fp); seen[nf & 255] = 1;
+                    printf("nvn_vk_vfmt: vertex attribute format 0x%x -> VkFormat %d: %s\n", nf, (int)f, (fp.bufferFeatures & VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT) ? "a vertex format on this GPU" : "NOT a vertex format on this GPU"); }
+            }
             memset(&ad[na], 0, sizeof ad[na]);
             ad[na].sType = VK_STRUCTURE_TYPE_VERTEX_INPUT_ATTRIBUTE_DESCRIPTION_2_EXT; ad[na].location = (uint32_t)i;
             if (f && stream < 16 && voff[stream] != ~0ull) {
@@ -2396,7 +2427,7 @@ static int draw_prepare(unsigned prim) {
                 }
                 ad[na].binding = bmap[stream]; ad[na].format = f; ad[na].offset = a >> 14; na++;
             } else if (vs->dep >> i & 1 || 1) {       /* not supplied: (0, 0, 0, 1), as OpenGL's current attribute value; integer inputs take the integer copy */
-                ad[na].binding = 16; ad[na].format = (ints >> i & 1) ? ((sints >> i & 1) ? VK_FORMAT_R32G32B32A32_SINT : VK_FORMAT_R32G32B32A32_UINT) : VK_FORMAT_R32G32B32A32_SFLOAT; ad[na].offset = (ints >> i & 1) ? 16 : 0;
+                ad[na].binding = 16; ad[na].format = (ints >> i & 1) || (ints >> (16 + i) & 1) ? ((sints >> i & 1) ? VK_FORMAT_R32G32B32A32_SINT : VK_FORMAT_R32G32B32A32_UINT) : VK_FORMAT_R32G32B32A32_SFLOAT; ad[na].offset = (ints >> i & 1) || (ints >> (16 + i) & 1) ? 16 : 0;
                 need_const = 1; na++;
             }
         }

@@ -178,7 +178,7 @@ static void vstage_from_rec(VStage *v, const StageRec *r, uint64_t vh, VkShaderM
     v->mod = mod; v->ok = 1;
 }
 static int key_fits(int s, const uint32_t *want, const uint32_t *have, uint32_t dep, uint32_t tex) {
-    uint32_t da = s == 0 ? dep : 0;
+    uint32_t da = s == 0 ? dep | dep << 16 : 0;      /* 2026-10-20: bit 16 + n of key[0] = attribute n decoded from A2B10G10R10 SNORM (records made before carry no such bits) */
     return !((want[0] ^ have[0]) & da) && !((want[1] ^ have[1]) & da) && !((want[2] ^ have[2]) & tex) && !((want[3] ^ have[3]) & tex);
 }
 /* g_sh_lock held. The variant of this code that serves `key` (compared under the variant's own masks: a stage that reads no
