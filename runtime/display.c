@@ -20,7 +20,9 @@ void os_init_event(uint64_t key, int autoclear);      /* os_threads.c */
 void os_signal_event(uint64_t key);
 
 static HWND g_hwnd;
+#ifdef _WIN32
 static HICON g_icon_small;                /* the title bar's small icon (opensmash.ico), set after the window is made */
+#endif
 static volatile LONG g_ready;
 static volatile LONG64 g_frames;
 volatile LONG64 g_prof15_frame;                       /* presented frames, read by prof15.c (SSBU_PROF15, test only; included by boot.c) */
@@ -426,11 +428,11 @@ static DWORD WINAPI window_thread(LPVOID arg) {
     const char *base = strrchr(exe, '\\') ? strrchr(exe, '\\') + 1 : exe, *show = getenv("SSBU_SHOW");
     int visible = show ? atoi(show) != 0 : (!_stricmp(base, "ssbu_native.exe") || !_stricmp(base, "ssbu_user.exe") || !_stricmp(base, "ssbu_native_rb.exe"));      /* (_rb: the rollback pair a player starts) */
     snprintf(g_title, sizeof g_title, "%s", getenv("SSBU_TITLE") ? getenv("SSBU_TITLE") : "SSBU native (study build)");
-    if (visible)
+    if (visible) {
         g_hwnd = CreateWindowExA(go->window_mode == 2 ? WS_EX_TOPMOST : 0, wc.lpszClassName, g_title, style | WS_VISIBLE, px, py, r.right - r.left,
                                  r.bottom - r.top, NULL, NULL, wc.hInstance, NULL);
         if (g_hwnd && g_icon_small) SendMessageA(g_hwnd, WM_SETICON, ICON_SMALL, (LPARAM)g_icon_small);
-    else {
+    } else {
         g_hwnd = CreateWindowExA(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, wc.lpszClassName, g_title, style, -32000, -32000,
                                  r.right - r.left, r.bottom - r.top, NULL, NULL, wc.hInstance, NULL);
         ShowWindow(g_hwnd, SW_SHOWNOACTIVATE);
