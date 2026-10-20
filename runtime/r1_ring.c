@@ -60,6 +60,7 @@ static uint8_t *g_rg_pool; static uint32_t g_rg_bump, g_rg_pcom, *g_rg_free, g_r
 static uint8_t *g_rg_cbs; static int *g_rg_ncbs; static int g_rg_cb_ok = -1;
 static double g_rg_park_ms = 30;
 static int g_rg_keep, g_rg_kept, g_rg_keep_on = -1; static long long g_rg_kept_n, g_rg_kept_same;   /* capture -> load at the same safe point: threads stay held */
+static int g_rg_deferred; static long long g_rg_defer_n;      /* (load deferral) r1_ring_load gave up for now: a sound thread not at its wait */
 static long long g_rg_caps, g_rg_cap_fail, g_rg_loads, g_rg_overflow;
 static double g_rg_last[2];
 static int g_rgs_on; static long long g_rgv_target; static void rgv_before(int si, long long target); static void rgv_after(void);   /* (simulation / verify, below) */
@@ -552,6 +553,30 @@ int r1_ring_load(long long frame, Ctx *c) {
     if (si < 0) return 0;
     double t0 = now_ms(); g_rgp_seg = 5;
     RgSlot *g = rg_slot(si);
+    /* (load deferral) the sound threads first: each must be caught at the wait it was held at in that capture within
+     * 40 ms, else nothing is loaded now (g_rg_deferred: the caller keeps the wrong guess and tries again at the next safe
+     * point, one frame deeper). Before, the load held such a thread wherever it was after 500 ms and it then wrote through
+     * a stale pointer (a 6-core PC: nus3::audio update busy ~8 ms a frame). SSBU_RB_LOAD_DEFER=0: the old way. */
+    static int defer = -1; if (defer < 0) { const char *e = getenv("SSBU_RB_LOAD_DEFER"); defer = !(e && e[0] == '0'); }
+    static double defer_ms = -1; if (defer_ms < 0) { const char *e = getenv("SSBU_RB_DEFER_MS"); defer_ms = e ? atof(e) : 8; }      /* short: a long probe slows the game and the sound thread then never catches up */
+    HANDLE probe[8]; int nprobe = 0;
+    if (defer) for (int i = 0; i < g->nth && nprobe < 8; i++) {
+        Th *t = &g->th[i];
+        if (!t->parked || !ra_audio(t->name)) continue;
+        double tp = now_ms(); int ok = 0;
+        while (now_ms() - tp < defer_ms) {
+            if (SuspendThread(t->h) == (DWORD)-1) break;
+            if (t->c->import_from == t->from && t->c->in_import == t->imp && th_blocked(t->h)) { ok = 1; break; }
+            ResumeThread(t->h); SwitchToThread();
+        }
+        if (!ok) {
+            for (int q = 0; q < nprobe; q++) ResumeThread(probe[q]);
+            g_rg_deferred = 1; g_rg_defer_n++;
+            if (g_rg_defer_n <= 20 || g_rg_defer_n % 100 == 0) LOG("r1: RING load of frame %lld deferred (%lld so far): thread %s not back at its wait within %.0f ms\n", frame, g_rg_defer_n, t->name, defer_ms);
+            return 0;
+        }
+        probe[nprobe++] = t->h;
+    }
     int k = g_rg_count - 1 - si;
     static Th cur[256]; int ncur = g_rg_kept ? g_nth : 0;  /* threads still held from the capture just made (g_rg_keep) */
     if (ncur) memcpy(cur, g_th, (size_t)ncur * sizeof *cur);
@@ -573,6 +598,7 @@ int r1_ring_load(long long frame, Ctx *c) {
         for (int i = 0; i < g_nth; i++) if (g_th[i].held) { ResumeThread(g_th[i].h); g_th[i].held = 0; }
         SwitchToThread();
     }
+    for (int q = 0; q < nprobe; q++) ResumeThread(probe[q]);      /* (load deferral) the probe's own suspend: the hold above has its own */
     double t1 = now_ms();
     R1_CTR("load (state of frame)", frame, 0);
     rgc_before();

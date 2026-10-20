@@ -73,6 +73,15 @@ static void rbg_wait_until(double t) {                  /* a high-resolution tim
         else YieldProcessor();
     }
 }
+/* (load deferral) a wrong guess whose load r1_ring_load put off (a sound thread not at its wait): tried again at the
+ * next safe point, merged with any newer one (the earliest frame wins) */
+static int g_rbg_pending; static long long g_rbg_deferred;
+static int rbg_take_mismatch(void) {
+    int m = rbn_take_mismatch();
+    if (g_rbg_pending > 0 && (m <= 0 || g_rbg_pending < m)) m = g_rbg_pending;
+    g_rbg_pending = 0;
+    return m;
+}
 static int rbg_rollback(Ctx *c, long long i, int m) {
     long long target = m - 1, best = -1;
     for (int s = 0; s < g_rg_count; s++) { long long f = rg_slot(s)->frame; if (f <= target && f > best) best = f; }
@@ -83,7 +92,10 @@ static int rbg_rollback(Ctx *c, long long i, int m) {
     }
     double t0 = now_ms();
     if (!g_ra_wh_on) { g_rbg_rb_unheld++; if (g_rbg_rb_unheld <= 10) LOG("r1: RB NET: rollback at frame %lld while the task workers are NOT held (watchdog releases so far %lld): the load may leave the job system waiting\n", i, g_ra_wd_fired); }
-    if (!r1_ring_load(best, c)) { g_rbg_miss++; return 0; }
+    if (!r1_ring_load(best, c)) {
+        if (g_rg_deferred) { g_rg_deferred = 0; g_rbg_deferred++; if (g_rbg_pending <= 0 || m < g_rbg_pending) g_rbg_pending = m; return 0; }      /* (load deferral) */
+        g_rbg_miss++; return 0;
+    }
     g_rbg_load_ms += now_ms() - t0; g_rbg_t_load += now_ms() - t0; g_rbg_recap_first = -1; g_rbg_t_pass0 = now_ms();
     int k = (int)(i - best);
     g_rgs_left = k; g_rgs_next = best + 1; g_ra_phase = 2;
@@ -174,12 +186,12 @@ static void rbg_step_body(Ctx *c) {
     } else if (g_rbg_noring) {                          /* (hs13) a real pass ended, no ring: nothing to capture, nothing ran on a guess */
         g_rgs_next = i + 1; g_rbg_real++;
         rbn_drain(i);
-        int m = rbn_take_mismatch();
+        int m = rbg_take_mismatch();
         if (m > 0 && m <= i) { g_rbg_miss++; if (g_rbg_miss <= 10) LOG("r1: RB NET: wrong guess at frame %d WITHOUT the ring (frame %lld): cannot be rolled back (desync)\n", m, i); }
     } else {                                            /* a real pass ended */
         g_rgs_next = i + 1; g_rbg_real++;
         rbn_drain(i);
-        int m = rbg_sched(i, rbn_take_mismatch());
+        int m = rbg_sched(i, rbg_take_mismatch());
         if (m > 0 && m <= i) {
             /* captured anyway, with the threads kept held for the load that follows (R2 round 2: load hold 3.5 -> 0.2 ms);
              * SSBU_RB_NET_KEEP=0: no capture, the load holds the threads itself */
@@ -224,9 +236,10 @@ static void rbg_step_body(Ctx *c) {
     int stalled = 0; double ts = 0;
     for (;;) {
         rbn_drain(i);
-        int m = rbn_take_mismatch();
+        int m = rbg_take_mismatch();
         if (m > 0 && m <= i) { if (g_rbg_noring) { g_rbg_miss++; if (g_rbg_miss <= 10) LOG("r1: RB NET: wrong guess at frame %d WITHOUT the ring: cannot be rolled back (desync)\n", m); }
-                               else { if (stalled) { g_rbg_stall_ms += now_ms() - ts; } if (rbg_rollback(c, i, m)) return; } }
+                               else { if (stalled) { g_rbg_stall_ms += now_ms() - ts; } if (rbg_rollback(c, i, m)) return;
+                                      if (g_rbg_pending > 0 && g_rgs_next - rbn_confirmed() <= rbn_ahead()) break; } }      /* (load deferral) next frame, then again */
         /* (hs14) the ring short of pool memory (its last capture given up): no frame on a guess until a capture succeeds */
         if (g_rgs_next - rbn_confirmed() <= (g_rbg_noring || g_rg_short ? 0 : rbn_ahead())) break;
         if (!g_rbg_noring && g_rg_short && g_rgs_next - rbn_confirmed() <= rbn_ahead() && !stalled) g_rbg_short_waits++;
@@ -349,7 +362,7 @@ static void rbg_report(void) {
     LOG("r1: RB NET report: ring memory (hs14, fix %s): captures given up %lld, old states freed early %lld, captures skipped to keep the oldest needed state %lld\n",
         g_rg_poolfix ? "on" : "OFF", g_rg_short_n, g_rg_freed_slots, g_rg_skip_full);
     LOG("r1: RB NET report: task-worker watchdog releases %lld (since the process start), rollbacks with the workers not held %lld (watchdog paused at H2: %s)\n", g_ra_wd_fired, g_rbg_rb_unheld, g_rbg_wdfix ? "yes" : "NO");
-    LOG("r1: RB NET report: loads that took the sound thread at another wait after 5 ms %lld; threads not at their wait after 500 ms %d (last load)\n", g_th_audio_other, g_th_mismatch);
+    LOG("r1: RB NET report: loads that took the sound thread at another wait after 5 ms %lld; threads not at their wait after 500 ms %d (last load); loads deferred to the next frame (a sound thread not at its wait) %lld\n", g_th_audio_other, g_th_mismatch, g_rbg_deferred);
     LOG("r1: RB NET report: fiber host stacks in use at a load (not copied back) %lld, seen %lld; fibers found running by their thread (TEB) at a capture %lld; catch table at loads: entries dropped %lld, live entries put back %lld, loads changed %lld (hs13)\n", g_fib_live_skip, g_fib_live_seen, g_fib_teb_running, g_rgc_dropped, g_rgc_kept, g_rgc_loads_changed);
     { void nnunwind_catch_stats(long long *, long long *, long long *, long long *, long long *); long long l, d, cr, fu, mp; nnunwind_catch_stats(&l, &d, &cr, &fu, &mp);
       LOG("r1: RB NET report: catch table (hs15): %lld live records, %lld removed slots, %lld puts found no free slot in their window, %lld table full, longest probe %lld; dead records dropped at loads %lld (host fiber stacks known %zu)\n", l, d, cr, fu, mp, g_rgc_dead, g_nbf); }

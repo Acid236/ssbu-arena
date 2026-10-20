@@ -1428,7 +1428,10 @@ static int th_blocked(HANDLE h) {
     return r[-2] == 0x0f && r[-1] == 0x05;
 }
 static int ra_audio(const char *n) { return strstr(n, "nus3::audio") || strstr(n, "sindou") || strstr(n, "AudioDevice"); }
-static int ra_free(const char *n) { return strstr(n, "nopus") != NULL; }      /* never in a waiting import; its pages (decoder state, output) are not simulation */
+static int ra_free(const char *n) { return strstr(n, "nopus") != NULL || (g_audio_free && ra_audio(n)); }      /* never in a waiting import; its pages (decoder state, output) are not simulation.
+     * SSBU_R1_AUDIO_FREE: the sound threads too (they run on; the pages they write during the first save's 30 ms hold are
+     * left out of capture and load, is_async). On a 6-core PC nus3::audio update was busy ~8 ms a frame and never back at
+     * its wait at a ring load: held elsewhere, it then wrote through a stale pointer after the load. */
 /* save: every other guest thread held inside a waiting import (its place and registers noted); 0 = one was not there in time */
 static int ra_hold_save(void) {
     DWORD me = GetCurrentThreadId(); Ctx *tc; const char *nm; HANDLE h;
@@ -1438,6 +1441,13 @@ static int ra_hold_save(void) {
         Th *t = &g_th[g_nth++]; memset(t, 0, sizeof *t); t->h = h; t->c = tc; t->name = nm ? nm : "?";
     }
     g_ninfo = 0; while (guest_thread_info(g_ninfo, &tc, &nm, &h)) g_ninfo++;
+    {   /* the audio threads first (save and ring load use this order): held after the task workers, the sound thread could
+         * spin on work a held worker never finished and not reach its wait (seen on a 6-core PC: "not at a wait within
+         * 30 ms" at captures, "not back at its wait after 500 ms" at loads, then a crash in its mixing code).
+         * SSBU_RB_AUDIO_FIRST=0: the enumeration order. */
+        static int af = -1; if (af < 0) { const char *e = getenv("SSBU_RB_AUDIO_FIRST"); af = !(e && e[0] == '0'); }
+        if (af) { int k = 0; for (int i = 0; i < g_nth; i++) if (ra_audio(g_th[i].name)) { Th x = g_th[i]; memmove(&g_th[k + 1], &g_th[k], sizeof(Th) * (size_t)(i - k)); g_th[k++] = x; } }
+    }
     static int all_first = -1; if (all_first < 0) { const char *e = getenv("SSBU_RB_HOLD_ALL"); all_first = rgs_wanted() && e && atoi(e) != 0; }      /* opt-in: saved ~0.07 ms only; rb2f1 crashed with it (cause not shown) */
     static uint8_t pre[256];                                /* (R2 round 3, ring only) every thread suspended first, then checked: the kernel delivers the suspends together */
     if (all_first) for (int i = 0; i < g_nth; i++) pre[i] = !ra_free(g_th[i].name) && SuspendThread(g_th[i].h) != (DWORD)-1;
