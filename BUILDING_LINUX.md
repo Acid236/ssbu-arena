@@ -154,7 +154,9 @@ the same `--dump` (add `--redo convert` if you built before).
 - **The game exits at once with code 7:** a font file is missing (see "Fonts"). The log line starts with `nn::pl:`.
 - **A black window that never changes:** look at the output for `nvn_vk:` lines. `vulkaninfo --summary` must list your GPU.
 - **No sound:** the game plays through SDL3, so PipeWire / PulseAudio must be running. The log says which audio device was opened.
-- **To report a problem**, include `~/.local/share/ssbu-recomp/last_run.log` (written by every `./play.sh`). It lists the
+- **To report a problem**, run `scripts/linux/collect_logs_linux.sh`: it makes `~/ssbu_linux_report_<date>.zip` with the
+  build logs, the last game logs and facts about your PC (distribution, GPU and driver, Vulkan, library versions), never
+  your dump or a game file. Send that file, or at least `~/.local/share/ssbu-recomp/last_run.log` (written by every `./play.sh`). It lists the
   libraries, the GPU and driver, the controllers found, and the error. If no frame was shown for 5 s,
   `build-linux/work/ssbu_native_freeze.txt` has a report of every thread.
 
@@ -175,3 +177,14 @@ executable that finds its libraries next to itself (`rpath $ORIGIN`). `tests/pla
 layer by itself:
 `clang -I runtime/plat -include runtime/plat/plat_pre.h tests/plat_selftest.c runtime/plat_posix.c $(pkg-config --cflags --libs sdl3 openssl) -lm -o plat_selftest`
 (55 checks, 0 failures on the PC above).
+
+## What to report (testers)
+
+Please answer these, even if the answer is "no", and attach the file of `scripts/linux/collect_logs_linux.sh`:
+
+1. Your distribution and version, GPU and driver, X11 or Wayland.
+2. Did `install_deps.sh` and `setup.py` finish? If not, which step failed (the line starting with `FAILED at step`)?
+3. Did the `check` step pass (the line `SSBU_SDK_SELFTEST:` and the differential test line)?
+4. Did the game window open? Did the opening movie play, with sound?
+5. Did the title screen appear? Did a fight start, and how did the speed feel?
+6. Which controller did you use (keyboard, which pad)?

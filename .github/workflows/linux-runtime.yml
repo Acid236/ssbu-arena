@@ -4,9 +4,9 @@ name: Linux runtime
 
 on:
   push:
-    paths: ['runtime/**', 'fighter_sdk/**', 'tests/plat_selftest.c', 'tools/lifter/build.py', 'tools/lifter/build_nro.py', 'scripts/macos/**', 'tools/lifter/**', 'scripts/setup.py', '.github/workflows/linux-runtime.yml']
+    paths: ['runtime/**', 'fighter_sdk/**', 'tests/plat_selftest.c', 'tools/lifter/build.py', 'tools/lifter/build_nro.py', 'scripts/macos/**', 'tools/lifter/**', 'scripts/setup.py', 'scripts/linux/**', 'BUILDING_LINUX.md', '.github/workflows/linux-runtime.yml']
   pull_request:
-    paths: ['runtime/**', 'fighter_sdk/**', 'tests/plat_selftest.c', 'tools/lifter/build.py', 'tools/lifter/build_nro.py', 'scripts/macos/**', 'tools/lifter/**', 'scripts/setup.py', '.github/workflows/linux-runtime.yml']
+    paths: ['runtime/**', 'fighter_sdk/**', 'tests/plat_selftest.c', 'tools/lifter/build.py', 'tools/lifter/build_nro.py', 'scripts/macos/**', 'tools/lifter/**', 'scripts/setup.py', 'scripts/linux/**', 'BUILDING_LINUX.md', '.github/workflows/linux-runtime.yml']
   workflow_dispatch:
 
 jobs:
@@ -32,7 +32,7 @@ jobs:
           cmake --build deps/SDL/build > /dev/null
           sudo cmake --install deps/SDL/build > /dev/null
           sudo ldconfig
-          python -m pip install --quiet Pillow capstone unicorn
+          python -m pip install --quiet Pillow capstone unicorn numpy lz4 zstandard
           git -c advice.detachedHead=false clone --quiet --depth 1 --branch v1.4.351 https://github.com/KhronosGroup/Vulkan-Headers.git deps/Vulkan-Headers
           git clone --quiet --depth 1 --filter=blob:none --sparse https://git.eden-emu.dev/eden-emu/eden.git deps/suyu
           git -C deps/suyu sparse-checkout set src/core/hle/service/mii
@@ -53,3 +53,21 @@ jobs:
           clang-19 -O1 -w -include plat/plat_pre.h -I plat $(pkg-config --cflags sdl3 openssl) ../tests/plat_selftest.c plat_posix.c \
             -o plat_selftest $(pkg-config --libs sdl3 openssl) -lpthread -ldl -lm
           ./plat_selftest
+
+      - name: setup.py --target linux --tools-only (the deps step without a dump)
+        run: |
+          bash -n scripts/linux/install_deps.sh scripts/linux/collect_logs_linux.sh
+          python scripts/setup.py --target linux --tools-only --llvm /usr/lib/llvm-19 --vulkan-headers deps/Vulkan-Headers --suyu deps/suyu
+
+      - name: collect_logs_linux.sh makes a report without game files
+        run: |
+          mkdir -p build-linux/logs build-linux/binaries/13.0.4 build-linux/work
+          echo "stand-in" > build-linux/binaries/13.0.4/main.elf     # must NOT end up in the report
+          echo "stand-in" > build-linux/work/secret.c
+          echo "a game log" > build-linux/logs/game_20260101_000000.log
+          echo "a build log" > build-linux/logs/compile.log
+          bash scripts/linux/collect_logs_linux.sh
+          f=$(ls ~/ssbu_linux_report_*.zip ~/ssbu_linux_report_*.tar.gz 2>/dev/null | head -1)
+          if [[ "$f" == *.zip ]]; then unzip -l "$f" | tee list.txt; else tar -tzf "$f" | tee list.txt; fi
+          ! grep -E "main\.elf|secret\.c|binaries|/work/" list.txt
+
