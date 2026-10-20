@@ -4,9 +4,9 @@ name: Linux runtime
 
 on:
   push:
-    paths: ['runtime/**', 'fighter_sdk/**', 'tests/plat_selftest.c', 'tools/lifter/build.py', 'tools/lifter/build_nro.py', 'scripts/macos/**', 'tools/lifter/**', 'scripts/setup.py', 'scripts/linux/**', 'BUILDING_LINUX.md', '.github/workflows/linux-runtime.yml']
+    paths: ['runtime/**', 'fighter_sdk/**', 'tests/plat_selftest.c', 'tools/lifter/build.py', 'tools/lifter/build_nro.py', 'scripts/macos/**', 'tools/lifter/**', 'tests/build_opt_sched_test.py', 'scripts/setup.py', 'scripts/linux/**', 'BUILDING_LINUX.md', '.github/workflows/linux-runtime.yml']
   pull_request:
-    paths: ['runtime/**', 'fighter_sdk/**', 'tests/plat_selftest.c', 'tools/lifter/build.py', 'tools/lifter/build_nro.py', 'scripts/macos/**', 'tools/lifter/**', 'scripts/setup.py', 'scripts/linux/**', 'BUILDING_LINUX.md', '.github/workflows/linux-runtime.yml']
+    paths: ['runtime/**', 'fighter_sdk/**', 'tests/plat_selftest.c', 'tools/lifter/build.py', 'tools/lifter/build_nro.py', 'scripts/macos/**', 'tools/lifter/**', 'tests/build_opt_sched_test.py', 'scripts/setup.py', 'scripts/linux/**', 'BUILDING_LINUX.md', '.github/workflows/linux-runtime.yml']
   workflow_dispatch:
 
 jobs:
@@ -56,8 +56,11 @@ jobs:
 
       - name: setup.py --target linux --tools-only (the deps step without a dump)
         run: |
-          bash -n scripts/linux/install_deps.sh scripts/linux/collect_logs_linux.sh
+          bash -n scripts/linux/install_deps.sh && bash -n scripts/linux/collect_logs_linux.sh
           python scripts/setup.py --target linux --tools-only --llvm /usr/lib/llvm-19 --vulkan-headers deps/Vulkan-Headers --suyu deps/suyu
+
+      - name: Compile scheduling of build_opt.py (shared RAM, ladder; a fake compiler, no game files)
+        run: python tests/build_opt_sched_test.py
 
       - name: collect_logs_linux.sh makes a report without game files
         run: |

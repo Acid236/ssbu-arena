@@ -4,9 +4,9 @@ name: macOS runtime
 
 on:
   push:
-    paths: ['runtime/**', 'fighter_sdk/**', 'tests/plat_selftest.c', 'tools/lifter/**', 'scripts/macos/**', 'scripts/setup.py', 'scripts/run.py', 'BUILDING_MAC.md', 'play_mac.sh', '.github/workflows/macos-runtime.yml']
+    paths: ['runtime/**', 'fighter_sdk/**', 'tests/plat_selftest.c', 'tools/lifter/**', 'tests/build_opt_sched_test.py', 'scripts/macos/**', 'scripts/setup.py', 'scripts/run.py', 'BUILDING_MAC.md', 'play_mac.sh', '.github/workflows/macos-runtime.yml']
   pull_request:
-    paths: ['runtime/**', 'fighter_sdk/**', 'tests/plat_selftest.c', 'tools/lifter/**', 'scripts/macos/**', 'scripts/setup.py', 'scripts/run.py', 'BUILDING_MAC.md', 'play_mac.sh', '.github/workflows/macos-runtime.yml']
+    paths: ['runtime/**', 'fighter_sdk/**', 'tests/plat_selftest.c', 'tools/lifter/**', 'tests/build_opt_sched_test.py', 'scripts/macos/**', 'scripts/setup.py', 'scripts/run.py', 'BUILDING_MAC.md', 'play_mac.sh', '.github/workflows/macos-runtime.yml']
   workflow_dispatch:
 
 jobs:
@@ -21,6 +21,9 @@ jobs:
 
       - name: Shell scripts parse
         run: bash -n scripts/macos/install_mac.sh && bash -n scripts/macos/collect_logs_mac.sh && bash -n play_mac.sh
+
+      - name: Compile scheduling of build_opt.py (shared RAM, ladder; a fake compiler, no game files)
+        run: python3 tests/build_opt_sched_test.py
 
       - name: install_mac.sh (Homebrew packages, venv, Khronos headers, Mii sources; no dump, no build)
         run: bash scripts/macos/install_mac.sh

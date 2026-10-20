@@ -18,16 +18,29 @@ please report what happens (see "What to report").
 
 ## The two commands
 
-Open the Terminal, go to the folder of this project, then:
+Open the Terminal (Applications > Utilities > Terminal). Type `cd ` (with a space), drag the folder of this project
+from Finder into the Terminal window, and press Return. Then:
 
 ```
-scripts/macos/install_mac.sh --dump <your dump folder>
-./play_mac.sh
+bash scripts/macos/install_mac.sh --dump <your dump folder>
+bash play_mac.sh
 ```
+
+For `<your dump folder>` you can again drag the folder from Finder into the window. `bash` in front makes the scripts run
+even when the project came as a downloaded ZIP (which can lose the "executable" mark); after the install
+`./play_mac.sh` works too.
 
 The first command checks your Mac, installs the tools with Homebrew, prepares Python, and builds the game from your dump.
 If the Xcode Command Line Tools or Homebrew are missing, it tells you what to do and stops; run it again after that.
-`--jobs N` sets how many compilers run at once (the default is one per 4 GB of RAM).
+`--jobs N` sets how many compilers run at most at once. The default is one per CPU core; they share your RAM minus 4 GB,
+each reserving what its file is expected to need, so the few files that need many GB run with fewer beside them.
+
+- **"Terminal would like to access files in your Documents / Desktop / Downloads folder":** click Allow (the build reads
+  your dump and writes into the project folder).
+- **"This Terminal runs under Rosetta":** your Terminal is set to run as an Intel program. In Finder, select
+  Applications > Utilities > Terminal, File > Get Info, untick "Open using Rosetta", open Terminal again.
+- **"The Homebrew found is the Intel Homebrew in /usr/local":** a Homebrew moved over from an Intel Mac. Install the Apple
+  Silicon one as the script shows (it goes to /opt/homebrew, beside the other).
 
 The second command starts the game. The first start waits at a progress screen while shaders are prepared; later starts are
 faster. Saves go to `~/Library/Application Support/ssbu-recomp/userdata`. Close the window to quit.
@@ -49,8 +62,8 @@ Controllers: any pad SDL3 knows. Remapping: `build-macos/config/controllers.ini`
 
 - **The install stopped:** run the same command again. Finished steps are skipped and it continues where it stopped.
 - **Out of memory / the Mac freezes during the build:** run again with a lower `--jobs`, for example `--jobs 2`.
-- **The game crashes at start in MoltenVK:** try `MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=0 ./play_mac.sh`.
-- **Collect the logs:** run `scripts/macos/collect_logs_mac.sh`. It makes `~/Desktop/ssbu_mac_report_<date>.zip` with the
+- **The game crashes at start in MoltenVK:** try `MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=0 bash play_mac.sh`.
+- **Collect the logs:** run `bash scripts/macos/collect_logs_mac.sh`. It makes `~/Desktop/ssbu_mac_report_<date>.zip` with the
   build logs, the last game logs and facts about your Mac (macOS version, chip, graphics, Vulkan, Homebrew packages). It
   never includes your dump or any game file. **Send that zip** with your report.
 - The newest game log is also in `build-macos/logs/`.

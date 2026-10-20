@@ -108,8 +108,9 @@ def disk_mb(path):
 
 
 def default_jobs():
-    """min(24, cpus); off Windows also one compiler job per 4 GB of RAM: a machine that runs out is not slowed down but has
-    processes killed (seen with 22 jobs on 31 GB). build_opt.py also limits each compiler's memory on Linux."""
+    """min(24, cpus); off Windows also one job per 4 GB of RAM: a machine that runs out is not slowed down but has processes
+    killed (seen with 22 jobs on 31 GB). On Windows the compiler jobs; on Linux / macOS the lifters' worker processes only
+    (Ctx.lift_jobs): the compilers there follow the CPU threads and share the RAM by reservations (build_opt.py)."""
     jobs = min(24, os.cpu_count() or 8)
     try:
         if sys.platform == 'darwin':                # macOS: no /proc; hw.memsize is in bytes
@@ -140,7 +141,16 @@ class Ctx:
         if os.path.exists(self.state_file):
             with open(self.state_file) as f:
                 self.state = json.load(f)
-        self.jobs = a.jobs or default_jobs()
+        if self.posix:
+            # Linux / macOS: a compiler per CPU thread (at most 24). build_opt.py shares RAM - 4 GB among them by reservations
+            # (most files need well under 1 GB, a few many GB), so RAM no longer caps the count: a 16 GB, 8-thread Steam Deck
+            # had 3 compilers under the old rule of one per 4 GB. The lifters (Python worker processes, not counted in that
+            # sharing) keep the RAM rule.
+            self.jobs = a.jobs or min(24, os.cpu_count() or 8)
+            self.lift_jobs = min(self.jobs, default_jobs())
+        else:
+            self.jobs = a.jobs or default_jobs()
+            self.lift_jobs = self.jobs
         self.tools = {}                          # located tools, filled by deps
         self.runtime_dir = None                  # the checked runtime package (load_runtime), or None: the exe is built here
         self.nocrt = bool(a.nocrt or a.runtime)  # the game libraries with LLVM alone (tools/lifter/build.py RECOMP_NOCRT)
@@ -678,8 +688,10 @@ def mac_shim_argv(clang, prefix, libs):
 
 
 def brew_prefix():
-    """Homebrew's prefix (/opt/homebrew on Apple Silicon), or None."""
-    brew = shutil.which('brew') or next((p for p in ('/opt/homebrew/bin/brew', '/usr/local/bin/brew') if os.path.exists(p)), None)
+    """Homebrew's prefix (/opt/homebrew on Apple Silicon), or None. On a Mac the native /opt/homebrew comes first: an Intel
+    Homebrew in /usr/local (migrated from an Intel Mac, or installed from a Rosetta terminal) has x86_64 libraries."""
+    native = '/opt/homebrew/bin/brew' if sys.platform == 'darwin' and os.path.exists('/opt/homebrew/bin/brew') else None
+    brew = native or shutil.which('brew') or next((p for p in ('/opt/homebrew/bin/brew', '/usr/local/bin/brew') if os.path.exists(p)), None)
     if brew:
         r = subprocess.run([brew, '--prefix'], capture_output=True, text=True)
         if r.returncode == 0 and r.stdout.strip():
@@ -701,6 +713,10 @@ def deps_mac(cx):
         raise Fail('missing Python packages: %s (run setup.py with deps/venv/bin/python)%s' % (', '.join(missing), MAC_HINT))
     say('  python packages: numpy lz4 zstandard Pillow unicorn: ok')
     if sys.platform == 'darwin' and subprocess.run(['uname', '-m'], capture_output=True, text=True).stdout.strip() != 'arm64':
+        if subprocess.run(['sysctl', '-n', 'hw.optional.arm64'], capture_output=True, text=True).stdout.strip() == '1':
+            raise Fail('this Python runs as Intel code under Rosetta on an Apple Silicon Mac: the build would mix x86_64 and arm64. '
+                       'Use deps/venv/bin/python made by scripts/macos/install_mac.sh, from a Terminal that is not set to "Open '
+                       'using Rosetta"' + MAC_HINT)
         say('  WARNING: this Mac is not an Apple Silicon Mac (arm64): only Apple Silicon is supported')
     prefix = brew_prefix()
     if not prefix:
@@ -951,7 +967,7 @@ def step_tables(cx):
 
 
 def step_lift(cx):
-    out = cx.run('lift', [sys.executable, 'recomp_eh.py', 'gen_eh_o2', str(cx.jobs)])
+    out = cx.run('lift', [sys.executable, 'recomp_eh.py', 'gen_eh_o2', str(cx.lift_jobs)])
     n = len([f for f in os.listdir(os.path.join(cx.work, 'gen_eh_o2')) if f.endswith('.c')])
     say('  main lifted into gen_eh_o2: %d C files (%.0f MB)' % (n, disk_mb(os.path.join(cx.work, 'gen_eh_o2'))))
 
@@ -991,9 +1007,11 @@ def inline_flag(cx):
 
 def build_env(cx):
     if cx.linux:
-        return cx.env(RECOMP_GEN='gen_eh_o2', RECOMP_OBJ='obj_eh_o1', RECOMP_DLL=game_lib(cx), RECOMP_NRO_SUFFIX='_eh_o2', RECOMP_TARGET='linux')
+        return cx.env(RECOMP_GEN='gen_eh_o2', RECOMP_OBJ='obj_eh_o1', RECOMP_DLL=game_lib(cx), RECOMP_NRO_SUFFIX='_eh_o2', RECOMP_TARGET='linux',
+                      RECOMP_LIFT_JOBS=str(cx.lift_jobs))
     if cx.mac:
-        return cx.env(RECOMP_GEN='gen_eh_o2', RECOMP_OBJ='obj_eh_o1', RECOMP_DLL=game_lib(cx), RECOMP_NRO_SUFFIX='_eh_o2', RECOMP_TARGET='macos')
+        return cx.env(RECOMP_GEN='gen_eh_o2', RECOMP_OBJ='obj_eh_o1', RECOMP_DLL=game_lib(cx), RECOMP_NRO_SUFFIX='_eh_o2', RECOMP_TARGET='macos',
+                      RECOMP_LIFT_JOBS=str(cx.lift_jobs))
     # FFMPEG_ROOT: build.py compiles the movie fallback (mf_ffmpeg.c) with the headers install.py put in deps\ffmpeg
     return cx.env(RECOMP_GEN='gen_eh_o2', RECOMP_OBJ='obj_eh_o1', RECOMP_DLL='ssbu_game_eh_o1.dll', RECOMP_NRO_SUFFIX='_eh_o2',
                   RECOMP_INLINE=inline_flag(cx),
@@ -1013,6 +1031,8 @@ def copy_ffmpeg(cx):
 
 
 def step_compile(cx):
+    if cx.posix:
+        say('  up to %d compilers at once, sharing the RAM (logs/compile.log shows the progress)' % cx.jobs)
     cx.run('compile', [sys.executable, 'build_opt.py', 'main', str(cx.jobs)], env=build_env(cx))
     dll = os.path.join(cx.work, game_lib(cx))
     say('  %s %.0f MB; objects %.0f MB' % (game_lib(cx), os.path.getsize(dll) / 1048576.0, disk_mb(os.path.join(cx.work, 'obj_eh_o1'))))
@@ -1115,6 +1135,8 @@ def game_env(cx, **extra):
         e['SSBU_FONTS'] = os.path.join(cx.build, 'sysdata', 'fonts')
     if os.path.isdir(os.path.join(cx.build, 'sysdata', 'zoneinfo')):
         e['SSBU_TZDIR'] = os.path.join(cx.build, 'sysdata', 'zoneinfo')
+    if cx.mac and cx.tools.get('moltenvk_icd') and not (e.get('VK_DRIVER_FILES') or e.get('VK_ICD_FILENAMES')):
+        e['VK_DRIVER_FILES'] = cx.tools['moltenvk_icd']          # MoltenVK, as play_mac.sh names it for the game
     return e
 
 
@@ -1244,7 +1266,8 @@ def main():
     ap.add_argument('--target', choices=('windows', 'linux', 'macos'), default='windows', help='windows (default: the Windows exe), linux (a native Linux build: BUILDING_LINUX.md) or macos (Apple Silicon: BUILDING_MAC.md)')
     ap.add_argument('--tools-only', action='store_true', help='only check the tools (step deps, no dump needed; --target linux / macos)')
     ap.add_argument('--build', help='build folder (default: the install location of build_location.txt, else <repo>/build; <repo>/build-linux for --target linux, <repo>/build-macos for --target macos)')
-    ap.add_argument('--jobs', type=int, help='parallel compiler jobs (default min(24, cpus); off Windows also at most one per 4 GB of RAM)')
+    ap.add_argument('--jobs', type=int, help='parallel compiler jobs (default min(24, cpus); on Windows also at most one per 4 GB of RAM; on Linux / macOS the '
+                                                  'compilers share RAM - 4 GB by reservations instead)')
     ap.add_argument('--llvm', help='LLVM 9.0.0 folder (bin\\clang.exe)')
     ap.add_argument('--sdl3', help='SDL3 development package (VC) folder: include\\, lib\\x64\\')
     ap.add_argument('--vulkan-headers', help='Khronos Vulkan-Headers folder (include\\vulkan\\)')

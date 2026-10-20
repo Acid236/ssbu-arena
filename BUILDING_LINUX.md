@@ -40,10 +40,13 @@ Tested on one PC: CachyOS (Arch-based, kernel 7.2), 24 threads, 31 GB RAM, NVIDI
   ```
   From `.nsp` files and your own keys: `deps/venv/bin/python tools/extract/romfs_extract.py <base.nsp> <update.nsp> <out>`
   and `tools/extract/nca_exefs.py`; they read the keys from `~/.switch/prod.keys`.
-- **RAM:** 16 GB or more. `setup.py` runs one compiler per 4 GB of RAM by default (`--jobs N` overrides it), and each
-  compiler may use (RAM - 4 GB) / jobs. A few generated files need far more than that at full optimisation (one passed
-  20 GB); over its share a file is compiled with less optimisation instead, and the build log lists those files.
-  Running out of memory would not slow the build down, it would get processes killed, possibly your desktop's.
+- **RAM:** 16 GB or more. `setup.py` runs one compiler per CPU thread by default (at most 24; `--jobs N` overrides it),
+  and the compilers share RAM - 4 GB: each one reserves what its file is expected to need before it starts (at least
+  1.5 GB; most files need well under 1 GB, a few need many GB) and is held to it. A file that needs more is compiled again
+  with twice as much, up to the whole share; a few generated files need more than that at full optimisation (one passed
+  20 GB) and are compiled with less optimisation instead, and the build log lists those files. Running out of memory
+  would not slow the build down, it would get processes killed, possibly your desktop's: that is what the sharing
+  prevents. (Before 2026-10-20 the rule was one compiler per 4 GB of RAM: 3 on a 16 GB Steam Deck with 8 threads.)
 - **Disk:** about 12 GB for `build-linux/`, plus about 4 GB of shader cache after the first play session, plus the dump
   itself (about 16 GB).
 - **GPU:** a Vulkan 1.3 driver. With `VK_EXT_graphics_pipeline_library` (current NVIDIA, Mesa RADV and ANV drivers have
@@ -68,6 +71,22 @@ Then, without root, into `deps/` (ignored by git):
 
 `--no-system` skips the package manager if you install the packages yourself. On another distribution the script lists
 what to install.
+
+**Steam Deck (SteamOS):** SteamOS is read-only and every update removes what pacman installed, so `install_deps.sh` stops
+there and shows how to build inside a [distrobox](https://distrobox.it) container instead (SteamOS 3.5 and newer
+include distrobox and podman), in Desktop Mode, from Konsole, with this folder in your home folder:
+
+```
+distrobox create --name ssbu --image docker.io/library/archlinux:latest
+distrobox enter ssbu
+scripts/linux/install_deps.sh            # inside the container; on a Deck it also installs vulkan-radeon and libpulse
+deps/venv/bin/python scripts/setup.py --target linux --dump <your dump folder>
+./play.sh                                # also from inside the container (distrobox enter ssbu)
+```
+
+`install_deps.sh --steamos-host` installs on SteamOS itself instead (it needs a sudo password,
+`sudo steamos-readonly disable` and the pacman keys, and the next SteamOS update removes the packages again). A Deck now runs 8 compilers instead of 3: the build should take
+roughly 2 to 2.5 hours instead of 4.5 (an estimate from the job counts, not measured on a Deck yet).
 
 The FFmpeg must be able to decode VP9 and Vorbis (the game's movies). Every distribution's normal FFmpeg can;
 `setup.py` checks it.
@@ -94,6 +113,9 @@ The build can be stopped at any time (Ctrl+C, or a crash). Run the same command 
 stopped; finished steps are skipped. Every invocation needs `--dump`. Other options: `--status`, `--redo <step>`,
 `--from <step>`, `--jobs N`, `--full-check` (the check step also runs the translator's long differential test), `--help`.
 Files that fail to compile (often for lack of memory) are compiled again with fewer jobs before the build stops.
+A file that runs into the 180 s time limit is compiled again with more of its longest functions unoptimised; a retry
+that would leave exactly the same functions unoptimised as the attempt that just failed is skipped (it would fail the
+same way), so the few hopeless files reach their unoptimised fallback after one or two 180 s attempts, not three.
 
 When something is missing, step `deps` stops at once with what to install. It compiles and runs a small test program
 against every library, so a broken package shows there and not an hour later.

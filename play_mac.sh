@@ -34,4 +34,7 @@ if [ -z "${VK_DRIVER_FILES:-}" ] && [ -z "${VK_ICD_FILENAMES:-}" ]; then
     done
 fi
 
+# macOS gives a Terminal 256 open files by default; the game with its libraries, shader cache and Vulkan driver can need more
+ulimit -n 4096 2>/dev/null || true
+
 exec "$PY" "$REPO/scripts/run.py" --mac --play "$@"
