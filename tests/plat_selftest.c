@@ -25,7 +25,21 @@ static int fiber_steps;
 static void fiber_fn(LPVOID p) { for (;;) { fiber_steps += (int)(uintptr_t)p; SwitchToFiber(main_fiber); } }
 static BOOL CALLBACK once_fn(PINIT_ONCE o, PVOID p, PVOID *c) { (void)o; (void)c; (*(int *)p)++; return TRUE; }
 
+#ifdef __APPLE__
+#include <pthread/qos.h>
+static void sleep_overshoot(const char *what) {     /* macOS coalesces the timers of a process that is not interactive */
+    LARGE_INTEGER a, b, f; double worst = 0;
+    QueryPerformanceFrequency(&f);
+    for (int i = 0; i < 5; i++) { QueryPerformanceCounter(&a); Sleep(20); QueryPerformanceCounter(&b); double ms = (double)(b.QuadPart - a.QuadPart) * 1000.0 / (double)f.QuadPart; if (ms > worst) worst = ms; }
+    printf("     Sleep(20), worst of 5, %s: %.1f ms\n", what, worst);
+}
+#endif
 int main(void) {
+#ifdef __APPLE__
+    sleep_overshoot("default QoS");
+    pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+    sleep_overshoot("QOS_CLASS_USER_INTERACTIVE");
+#endif
     /* interlocked */
     volatile LONG v = 5; volatile LONG64 v64 = 1;
     CHECK(InterlockedIncrement(&v) == 6 && InterlockedExchangeAdd(&v, 4) == 6 && v == 10, "Interlocked add/inc");
