@@ -4,9 +4,9 @@ name: Linux runtime
 
 on:
   push:
-    paths: ['runtime/**', 'fighter_sdk/**', 'tests/plat_selftest.c', 'tools/lifter/build.py', 'tools/lifter/build_nro.py', 'scripts/macos/host_check.py', 'scripts/setup.py', '.github/workflows/linux-runtime.yml']
+    paths: ['runtime/**', 'fighter_sdk/**', 'tests/plat_selftest.c', 'tools/lifter/build.py', 'tools/lifter/build_nro.py', 'scripts/macos/**', 'tools/lifter/**', 'scripts/setup.py', '.github/workflows/linux-runtime.yml']
   pull_request:
-    paths: ['runtime/**', 'fighter_sdk/**', 'tests/plat_selftest.c', 'tools/lifter/build.py', 'tools/lifter/build_nro.py', 'scripts/macos/host_check.py', 'scripts/setup.py', '.github/workflows/linux-runtime.yml']
+    paths: ['runtime/**', 'fighter_sdk/**', 'tests/plat_selftest.c', 'tools/lifter/build.py', 'tools/lifter/build_nro.py', 'scripts/macos/**', 'tools/lifter/**', 'scripts/setup.py', '.github/workflows/linux-runtime.yml']
   workflow_dispatch:
 
 jobs:
@@ -32,7 +32,7 @@ jobs:
           cmake --build deps/SDL/build > /dev/null
           sudo cmake --install deps/SDL/build > /dev/null
           sudo ldconfig
-          python -m pip install --quiet Pillow
+          python -m pip install --quiet Pillow capstone unicorn
           git -c advice.detachedHead=false clone --quiet --depth 1 --branch v1.4.351 https://github.com/KhronosGroup/Vulkan-Headers.git deps/Vulkan-Headers
           git clone --quiet --depth 1 --filter=blob:none --sparse https://git.eden-emu.dev/eden-emu/eden.git deps/suyu
           git -C deps/suyu sparse-checkout set src/core/hle/service/mii
@@ -41,6 +41,11 @@ jobs:
 
       - name: Compile the host runtime (and a stand-in module .so)
         run: python scripts/macos/host_check.py --target linux --clang clang-19 --vulkan-headers deps/Vulkan-Headers --suyu deps/suyu
+
+      - name: Differential test of the lifted code on this host (no game data; -O0 and -O1)
+        run: |
+          python scripts/macos/difftest_synthetic.py --work build-linux/work --clang clang-19 --opt -O0
+          python scripts/macos/difftest_synthetic.py --work build-linux/work --clang clang-19 --opt -O1
 
       - name: Build and run the platform self-test
         working-directory: runtime
