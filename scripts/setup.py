@@ -982,6 +982,13 @@ def step_sdk(cx):
     say('  ' + (line or 'sdklift_gen.c written'))
 
 
+def inline_flag(cx):
+    """RECOMP_INLINE for the game's compile (tools/lifter/build_opt.py): the guest load / store / flag / NEON helpers inlined
+    into the lifted code, the main thread about 25-30 % faster; --no-inline turns it off. Objects compiled before keep
+    what they were compiled with until they are compiled again."""
+    return '0' if getattr(cx.a, 'no_inline', False) else '1'
+
+
 def build_env(cx):
     if cx.linux:
         return cx.env(RECOMP_GEN='gen_eh_o2', RECOMP_OBJ='obj_eh_o1', RECOMP_DLL=game_lib(cx), RECOMP_NRO_SUFFIX='_eh_o2', RECOMP_TARGET='linux')
@@ -989,6 +996,7 @@ def build_env(cx):
         return cx.env(RECOMP_GEN='gen_eh_o2', RECOMP_OBJ='obj_eh_o1', RECOMP_DLL=game_lib(cx), RECOMP_NRO_SUFFIX='_eh_o2', RECOMP_TARGET='macos')
     # FFMPEG_ROOT: build.py compiles the movie fallback (mf_ffmpeg.c) with the headers install.py put in deps\ffmpeg
     return cx.env(RECOMP_GEN='gen_eh_o2', RECOMP_OBJ='obj_eh_o1', RECOMP_DLL='ssbu_game_eh_o1.dll', RECOMP_NRO_SUFFIX='_eh_o2',
+                  RECOMP_INLINE=inline_flag(cx),
                   FFMPEG_ROOT=os.environ.get('FFMPEG_ROOT') or os.path.join(REPO, 'deps', 'ffmpeg'))
 
 
@@ -1015,6 +1023,7 @@ def step_compile(cx):
         cx.run('compile', [sys.executable, 'build_opt.py', 'main', str(cx.jobs)],
                env=cx.env(RECOMP_GEN='gen_eh_o2', RECOMP_OBJ='obj_r1', RECOMP_DLL='ssbu_game_r1.dll', RECOMP_NRO_SUFFIX='_eh_o2',
                           RECOMP_SHIM='game_shim_r1.c',     # exports the page maps r1_m1 / r1_m2 the marked code writes
+                          RECOMP_INLINE=inline_flag(cx),
                           RECOMP_CFLAGS='-DR1_MARK', RECOMP_DATA_CFLAGS='-DR1_MARK'))
         say('  ssbu_game_r1.dll %.0f MB' % (os.path.getsize(os.path.join(cx.work, 'ssbu_game_r1.dll')) / 1048576.0))
 
@@ -1254,6 +1263,8 @@ def main():
     ap.add_argument('--rollback', action='store_true', help='also build the rollback pair: the game DLL with dirty-page marks '
                     '(ssbu_game_r1.dll, -DR1_MARK; about as long as the first compile) and ssbu_native_rb.exe beside it. '
                     'Online rollback (F1 > Experimental > Rollback netcode) needs them')
+    ap.add_argument('--no-inline', action='store_true', help='compile the game without the inlined helpers (RECOMP_INLINE): a '
+                    'shorter compile on a weak PC, a slower game (the main thread about 25-30 %% slower)')
     ap.add_argument('--full-check', action='store_true', help='the check step also runs the lifter\'s differential test against '
                     'Unicorn (minutes on a fast PC, up to an hour on a weak one; it tests the translator, the same everywhere)')
     ap.add_argument('--only', help='run only this step')

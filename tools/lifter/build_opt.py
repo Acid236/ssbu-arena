@@ -24,6 +24,7 @@ Flags: -fno-strict-aliasing as in the -O0 build; -ffp-contract=off (no fused mul
 never formed one either; fused operations the game asks for are explicit fma() calls); no fast-math; the default x86-64
 target (SSE2), so no FMA / AVX instructions are selected.
 """
+import collections
 import hashlib
 import json
 import os
@@ -46,6 +47,13 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 CLANG = os.environ.get('RECOMP_CLANG', r'C:\llvm-9.0.0\bin\clang.exe')
 OPT = os.environ.get('RECOMP_OPT', '-O1')
 EXTRA = ['-ffp-contract=off'] + os.environ.get('RECOMP_CFLAGS', '').split()
+# RECOMP_INLINE=1: the helpers of runtime.h / neon.h / fpexact.h (every guest load / store, flag, NEON op) inlined into the
+# lifted code. clang 9 at -O1 runs only the always-inline inliner, so without this each helper is a real call: measured
+# 2026-10-13 (private round 15): main thread -25-30 %, audio update 9-17 -> 2-4 ms, per-frame hash identical. Same
+# sources, same floating-point flags; a file whose inlined compile fails is compiled again without it (compile_file).
+INLINE_FLAG = '-Dinline=__inline__ __attribute__((always_inline))'
+if os.environ.get('RECOMP_INLINE', '0') not in ('', '0'):
+    EXTRA.append(INLINE_FLAG)
 OPTNONE_LINES = int(os.environ.get('RECOMP_OPTNONE_LINES', '20000'))
 TIME_LIMIT = float(os.environ.get('RECOMP_TIME_LIMIT', '180'))
 # Linux build: address-space limit per compiler, bytes (0: none). Set by limit_memory() from the job count.
@@ -156,13 +164,14 @@ def ladder_save(objdir, name, key, step):
             json.dump(d, f, indent=0, sort_keys=True)
 
 
-def compile_file(src, obj, base_flags, time_limit=None):
+def compile_file(src, obj, base_flags, time_limit=None, extra=None):
     """Compile with the fallback ladder. Returns (exit code, output, seconds, description of the fallback or '')."""
     time_limit = time_limit or TIME_LIMIT
+    extra = EXTRA if extra is None else extra
     total = 0.0
     objdir, name = os.path.dirname(obj), os.path.basename(obj)
     with open(src, 'rb') as f:
-        key = hashlib.sha1(f.read() + repr((OPT, EXTRA, base_flags, OPTNONE_LINES, time_limit) + ((MEM_LIMIT,) if MEM_LIMIT else ())).encode()).hexdigest()
+        key = hashlib.sha1(f.read() + repr((OPT, extra, base_flags, OPTNONE_LINES, time_limit) + ((MEM_LIMIT,) if MEM_LIMIT else ())).encode()).hexdigest()
     known = ladder(objdir).get(name)
     first = known[1] if known and known[0] == key else 0
     for step, limit in enumerate((OPTNONE_LINES, OPTNONE_LINES // 4, OPTNONE_LINES // 16)):
@@ -171,7 +180,7 @@ def compile_file(src, obj, base_flags, time_limit=None):
         hdr, count, lines = optnone_header(src, obj, limit)
         if step and not count:
             continue
-        cmd = [CLANG, '-c', OPT] + EXTRA + base_flags + (['-include', hdr] if hdr else []) + [src, '-o', obj]
+        cmd = [CLANG, '-c', OPT] + extra + base_flags + (['-include', hdr] if hdr else []) + [src, '-o', obj]
         code, out, secs = run_limited(cmd, time_limit)
         total += secs
         if code is not None:
@@ -181,12 +190,31 @@ def compile_file(src, obj, base_flags, time_limit=None):
             if code == 0:
                 ladder_save(objdir, name, key, step)
             return code, out, total, note + (' (step known from _ladder.json)' if first else '')
-    cmd = [CLANG, '-c', '-O0'] + EXTRA + base_flags + [src, '-o', obj]
+    cmd = [CLANG, '-c', '-O0'] + extra + base_flags + [src, '-o', obj]
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode == 0:
         ladder_save(objdir, name, key, 3)
     return r.returncode, (r.stdout + r.stderr)[-2000:], total, 'WHOLE FILE at -O0 (time limit %.0fs%s exceeded three times)' % (
         time_limit, ' or memory limit %.1f GB' % (MEM_LIMIT / 2.0 ** 30) if MEM_LIMIT else '')
+
+
+_tries = collections.Counter()
+_tries_lock = threading.Lock()
+_jobs = [0]
+
+
+def compile_file_inline(src, obj, base_flags, time_limit=None):
+    """compile_file; with RECOMP_INLINE a file that fails again (build.py compiles the failures again with fewer jobs: out
+    of memory is the usual cause) is compiled once more WITHOUT the inlined helpers, so a file too heavy to inline gets its
+    normal object instead of stopping the build. With one job there is no second round: the fallback comes at once."""
+    with _tries_lock:
+        _tries[obj] += 1
+        n = _tries[obj]
+    code, out, secs, note = compile_file(src, obj, base_flags, time_limit)
+    if code and INLINE_FLAG in EXTRA and (n >= 2 or _jobs[0] <= 1):
+        code2, out2, secs2, note2 = compile_file(src, obj, base_flags, time_limit, [a for a in EXTRA if a != INLINE_FLAG])
+        return code2, out2, secs + secs2, ('helpers not inlined (the inlined compile failed)' + ('; ' + note2 if note2 else ''))
+    return code, out, secs, note
 
 
 _report = []
@@ -205,7 +233,7 @@ def report(objdir):
 def compile_one_main(name):
     src = os.path.join(build.GEN, name)
     obj = os.path.join(build.OBJ, name[:-2] + '.obj')
-    code, out, secs, note = compile_file(src, obj, ['-w', '-fno-strict-aliasing', '-I', HERE, '-I', build.GEN] + build.NOCRT_FLAGS + build.PLAT_FLAGS)
+    code, out, secs, note = compile_file_inline(src, obj, ['-w', '-fno-strict-aliasing', '-I', HERE, '-I', build.GEN] + build.NOCRT_FLAGS + build.PLAT_FLAGS)
     if note or secs > 60:
         line = '%-12s %6.0fs  %s' % (name, secs, note)
         _report.append(line)
@@ -215,6 +243,7 @@ def compile_one_main(name):
 
 def cmd_main(jobs):
     build.compile_one = compile_one_main
+    _jobs[0] = jobs
     limit_memory(jobs)
     t0 = time.time()
     rc = build.cmd_compile(jobs, False)
