@@ -691,9 +691,8 @@ def deps_mac(cx):
         raise Fail('Homebrew not found (https://brew.sh)' + MAC_HINT)
     cx.tools['brew_prefix'] = prefix
     clang = os.path.join(a.llvm, 'bin', 'clang') if a.llvm else None
-    if not clang:
-        r = subprocess.run(['xcrun', '--find', 'clang'], capture_output=True, text=True) if shutil.which('xcrun') else None
-        clang = r.stdout.strip() if r is not None and r.returncode == 0 and r.stdout.strip() else shutil.which('clang')
+    if not clang:          # /usr/bin/clang: Apple's wrapper, which finds the macOS SDK (the toolchain's own clang does not)
+        clang = '/usr/bin/clang' if os.path.exists('/usr/bin/clang') else shutil.which('clang')
     if not clang or not os.path.exists(clang):
         raise Fail('clang not found (install the Xcode Command Line Tools: xcode-select --install; or --llvm <folder with bin/clang>)' + MAC_HINT)
     ver = subprocess.run([clang, '--version'], capture_output=True, text=True).stdout.splitlines()[0]

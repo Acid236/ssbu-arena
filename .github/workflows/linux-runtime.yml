@@ -27,7 +27,7 @@ jobs:
           sudo apt-get install -y -qq clang-19 lld-19 cmake ninja-build pkg-config libfreetype-dev libssl-dev libavformat-dev libavcodec-dev \
             libswscale-dev libswresample-dev libavutil-dev glslang-dev libvulkan-dev libgl-dev libopus0 \
             libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev libwayland-dev libxkbcommon-dev libpulse-dev libasound2-dev libdrm-dev libgbm-dev
-          git -c advice.detachedHead=false clone --quiet --depth 1 --branch release-3.2.24 https://github.com/libsdl-org/SDL.git deps/SDL
+          git -c advice.detachedHead=false clone --quiet --depth 1 --branch release-3.4.14 https://github.com/libsdl-org/SDL.git deps/SDL
           cmake -S deps/SDL -B deps/SDL/build -G Ninja -DCMAKE_BUILD_TYPE=Release -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF > /dev/null
           cmake --build deps/SDL/build > /dev/null
           sudo cmake --install deps/SDL/build > /dev/null
