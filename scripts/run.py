@@ -43,6 +43,17 @@ def main():
         if not (os.path.isfile(os.path.join(a.build, 'work', 'ssbu_native.exe')) and os.path.isfile(os.path.join(a.build, 'state.json'))):
             print('The game is not built yet (looked in %s): double-click "Install SSBU.bat" first.' % a.build)
             return 1
+        if not a.log:                             # the game's output to a file, not the console: a console that keeps
+            logs = os.path.join(a.build, 'logs')  # scrolling costs frames (testers, 2026-10-20); F1 > Log shows the file
+            os.makedirs(logs, exist_ok=True)
+            a.log = os.path.join(logs, time.strftime('game_%Y%m%d_%H%M%S.log'))
+            old = sorted(n for n in os.listdir(logs) if n.startswith('game_') and n.endswith('.log'))
+            for n in old[:-9]:                    # keep the last 10 game logs
+                try:
+                    os.remove(os.path.join(logs, n))
+                except OSError:
+                    pass
+            print('Playing. The game log goes to %s (F1 > Log shows it). This window can stay minimised.' % a.log)
     if not a.userdata:
         ap.error('--userdata is required (or --play)')
     state_file = os.path.join(a.build, 'state.json')
