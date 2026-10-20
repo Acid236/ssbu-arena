@@ -138,7 +138,8 @@ static void configure(void) {
         if (ini_value("online_server", v, sizeof v)) { if (is_off(v)) return; }
         else {
             /* scripted test runs (key script, debug match, deterministic mode) stay offline unless they ask */
-            if (getenv("SSBU_SEQ") || getenv("SSBU_DEBUG_MATCH") || getenv("SSBU_DETERMINISTIC")) return;
+            if (getenv("SSBU_SEQ") || getenv("SSBU_DEBUG_MATCH") || getenv("SSBU_DETERMINISTIC") || getenv("SSBU_SDK_SELFTEST") ||
+                getenv("SSBU_PAD_SELFTEST") || getenv("SSBU_CXXRT_SELFTEST")) return;     /* (self-tests: their socket checks hung on the lobby) */
             snprintf(g_server, sizeof g_server, "%s", NET_PUBLIC_LOBBY);
         }
         snprintf(mode, sizeof mode, "lobby");

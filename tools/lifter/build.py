@@ -275,8 +275,11 @@ def cmd_link(host_only=False):
     objs, jobs = [], []
     if not HAVE_IMGUI:
         print('settings menu: Dear ImGui not found in %s (IMGUI_ROOT): built without it (menu_stub.c; F1 does nothing)' % IMGUI)
+    # RECOMP_R1=1: the rollback exe (ssbu_native_rb.exe, scripts/setup.py --rollback): its C++ runtime marks the pages it
+    # writes (r1src/nncxxrt.c, R1_MARK), like the game DLL built with -DR1_MARK (ssbu_game_r1.dll) it imports
+    r1 = os.environ.get('RECOMP_R1') == '1'
     for n in HOST_SOURCES + ['gamedll.c'] + ([] if HAVE_IMGUI else ['menu_stub.c']):
-        src, obj = os.path.join(HERE, n), os.path.join(objdir, n[:-2] + '.obj')
+        src, obj = os.path.join(HERE, 'r1src' if r1 and n == 'nncxxrt.c' else '', n), os.path.join(objdir, n[:-2] + '.obj')
         objs.append(obj)
         if not os.path.exists(obj) or os.path.getmtime(obj) < max(os.path.getmtime(src), newest_dep, newest_vk if n == 'nvn_vk.c' else 0,
                                                                        os.path.getmtime(os.path.join(HERE, 'plat_mf.c')) if n == 'mf_ffmpeg.c' else 0):   # mf_ffmpeg.c includes plat_mf.c

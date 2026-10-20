@@ -844,6 +844,14 @@ def step_compile(cx):
     cx.run('compile', [sys.executable, 'build_opt.py', 'main', str(cx.jobs)], env=build_env(cx))
     dll = os.path.join(cx.work, game_lib(cx))
     say('  %s %.0f MB; objects %.0f MB' % (game_lib(cx), os.path.getsize(dll) / 1048576.0, disk_mb(os.path.join(cx.work, 'obj_eh_o1'))))
+    if getattr(cx.a, 'rollback', False) and not cx.linux:
+        # the rollback game DLL: the same generated code, every guest store marking its page (runtime.h R1M), so the
+        # rollback ring saves exactly the pages a frame wrote (runtime/r1_ring.c). Its own object folder and DLL name.
+        say('  rollback: the game DLL with dirty-page marks (ssbu_game_r1.dll; about as long as the compile above) ...')
+        cx.run('compile', [sys.executable, 'build_opt.py', 'main', str(cx.jobs)],
+               env=cx.env(RECOMP_GEN='gen_eh_o2', RECOMP_OBJ='obj_r1', RECOMP_DLL='ssbu_game_r1.dll', RECOMP_NRO_SUFFIX='_eh_o2',
+                          RECOMP_CFLAGS='-DR1_MARK', RECOMP_DATA_CFLAGS='-DR1_MARK'))
+        say('  ssbu_game_r1.dll %.0f MB' % (os.path.getsize(os.path.join(cx.work, 'ssbu_game_r1.dll')) / 1048576.0))
 
 
 def step_nro(cx):
@@ -908,7 +916,8 @@ def link_linux(cx):
 
 def game_env(cx, **extra):
     d = cx.state['dump']
-    e = cx.env(SSBU_ROMFS=d['romfs'], **extra)
+    e = cx.env(SSBU_ROMFS=d['romfs'], SSBU_ONLINE='off', **extra)      # self-tests offline: online play is on by default
+                                                                         # and replaces the sockets the SDK self-test checks
     if os.path.isdir(os.path.join(cx.build, 'sysdata', 'fonts')):
         e['SSBU_FONTS'] = os.path.join(cx.build, 'sysdata', 'fonts')
     if os.path.isdir(os.path.join(cx.build, 'sysdata', 'zoneinfo')):
@@ -1004,6 +1013,9 @@ def main():
     ap.add_argument('--nocrt', action='store_true', help='build the game libraries with LLVM alone (the exe is still built here)')
     ap.add_argument('--redo', help='repeat this step')
     ap.add_argument('--from', dest='from_step', help='repeat this step and all after it')
+    ap.add_argument('--rollback', action='store_true', help='also build the rollback pair: the game DLL with dirty-page marks '
+                    '(ssbu_game_r1.dll, -DR1_MARK; about as long as the first compile) and ssbu_native_rb.exe beside it. '
+                    'Online rollback (F1 > Experimental > Rollback netcode) needs them')
     ap.add_argument('--full-check', action='store_true', help='the check step also runs the lifter\'s differential test against '
                     'Unicorn (minutes on a fast PC, up to an hour on a weak one; it tests the translator, the same everywhere)')
     ap.add_argument('--only', help='run only this step')
