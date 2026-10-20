@@ -4,9 +4,9 @@ name: macOS runtime
 
 on:
   push:
-    paths: ['runtime/**', 'tools/lifter/build.py', 'scripts/macos/**', 'scripts/setup.py', '.github/workflows/macos-runtime.yml']
+    paths: ['runtime/**', 'tests/plat_selftest.c', 'tools/lifter/build.py', 'scripts/macos/**', 'scripts/setup.py', '.github/workflows/macos-runtime.yml']
   pull_request:
-    paths: ['runtime/**', 'tools/lifter/build.py', 'scripts/macos/**', 'scripts/setup.py', '.github/workflows/macos-runtime.yml']
+    paths: ['runtime/**', 'tests/plat_selftest.c', 'tools/lifter/build.py', 'scripts/macos/**', 'scripts/setup.py', '.github/workflows/macos-runtime.yml']
   workflow_dispatch:
 
 jobs:
@@ -33,3 +33,20 @@ jobs:
         run: |
           export PKG_CONFIG_PATH="$(brew --prefix openssl@3)/lib/pkgconfig:${PKG_CONFIG_PATH}"
           python scripts/macos/host_check.py --vulkan-headers deps/Vulkan-Headers --suyu deps/suyu
+
+  # tests/plat_selftest.c: the Win32 subset of plat_posix.c by itself (threads, events, condition variables, fibers,
+  # virtual memory, files, libraries). Runs on the runner: no window, no game.
+  plat-selftest:
+    runs-on: macos-14
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Dependencies (Homebrew)
+        run: brew install --quiet pkgconf sdl3 openssl@3
+      - name: Build and run the platform self-test
+        working-directory: runtime
+        run: |
+          export PKG_CONFIG_PATH="$(brew --prefix openssl@3)/lib/pkgconfig:${PKG_CONFIG_PATH}"
+          clang -O1 -w -mmacosx-version-min=14.4 -include plat/plat_pre.h -I plat $(pkg-config --cflags sdl3 openssl) \
+            ../tests/plat_selftest.c plat_posix.c -o plat_selftest $(pkg-config --libs sdl3 openssl)
+          ./plat_selftest
