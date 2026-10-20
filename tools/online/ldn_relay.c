@@ -109,7 +109,7 @@ static Conn *g_conns[MAX_CONNS]; static int g_nconns;
 static Conn *g_dead[MAX_CONNS + 1]; static int g_ndead;
 static Conn *g_tok[TOK_N];
 static Room *g_rooms[ROOM_N]; static int g_nrooms, g_nmembers;
-static unsigned long long st_udp_in, st_udp_out, st_ldn, st_dropped;
+static unsigned long long st_udp_in, st_udp_out, st_ldn, st_dropped, st_bytes_in, st_bytes_out;
 static int TAG_TCP, TAG_UDP;
 static int g_per_ip = MAX_PER_IP;                /* their addresses tag the two listening sockets in epoll */
 
@@ -405,18 +405,18 @@ static void datagram(uint8_t *d, size_t n, const struct sockaddr_in *from, doubl
     if (kind == 1) { udp_queue(&REGOK, 1, from); return; }
     if (kind == 4) { if (n == 13) { d[4] = 6; udp_queue(d + 4, 9, from); } return; }    /* ping: echo the client's 8 bytes */
     if (kind != 2 || n < 13 || n - 13 > MAX_DATAGRAM) { st_dropped++; return; }
-    st_udp_in++;
+    st_udp_in++; st_bytes_in += n;
     uint32_t dst = rd32(d + 5); uint16_t dport = rd16(d + 9), sport = rd16(d + 11);
     wr32(d + 1, m->vip); wr16(d + 5, sport); wr32(d + 7, dst); wr16(d + 11, dport);      /* the server header, in place */
     Room *room = m->room;
     if ((dst & 0xFF) == 0xFF) {
         for (int i = 1; i < 255; i++) {
             Conn *t = room->slot[i];
-            if (t && t != m && t->has_udp && !t->dead) { udp_queue(d, n, &t->udp); st_udp_out++; }
+            if (t && t != m && t->has_udp && !t->dead) { udp_queue(d, n, &t->udp); st_udp_out++; st_bytes_out += n; }
         }
     } else if ((dst & MASK) == NET && dst != m->vip) {
         Conn *t = room->slot[dst & 255];
-        if (t && t->has_udp && !t->dead) { udp_queue(d, n, &t->udp); st_udp_out++; }
+        if (t && t->has_udp && !t->dead) { udp_queue(d, n, &t->udp); st_udp_out++; st_bytes_out += n; }
     }
 }
 
@@ -495,7 +495,8 @@ int main(int argc, char **argv) {
         if (now - last_report >= 60) {
             last_report = now;
             if (g_nmembers)
-                say("rooms %d, members %d, udp in %llu out %llu, ldn %llu, dropped %llu", g_nrooms, g_nmembers, st_udp_in, st_udp_out, st_ldn, st_dropped);
+                say("rooms %d, members %d, udp in %llu out %llu (%llu / %llu bytes), ldn %llu, dropped %llu", g_nrooms, g_nmembers, st_udp_in, st_udp_out,
+                    st_bytes_in, st_bytes_out, st_ldn, st_dropped);
         }
     }
 }
