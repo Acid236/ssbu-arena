@@ -206,6 +206,18 @@ def update_git(a):
         die('this checkout and GitHub\'s %s have diverged (commits on both sides): nothing changed. Merge or rebase with git yourself.' % branch)
     names = [l for l in git('diff', '--name-only', head, target).stdout.splitlines() if l]
     clash = sorted(set(names) & set(dirty))
+    # a "change" that is only a file copied from a newer version of this repository (a fix handed out by hand) is not the
+    # user's own work: its content equals the file in one of GitHub's commits, so it is put back and the update goes on
+    published = []
+    for f in clash:
+        local = git('hash-object', '--', f).stdout.strip()
+        commits = git('log', '--format=%H', '-n', '50', target, '--', f).stdout.split()
+        if local and any(git('rev-parse', '%s:%s' % (c, f)).stdout.strip() == local for c in commits):
+            published.append(f)
+    if published:
+        git('checkout', '--', *published)
+        say('these files held a version GitHub already has (no change of yours): put back before the update: ' + ', '.join(published))
+        clash = [f for f in clash if f not in published]
     if clash:
         die('refused: you have uncommitted changes in files the update changes, they would be overwritten:\n    %s\n'
             'Commit or stash them (git stash), run the update, then git stash pop.' % '\n    '.join(clash))
