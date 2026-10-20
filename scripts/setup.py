@@ -1014,6 +1014,7 @@ def step_compile(cx):
         say('  rollback: the game DLL with dirty-page marks (ssbu_game_r1.dll; about as long as the compile above) ...')
         cx.run('compile', [sys.executable, 'build_opt.py', 'main', str(cx.jobs)],
                env=cx.env(RECOMP_GEN='gen_eh_o2', RECOMP_OBJ='obj_r1', RECOMP_DLL='ssbu_game_r1.dll', RECOMP_NRO_SUFFIX='_eh_o2',
+                          RECOMP_SHIM='game_shim_r1.c',     # exports the page maps r1_m1 / r1_m2 the marked code writes
                           RECOMP_CFLAGS='-DR1_MARK', RECOMP_DATA_CFLAGS='-DR1_MARK'))
         say('  ssbu_game_r1.dll %.0f MB' % (os.path.getsize(os.path.join(cx.work, 'ssbu_game_r1.dll')) / 1048576.0))
 
