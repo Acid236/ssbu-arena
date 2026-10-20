@@ -1,0 +1,35 @@
+# macOS port (plan/phases/MAC1_port.md): compile the host runtime for macOS on Apple Silicon and report what does not build.
+# Only the runtime's own sources: no dump, no game files, nothing derived from the game (none is ever on a runner).
+name: macOS runtime
+
+on:
+  push:
+    paths: ['runtime/**', 'tools/lifter/build.py', 'scripts/macos/**', 'scripts/setup.py', '.github/workflows/macos-runtime.yml']
+  pull_request:
+    paths: ['runtime/**', 'tools/lifter/build.py', 'scripts/macos/**', 'scripts/setup.py', '.github/workflows/macos-runtime.yml']
+  workflow_dispatch:
+
+jobs:
+  host:
+    runs-on: macos-14            # Apple Silicon (arm64)
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Dependencies (Homebrew, Python, Khronos headers, Mii reference sources)
+        run: |
+          brew install --quiet pkgconf sdl3 freetype openssl@3 ffmpeg
+          python -m pip install --quiet Pillow
+          git -c advice.detachedHead=false clone --quiet --depth 1 --branch v1.4.351 https://github.com/KhronosGroup/Vulkan-Headers.git deps/Vulkan-Headers
+          git clone --quiet --depth 1 --filter=blob:none --sparse https://git.eden-emu.dev/eden-emu/eden.git deps/suyu
+          git -C deps/suyu sparse-checkout set src/core/hle/service/mii
+          clang --version
+
+      - name: Compile the host runtime
+        run: |
+          export PKG_CONFIG_PATH="$(brew --prefix openssl@3)/lib/pkgconfig:${PKG_CONFIG_PATH}"
+          python scripts/macos/host_check.py --vulkan-headers deps/Vulkan-Headers --suyu deps/suyu
