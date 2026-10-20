@@ -20,6 +20,7 @@ void os_init_event(uint64_t key, int autoclear);      /* os_threads.c */
 void os_signal_event(uint64_t key);
 
 static HWND g_hwnd;
+static HICON g_icon_small;                /* the title bar's small icon (opensmash.ico), set after the window is made */
 static volatile LONG g_ready;
 static volatile LONG64 g_frames;
 volatile LONG64 g_prof15_frame;                       /* presented frames, read by prof15.c (SSBU_PROF15, test only; included by boot.c) */
@@ -392,6 +393,15 @@ static DWORD WINAPI window_thread(LPVOID arg) {
     wc.lpszClassName = "ssbu_native_window";
     wc.style = CS_OWNDC;
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+    {   /* the project's logo (media/opensmash.ico, copied beside the exe by scripts/setup.py): the window's and taskbar's icon */
+        char ico[MAX_PATH]; DWORD n = GetModuleFileNameA(NULL, ico, MAX_PATH);
+        while (n && ico[n - 1] != '\\' && ico[n - 1] != '/') n--;
+        if (n && n + 16 < MAX_PATH) {
+            strcpy(ico + n, "opensmash.ico");
+            wc.hIcon = (HICON)LoadImageA(NULL, ico, IMAGE_ICON, 0, 0, LR_LOADFROMFILE | LR_DEFAULTSIZE);
+            g_icon_small = (HICON)LoadImageA(NULL, ico, IMAGE_ICON, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_LOADFROMFILE);
+        }
+    }
     RegisterClassA(&wc);
     /* Track O: window mode and size from config\graphics.ini (gfx_options.c). borderless / fullscreen: a frameless window
      * over the primary monitor (fullscreen: also topmost). */
@@ -419,6 +429,7 @@ static DWORD WINAPI window_thread(LPVOID arg) {
     if (visible)
         g_hwnd = CreateWindowExA(go->window_mode == 2 ? WS_EX_TOPMOST : 0, wc.lpszClassName, g_title, style | WS_VISIBLE, px, py, r.right - r.left,
                                  r.bottom - r.top, NULL, NULL, wc.hInstance, NULL);
+        if (g_hwnd && g_icon_small) SendMessageA(g_hwnd, WM_SETICON, ICON_SMALL, (LPARAM)g_icon_small);
     else {
         g_hwnd = CreateWindowExA(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, wc.lpszClassName, g_title, style, -32000, -32000,
                                  r.right - r.left, r.bottom - r.top, NULL, NULL, wc.hInstance, NULL);

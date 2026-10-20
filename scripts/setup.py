@@ -1018,6 +1018,13 @@ def build_env(cx):
                   FFMPEG_ROOT=os.environ.get('FFMPEG_ROOT') or os.path.join(REPO, 'deps', 'ffmpeg'))
 
 
+def copy_logo(cx):
+    """media/opensmash.ico beside the exe: display.c loads it as the window's and taskbar's icon."""
+    src = os.path.join(REPO, 'media', 'opensmash.ico')
+    if os.path.isfile(src):
+        shutil.copy2(src, os.path.join(cx.work, 'opensmash.ico'))
+
+
 def copy_ffmpeg(cx):
     """The movie fallback's FFmpeg DLLs (deps\\ffmpeg\\bin, install.py) beside the exe, where mf_ffmpeg.c loads them from.
     Returns how many were copied (0: none there; the movies then play only where Windows' own codecs can)."""
@@ -1092,6 +1099,8 @@ def step_link(cx):
         if not opus:
             say('  WARNING: no libopus (neither in the runtime package nor in deps\\opus): music and the other Opus sounds will be silent')
         copy_ffmpeg(cx)
+    copy_logo(cx)
+        copy_logo(cx)
         return
     cx.run('link', [os.environ.get('COMSPEC', 'cmd.exe'), '/c', os.path.join(cx.work, 'build_glslang.bat')], env=cx.env())
     cx.run('link', [sys.executable, 'build.py', 'link'], env=cx.env(**{k: v for k, v in build_env(cx).items() if k != 'RECOMP_NRO_SUFFIX'}, RECOMP_EXE=EXE))

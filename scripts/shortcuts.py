@@ -52,11 +52,12 @@ def plan(repo=REPO):
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import build_location
     exe = os.path.join(build_location.get(repo), 'work', 'ssbu_native.exe')
-    icon = exe + ',0' if os.path.isfile(exe) else ''
+    logo = os.path.join(repo, 'media', 'opensmash.ico')           # the project's logo (media/emblem.svg)
+    icon = logo + ',0' if os.path.isfile(logo) else exe + ',0' if os.path.isfile(exe) else ''
     play = {'name': PLAY_NAME, 'target': os.path.join(repo, 'Play SSBU.bat'), 'cwd': repo,
             'desc': 'Super Smash Bros. Ultimate, native PC build', 'icon': icon}
     inst = {'name': INSTALL_NAME, 'target': os.path.join(repo, 'Install SSBU.bat'), 'cwd': repo,
-            'desc': 'Install, repair or update SSBU native', 'icon': ''}
+            'desc': 'Install, repair or update SSBU native', 'icon': logo + ',0' if os.path.isfile(logo) else ''}
     over = [d for d in (os.environ.get('SSBU_SHORTCUT_DIRS') or '').split(os.pathsep) if d]
     if over:
         return [dict(it, dir=d) for d in over for it in (play, inst)]
