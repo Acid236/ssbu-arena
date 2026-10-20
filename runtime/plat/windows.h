@@ -123,7 +123,11 @@ BOOL GetSystemTimes(FILETIME *idle, FILETIME *kernel, FILETIME *user);
 BOOL GetProcessTimes(HANDLE p, FILETIME *create, FILETIME *exit_, FILETIME *kernel, FILETIME *user);
 void Sleep(DWORD ms);
 #define SwitchToThread() (sched_yield(), 1)
+#ifdef __aarch64__                                      /* macOS on Apple Silicon */
+#define YieldProcessor() __builtin_arm_yield()
+#else
 #define YieldProcessor() __builtin_ia32_pause()
+#endif
 #define MemoryBarrier() __atomic_thread_fence(__ATOMIC_SEQ_CST)
 #define TIMERR_NOERROR 0
 #define timeBeginPeriod(ms) ((MMRESULT)TIMERR_NOERROR)
@@ -151,8 +155,13 @@ void Sleep(DWORD ms);
 #define InterlockedAnd(p, v) __atomic_fetch_and((p), (v), PLAT_SC)
 #define InterlockedAnd64 InterlockedAnd
 #define InterlockedXor(p, v) __atomic_fetch_xor((p), (v), PLAT_SC)
+#ifdef __APPLE__              /* Apple's clang has no __typeof_unqual__: a volatile local serves the exchange as well */
+#define PLAT_TYPEOF_UNQUAL __typeof__
+#else
+#define PLAT_TYPEOF_UNQUAL __typeof_unqual__
+#endif
 #define InterlockedCompareExchange(p, x, c) \
-    ({ __typeof_unqual__(*(p)) plat_c_ = (c); __atomic_compare_exchange_n((p), &plat_c_, (x), 0, PLAT_SC, PLAT_SC); plat_c_; })
+    ({ PLAT_TYPEOF_UNQUAL(*(p)) plat_c_ = (c); __atomic_compare_exchange_n((p), &plat_c_, (x), 0, PLAT_SC, PLAT_SC); plat_c_; })
 #define InterlockedCompareExchange64 InterlockedCompareExchange
 #define InterlockedCompareExchangeAcquire InterlockedCompareExchange
 #define InterlockedCompareExchangeRelease InterlockedCompareExchange
@@ -561,6 +570,7 @@ HANDLE FindFirstFileW(LPCWSTR pattern, WIN32_FIND_DATAW *fd);
 BOOL FindNextFileW(HANDLE h, WIN32_FIND_DATAW *fd);
 /* stack walking for the diagnostics: PCs of the calling thread, innermost first (_Unwind_Backtrace) */
 int plat_backtrace(uintptr_t *pcs, int max);
+int plat_current_stack(uintptr_t *lo, uintptr_t *hi);    /* the stack this thread runs on now (a fiber's or the thread's) */
 
 /* OpenGL renderer: extension entry points from the current context (SDL) */
 void *wglGetProcAddress(const char *name);

@@ -27,6 +27,8 @@ TARGET_LINUX = os.environ.get('RECOMP_TARGET') == 'linux'
 TARGET_MACOS = os.environ.get('RECOMP_TARGET') == 'macos'
 TARGET_POSIX = TARGET_LINUX or TARGET_MACOS
 PLAT_FLAGS = ['-fPIC', '-fvisibility=hidden', '-include', os.path.join(HERE, 'plat', 'plat_pre.h')] if TARGET_POSIX else []
+MACOS_MIN = ['-mmacosx-version-min=14.4'] if TARGET_MACOS else []     # os_sync_wait_on_address (plat_posix.c): macOS 14.4+
+PLAT_FLAGS += MACOS_MIN
 CFLAGS = ['-c', '-O1', '-w', '-fno-strict-aliasing', '-I', HERE, '-I', GEN] + PLAT_FLAGS
 HOST_SOURCES = ['hostrt.c', 'boot.c', 'nnsdk.c', 'libcxx.c', 'os_threads.c', 'nvn_stub.c', 'nvn_gl.c', 'nvn_vk.c', 'mx_translate.c', 'tex_decode.c', 'nnfs.c', 'clib.c', 'nntime.c', 'nnhid.c', 'nnpad_sdl.c', 'nnpad_gca.c', 'display.c', 'nnpl.c', 'nnfontll.c', 'nnmovie.c', 'nnmisc.c', 'nnaudio.c', 'nnro.c', 'nnmovie_mf.c', 'nniostream.c', 'nncxxrt.c', 'nncxxlib.c', 'nnlibc2.c',
                 'sdklift_rt.c', 'nnsdk2.c', 'nnmii.c', 'nnapplet.c', 'nnalbum.c', 'nnnet.c', 'nnfsdir.c', 'nnunwind.c', 'nvn_sdk.c', 'nvn_c4.c', 'nvn_c5.c', 'hitch.c', 'gfx_options.c', 'debug_mode.c', 'r1_state.c',
@@ -281,7 +283,7 @@ def cmd_link(host_only=False):
         return 1
     if TARGET_MACOS:          # host alone (build.py host): the game library's names are left to be found at load
         game = ['-Wl,-undefined,dynamic_lookup'] if host_only else [os.path.join(HERE, GAME_DLL)]
-        r = subprocess.run([CLANG] + objs + game + ['-Wl,-rpath,@executable_path'] + LIBS + ['-o', out], capture_output=True, text=True, errors='replace')
+        r = subprocess.run([CLANG] + MACOS_MIN + objs + game + ['-Wl,-rpath,@executable_path'] + LIBS + ['-o', out], capture_output=True, text=True, errors='replace')
     elif TARGET_LINUX:
         r = subprocess.run([CLANG] + objs + ['-L', HERE, '-l:' + GAME_DLL, '-Wl,-rpath,$ORIGIN'] + LIBS + ['-o', out], capture_output=True, text=True, errors='replace')
     else:

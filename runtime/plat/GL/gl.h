@@ -15,7 +15,12 @@
 #define glCompressedTexImage3D plat_sys_glCompressedTexImage3D
 #define glSampleCoverage plat_sys_glSampleCoverage
 #define GL_GLEXT_LEGACY
+#ifdef __APPLE__                 /* macOS: the OpenGL framework's header (GL 2.1 legacy profile) */
+#define GL_SILENCE_DEPRECATION
+#include <OpenGL/gl.h>
+#else
 #include_next <GL/gl.h>
+#endif
 #undef glBlendColor
 #undef glCompressedTexSubImage2D
 #undef glCompressedTexSubImage3D
