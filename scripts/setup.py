@@ -1099,7 +1099,6 @@ def step_link(cx):
         if not opus:
             say('  WARNING: no libopus (neither in the runtime package nor in deps\\opus): music and the other Opus sounds will be silent')
         copy_ffmpeg(cx)
-    copy_logo(cx)
         copy_logo(cx)
         return
     cx.run('link', [os.environ.get('COMSPEC', 'cmd.exe'), '/c', os.path.join(cx.work, 'build_glslang.bat')], env=cx.env())
