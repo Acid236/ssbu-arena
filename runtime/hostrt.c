@@ -802,7 +802,7 @@ static LONG WINAPI crash_filter(EXCEPTION_POINTERS *ep) {
         Sleep((minidump_mode() & MD_FULL ? DUMP_WAIT_FULL_MS : DUMP_WAIT_MS) + 15000);
         TerminateProcess(GetCurrentProcess(), 4);
     }
-    {   /* module + offset as in the report file: stable across runs (ASLR moves the base), to look up in <module>.map */
+    {   /* module + offset as in the report file: stable across runs (ASLR moves the base), to look up in <module>.map (PR #49) */
         HMODULE mod = NULL;
         char mname[MAX_PATH] = "?";
         if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)er->ExceptionAddress, &mod) && mod)

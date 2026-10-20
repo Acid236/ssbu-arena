@@ -376,13 +376,16 @@ int r1_ring_load(long long frame, Ctx *c) {
 
 /* ---------------------------------------------------------------- the rollback simulation (SSBU_RB_SIM) */
 static DWORD g_rgp_main; static int g_rgs_prof; extern volatile int g_rgp_seg; static void rgs_samp_start(void);
+static int g_rgs_lastlite;                              /* R3 (SSBU_RB_NET_LASTLITE=1): the last re-run pass skips like the others (the real pass after it runs everything) */
 static int g_rgs_on = -1, g_rgs_n = 10, g_rgs_k = 7, g_rgs_warm = 30, g_rgs_skip, g_rgs_left, g_rgs_ki;
 static long long g_rgs_next, g_rgs_real_since, g_rgs_done, g_rgs_nocap, g_rgs_padmiss, g_rgs_ksum[RG_MAXSLOT];
 static PadRec g_rgs_pad[256]; static long long g_rgs_padf[256]; static int g_rgs_polls_cur; static long long g_rgs_multi;
 static double g_rgs_pass_t0, g_rgs_pass[2]; static long long g_rgs_npass[2];
 static double g_rgs_pl[2], g_rgs_plv[2][RG_NST / 4]; static long long g_rgs_npl[2]; static int g_rgs_nplv[2];      /* (round 3) re-run passes: 0 = skipped ones (not the last), 1 = the last one */
 static double g_rgs_pass_v[2][RG_NST / 4]; static int g_rgs_pass_nv[2];
+static int rbg_on(void); static void rbg_step(Ctx *c); static void rbg_pad(int id, uint64_t *b, int *lx, int *ly, int *rx, int *ry); static void rbg_report(void);   /* R3: rb_rollback.c */
 static int rgs_wanted(void) {
+    if (g_rgs_on < 0 && rbg_on()) { g_rgs_on = 1; g_rgs_n = 1 << 30; return 1; }      /* R3 online rollback (SSBU_RB_NET): the ring driven by the input queues */
     if (g_rgs_on < 0) { const char *e = getenv("SSBU_RB_SIM"); g_rgs_on = e && e[0] && e[0] != '0'; if (g_rgs_on) sscanf(e, "%d,%d,%d", &g_rgs_n, &g_rgs_k, &g_rgs_warm); if (g_rgs_k < 1) g_rgs_k = 1; if (g_rgs_k > RG_MAXSLOT - 1) g_rgs_k = RG_MAXSLOT - 1; if (g_rgs_n < 1) g_rgs_n = 1; }
     return g_rgs_on;
 }
@@ -398,7 +401,8 @@ static void rgs_step(Ctx *c) {
     }
     if (g_rgs_polls_cur > 1) g_rgs_multi++;
     g_rgs_polls_cur = 0;
-    if (g_ra_off || !ra_fight_on()) { if (g_ra_phase) g_ra_after_quiet = 1; g_ra_phase = 0; g_rgs_left = 0; g_rgs_pass_t0 = 0; return; }
+    if (g_ra_off || !ra_fight_on()) { if (g_ra_phase) g_ra_after_quiet = 1; g_ra_phase = 0; g_rgs_left = 0; g_rgs_pass_t0 = 0; if (rbg_on() && g_rg_ready) { static int said; if (!said++) rbg_report(); } return; }   /* (R3: the report once, at the end of the match) */
+    if (rbg_on()) { rbg_step(c); g_rgs_pass_t0 = now_ms(); g_ra_t_mark = g_rgs_pass_t0; return; }      /* R3: online rollback */
     long long i = g_rgs_next;                             /* the pass that ended here */
     if (g_rg_keep_on < 0) { const char *e = getenv("SSBU_RB_KEEP"); g_rg_keep_on = !e || atoi(e) != 0; }
     {   /* will a load follow this capture? then the threads stay held from the capture to the load (SSBU_RB_KEEP=0: not) */
@@ -446,7 +450,7 @@ static int g_rgs_lite; static uint64_t g_rgl_lo, g_rgl_hi;
 static void rgs_lite_hook(Ctx *c, void *user) {
     RgsLite *h = user; uint64_t lr = c->x[30];
     int inloop = lr >= g_rgl_lo && lr < g_rgl_hi, kd = g_ra_phase == 2;
-    if (inloop && (g_rgs_lite & h->grp) && g_rgs_on > 0 && g_ra_phase == 2 && g_rgs_left > 1) { h->sk++; c->x[0] = h->ret; return; }
+    if (inloop && (g_rgs_lite & h->grp) && g_rgs_on > 0 && g_ra_phase == 2 && (g_rgs_left > 1 || g_rgs_lastlite)) { h->sk++; c->x[0] = h->ret; return; }
     if (!g_rgs_prof || !inloop) { h->orig(c); return; }
     double t = now_ms(); h->orig(c); h->ms[kd] += now_ms() - t; h->n[kd]++;
 }
@@ -707,9 +711,10 @@ static void rgv_after(void) {                               /* right after the c
     if (d[0] || d[1] || d[2] || g_rgv_runs <= 5) LOG("r1: RB VERIFY rollback to %lld, back at %lld: %lld pages compared; differ: window 1 %lld, window 2 %lld, extras %lld;%s\n", g_rgv_from, g_rgv_target, pages, d[0], d[1], d[2], first);
     g_rgv_target = -1;
 }
-static int rgs_skip_now(void) { return g_rgs_on > 0 && g_ra_phase == 2 && g_rgs_left > 1 ? g_rgs_skip : 0; }
+static int rgs_skip_now(void) { return g_rgs_on > 0 && g_ra_phase == 2 && (g_rgs_left > 1 || g_rgs_lastlite) ? g_rgs_skip : 0; }
 static int rgs_poll(void) { g_rgs_polls_cur++; return g_ra_phase == 2; }    /* a re-run pass: the input sequence waits */
 static void rgs_pad(uint64_t *b, int *lx, int *ly, int *rx, int *ry) {
+    if (rbg_on()) { rbg_pad(0, b, lx, ly, rx, ry); return; }      /* R3 */
     long long p = g_rgs_next; int x = (int)(p & 255);
     if (g_ra_phase == 2) {
         if (g_rgs_padf[x] == p) { PadRec r = g_rgs_pad[x]; *b = r.b; *lx = r.lx; *ly = r.ly; *rx = r.rx; *ry = r.ry; } else g_rgs_padmiss++;
@@ -724,6 +729,7 @@ static double rg_pct(const double *v, int n, int p) {
 static double rg_mean(const double *v, int n) { double s = 0; for (int i = 0; i < n; i++) s += v[i]; return n ? s / n : 0; }
 static void rgs_report(void) {
     if (!g_rg_ready) return;
+    rbg_report();
     int n = g_rgc_n; double pg = 0, xp = 0; for (int i = 0; i < n; i++) { pg += (double)g_rgc_pg[i]; xp += (double)g_rgc_xp[i]; }
     LOG("r1: RING report: %lld captures (%lld skipped: a thread not at a wait), %lld loads, %u pool buffers made (%.1f MB), %u free; log overflows %lld\n",
         g_rg_caps, g_rg_cap_fail, g_rg_loads, g_rg_bump, g_rg_bump * (double)PG / 1048576.0, g_rg_nfree, g_rg_overflow);

@@ -505,6 +505,7 @@ static int player_connected(uint32_t id) {
     if (g_x_synth == 1 && id == 0) return x_present(g_source[id]);      /* synthetic pad run: player 1 exists only as that pad */
     if (g_x_synth == 2 && id == 1) return x_present(g_source[id]);      /* self-test: player 2 is the test pad, whatever the keyboard player is */
     if (id == 0 && scripted_run()) return 1;
+    { int r1_net_on(void); if (id == 1 && r1_net_on()) return 1; }      /* R3 online rollback (SSBU_RB_NET): port 2 is the other game's player */
     if ((int)id == g_keyboard_player) return 1;
     if (sdl_on()) return nnpad_present((int)id);
     return x_present(g_source[id]);
@@ -600,6 +601,7 @@ static void fill_pad(uint64_t out, uint32_t id, int style_is_fullkey) {
     }
     if (id == 0) record_or_replay(&buttons, &lx, &ly);
     if (id == 0 && r1_on()) r1_pad(&buttons, &lx, &ly, &rx, &ry);
+    if (id == 1 && r1_on()) { void r1_pad_id(int id, uint64_t *b, int *lx, int *ly, int *rx, int *ry); r1_pad_id(1, &buttons, &lx, &ly, &rx, &ry); }      /* R3: port 2 in an online rollback match */
     if (lx < -STICK_MAX / 2) buttons |= 1ull << BTN_SL_LEFT;
     if (lx > STICK_MAX / 2) buttons |= 1ull << BTN_SL_RIGHT;
     if (ly > STICK_MAX / 2) buttons |= 1ull << BTN_SL_UP;

@@ -1,0 +1,42 @@
+# N3 (online play), instance A (host): main menu -> Local Wireless -> save the Smash card (+) -> Create Room -> OK! (+)
+# -> OK on the stage vote note -> accept the joining player (OK) -> vote (random) -> pick a fighter -> ready
+# -> (both ready, waiting stage) L+R held 120 polls starts the match (10 polls is not enough)
+# (the waiting stage before the match: ~210 draws; L+R is pressed three times, in a match it only shields)
+# Screens are recognised by their draw counts: vote note 62, stage select ~310, join request over it ~350, fighter select ~600.
+@movie
+@draws:22-26/30
+@draws:36-44/30
+30:Z
+@draws:700-800/40
+60:W
+60:r/6
+60:r/6
+60:Z
+240:!
+240:Z
+240:!
+@ldn:created
+@draws:55-70/30
+60:Z
+@ldn:station-joined
+@draws:340-370/20
+60:Z
+@draws:295-325/30
+60:Z
+@draws:540-680/40
+30:u/30 20:l/18 30:Z
+90:Z
+90:Z
+@draws:195-230/60
+300:W
+60:QE/120
+600:W
+60:QE/120
+600:W
+60:QE/120
+600:W
+600:W
+600:W
+600:W
+600:W
+600:W

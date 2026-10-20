@@ -1226,6 +1226,8 @@ static void fh_hook(Ctx *c, void *user) {
             memset(&rec, 0, sizeof rec);
             rec.f = f; rec.k = g_fh_f[k].entry; rec.st = st; rec.mot = mot; rec.mf = mf; rec.x = x; rec.y = y; rec.dmg = dmg; rec.rh = rh;
             g_fh_run = fh_fnv(g_fh_run, &rec, sizeof rec);
+            { void rbn_hash_add(const void *p, size_t n); struct { int k, st; uint64_t mot; float mf, x, y, dmg; uint64_t rh; } r3 = {rec.k, rec.st, rec.mot, rec.mf, rec.x, rec.y, rec.dmg, rec.rh};
+              rbn_hash_add(&r3, sizeof r3); }      /* R3 (rb_net.c, SSBU_RB_NET only): the frame's checksum, without the per-process frame count */
             uint32_t bx, by, bm, bd; memcpy(&bx, &x, 4); memcpy(&by, &y, 4); memcpy(&bm, &mf, 4); memcpy(&bd, &dmg, 4);
             /* N12: SSBU_FIGHT_HASH_WORK=<int work id, hex or constant name>: that int variable of each fighter at the end of
              * the line ("w <value>"); not part of H (the hash stays comparable with runs without it) */

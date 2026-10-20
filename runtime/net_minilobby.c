@@ -479,6 +479,18 @@ static void ml_packet(const uint8_t *p, int len, const struct sockaddr_in *at, U
         ml_drop(c, "left");
     } else if (kind == ML_LIST && len >= 16 && cookie_ok) {
         ml_on_list(c, p + 12, now);
+    } else if (kind == 16 && len > 16 && len <= 1500 && cookie_ok) {      /* R3: a rollback message (net_relay.c T_RB) to the other players of its lobby code */
+        uint32_t dst = ml_get32(p + 12);
+        static uint8_t out[1600];   /* (only used under ml_lock) */
+        int on = len - 16 + 8, sent = 0;
+        memcpy(out, "SU\1\x10", 4); ml_put32(out + 4, c->ip); memcpy(out + 8, p + 16, len - 16);
+        for (int i = 0; i < ML_MAX_CLIENTS; i++) {
+            ml_client *o = &ml_clients[i];
+            if (!o->used || o == c || !ml_same_part(o, c) || (dst && o->ip != dst)) continue;
+            ml_send(out, on, &o->at); sent++;
+        }
+        ml_relayed += sent;
+        if (!sent) ml_dropped++;
     } else if (kind == ML_DATA && len >= 16) {
         ml_on_data(c, p, len, NULL, 0, now);
     } else if (kind == ML_BCAST && len >= 5) {

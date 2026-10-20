@@ -1479,6 +1479,7 @@ static void ra_report(void) {
     if (rgs_wanted()) rgs_report();
 }
 #include "r1_ring.c"                                  /* R2: the snapshot ring (rollback) */
+#include "rb_rollback.c"                              /* R3: online rollback on the ring (SSBU_RB_NET) */
 static void ra_init(void) {
     g_ra = 1;
     if (getenv("SSBU_RUNAHEAD_PARK_MS")) g_ra_park_ms = atof(getenv("SSBU_RUNAHEAD_PARK_MS"));
@@ -1494,7 +1495,13 @@ static void ra_init(void) {
     int l = hook_install_name("_ZN7lua2cpp16L2CFighterCommon31sys_line_system_control_fighterEv", ra_line, NULL, &g_orig_line);
     LOG("r1: RUN-AHEAD on (one frame): marks %s; save point: the return of the job-counter wait 710354c720 called at 710374c028 (preparation done, before the render kick): %s; frame line counter: %s; park %.1f ms\n",
         g_mark > 0 ? "yes" : "NO (run-ahead will stay off)", k ? "installed" : "FAILED", l ? "installed or waiting" : "FAILED", g_ra_park_ms);
-    if (rgs_wanted()) { if (getenv("SSBU_RB_SIM_SKIP")) g_rgs_skip = atoi(getenv("SSBU_RB_SIM_SKIP"));
+    if (rgs_wanted() && rbg_on()) {                       /* R3: re-run passes but the last skip the preparation kicks + lists (49) and the presentation callees (127), proven exact in R2 round 3 */
+        g_rgs_skip = getenv("SSBU_RB_SIM_SKIP") ? atoi(getenv("SSBU_RB_SIM_SKIP")) : 49;
+        if (!getenv("SSBU_RB_SIM_LITE")) _putenv("SSBU_RB_SIM_LITE=127");
+        rbn_init();
+        LOG("r1: RB NET on (R3 online rollback on the snapshot ring): kick skip mask in re-run passes %d\n", g_rgs_skip);
+        rgs_lite_init(); }
+    else if (rgs_wanted()) { if (getenv("SSBU_RB_SIM_SKIP")) g_rgs_skip = atoi(getenv("SSBU_RB_SIM_SKIP"));
         LOG("r1: RB SIM on (R2 snapshot ring): a rollback every %d real passes, k = 1..%d rotating, after %d captures; kick skip mask in re-run passes %d\n", g_rgs_n, g_rgs_k, g_rgs_warm, g_rgs_skip);
         rgs_lite_init(); }
     atexit(ra_report);
@@ -1572,6 +1579,9 @@ int r1_poll(int ticks) {
     return g_phase == 2 && g_ipad < g_npad;
 }
 /* nnhid.c, player 1's values just before they are written: recorded in the first pass, replaced in the re-run */
+/* nnhid.c, port 2's values just before they are written (R3 online rollback only) */
+void r1_pad_id(int id, uint64_t *b, int *lx, int *ly, int *rx, int *ry) { if (g_ra > 0 && rgs_wanted() && rbg_on()) rbg_pad(id, b, lx, ly, rx, ry); }
+int r1_net_on(void) { return rbn_on() > 0; }
 void r1_pad(uint64_t *b, int *lx, int *ly, int *rx, int *ry) {
     if (g_ra > 0 && rgs_wanted()) { rgs_pad(b, lx, ly, rx, ry); return; }      /* R2 simulation: recorded per pass, given again in its re-run */
     if (g_ra > 0) {                                       /* run-ahead: the speculative pass gets player 1's last real values */

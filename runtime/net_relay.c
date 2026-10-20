@@ -227,7 +227,79 @@ static int fresh(const Peer *q, uint64_t t) { return q->state == PS_DIRECT && t 
 uint32_t net_my_ip(void) { return g_joined ? g_ip : 0; }
 int net_lobby_gone(void) { return g_cfg > 0 && !g_joined && ms_now() - g_unjoined_since > GONE_AFTER_MS; }
 
-static void tx(const void *p, int n, const struct sockaddr_in *to) { sendto(g_sock, (const char *)p, n, 0, (const struct sockaddr *)to, sizeof *to); }
+static void tx_now(const void *p, int n, const struct sockaddr_in *to) { sendto(g_sock, (const char *)p, n, 0, (const struct sockaddr *)to, sizeof *to); }
+
+/* TEST SWITCH SSBU_NET_SIM=<ms>[,<loss %>[,<jitter ms>]] (R3, default off): every datagram this game sends is held <ms>
+ * (+ 0..<jitter> ms, order kept) and <loss> % of them are dropped, so two games on one PC see a long-distance link:
+ * both with SSBU_NET_SIM=75 = 150 ms round trip between them. Only this game's client socket (not the in-game lobby). */
+typedef struct SimPkt { struct SimPkt *next; double due; int n; struct sockaddr_in to; uint8_t b[]; } SimPkt;
+static int g_sim = -1; static double g_sim_ms, g_sim_loss, g_sim_jit, g_sim_last_due; static uint32_t g_sim_rng = 0x2545F491u;
+static SimPkt *g_sim_head, *g_sim_tail; static SRWLOCK g_sim_lock = SRWLOCK_INIT; static CONDITION_VARIABLE g_sim_cv = CONDITION_VARIABLE_INIT;
+static volatile LONG64 g_sim_sent, g_sim_dropped;
+static double sim_now(void) { static LARGE_INTEGER f; LARGE_INTEGER t; if (!f.QuadPart) QueryPerformanceFrequency(&f); QueryPerformanceCounter(&t); return t.QuadPart * 1000.0 / f.QuadPart; }
+static DWORD WINAPI sim_thread(LPVOID u) {
+    (void)u;
+    HANDLE tm = CreateWaitableTimerExW(NULL, NULL, 0x2 /* high resolution */, TIMER_ALL_ACCESS);
+    if (!tm) tm = CreateWaitableTimerExW(NULL, NULL, 0, TIMER_ALL_ACCESS);
+    for (;;) {
+        AcquireSRWLockExclusive(&g_sim_lock);
+        while (!g_sim_head) SleepConditionVariableSRW(&g_sim_cv, &g_sim_lock, INFINITE, 0);
+        SimPkt *q = g_sim_head; double due = q->due, now = sim_now();
+        if (now >= due) { g_sim_head = q->next; if (!g_sim_head) g_sim_tail = NULL; }
+        ReleaseSRWLockExclusive(&g_sim_lock);
+        if (now < due) {
+            double left = due - now;
+            if (left > 1.2 && tm) { LARGE_INTEGER d; d.QuadPart = -(LONGLONG)((left - 0.8) * 10000.0); SetWaitableTimer(tm, &d, 0, NULL, NULL, FALSE); WaitForSingleObject(tm, 1000); }
+            else Sleep(0);
+            continue;
+        }
+        tx_now(q->b, q->n, &q->to); InterlockedIncrement64(&g_sim_sent);
+        free(q);
+    }
+    return 0;
+}
+static void sim_init(void) {                           /* (net_start, before the client thread) */
+    const char *e = getenv("SSBU_NET_SIM");
+    g_sim = 0;
+    if (e && *e && atof(e) > 0) {
+        g_sim = 1; sscanf(e, "%lf,%lf,%lf", &g_sim_ms, &g_sim_loss, &g_sim_jit);
+        HANDLE th = CreateThread(NULL, 0, sim_thread, NULL, 0, NULL); if (th) CloseHandle(th); else g_sim = 0;
+        printf("[online] TEST: link simulation on: +%.1f ms per datagram sent (+0..%.1f jitter), %.1f %% lost\n", g_sim_ms, g_sim_jit, g_sim_loss); fflush(stdout);
+    }
+}
+static void tx(const void *p, int n, const struct sockaddr_in *to) {
+    if (g_sim <= 0) { tx_now(p, n, to); return; }
+    g_sim_rng ^= g_sim_rng << 13; g_sim_rng ^= g_sim_rng >> 17; g_sim_rng ^= g_sim_rng << 5;
+    if (g_sim_loss > 0 && (g_sim_rng % 100000) < (uint32_t)(g_sim_loss * 1000)) { InterlockedIncrement64(&g_sim_dropped); return; }
+    SimPkt *q = malloc(sizeof *q + (size_t)n);
+    if (!q) return;
+    q->next = NULL; q->n = n; q->to = *to; memcpy(q->b, p, (size_t)n);
+    double jit = g_sim_jit > 0 ? g_sim_jit * ((g_sim_rng >> 8) % 1000) / 1000.0 : 0;
+    AcquireSRWLockExclusive(&g_sim_lock);
+    q->due = sim_now() + g_sim_ms + jit;
+    if (q->due < g_sim_last_due) q->due = g_sim_last_due;      /* (order kept) */
+    g_sim_last_due = q->due;
+    if (g_sim_tail) g_sim_tail->next = q; else g_sim_head = q;
+    g_sim_tail = q;
+    ReleaseSRWLockExclusive(&g_sim_lock);
+    WakeConditionVariable(&g_sim_cv);
+}
+
+/* R3 online rollback (rb_net.c): its messages, packet type 16 through the lobby (here: the host's game).
+ *   client -> lobby: 'S' 'U' 1 16 | cookie u64 | destination u32 (0 = the other players of this lobby code) | message
+ *   lobby -> client: 'S' 'U' 1 16 | source u32 | message */
+#define T_RB 16
+void rbn_rx(const uint8_t *p, int n);                  /* rb_net.c */
+static volatile uint32_t g_rb_peer;
+int net_rb_ready(void) { return g_cfg > 0 && g_joined && g_sock != INVALID_SOCKET; }
+int net_rb_send(const void *p, int n) {
+    if (!net_rb_ready() || n <= 0 || n > 1400) return 0;
+    uint8_t b[1500];
+    hdr(b, T_RB); s64(b + 4, g_cookie); s32(b + 12, g_rb_peer);
+    memcpy(b + 16, p, (size_t)n);
+    tx(b, 16 + n, &g_lobby);
+    return 1;
+}
 
 /* ---------------------------------------------------------------- direct paths */
 static void punch(Peer *q, int c, int ack, uint64_t word) {     /* (peers lock held) */
@@ -861,6 +933,9 @@ static DWORD WINAPI client_thread(LPVOID unused) {
         case T_PEERS:
             if (g_joined && g_direct) read_peers(buf + 4, n - 4);
             break;
+        case T_RB:                                       /* R3: a rollback message of the other player */
+            if (n > 8 && g_joined) { uint32_t src = g32(buf + 4); if (src && src != g_ip) { g_rb_peer = src; rbn_rx(buf + 8, n - 8); } }
+            break;
         }
     }
 }
@@ -899,6 +974,7 @@ void net_start(void) {
             setsockopt(g_sock, SOL_SOCKET, SO_RCVTIMEO, (const char *)&timeout, sizeof timeout);
             setsockopt(g_sock, SOL_SOCKET, SO_RCVBUF, (const char *)&big, sizeof big);
             WSAIoctl(g_sock, SIO_UDP_CONNRESET, &off, sizeof off, NULL, 0, &bytes, NULL, NULL);   /* (no ICMP errors on receive) */
+            sim_init();                                  /* SSBU_NET_SIM (test only) */
             HANDLE th = CreateThread(NULL, 0, client_thread, NULL, 0, NULL);
             if (th) { SetThreadDescription(th, L"online lobby client"); CloseHandle(th); }
             atexit(leave);
@@ -920,6 +996,10 @@ void net_stats_get(NetStats *o) {
     if (g_cfg <= 0) { o->state = NET_OFFLINE; return; }
     if (!g_joined) { o->state = net_lobby_gone() || g_reject[0] ? NET_DISCONNECTED : NET_CONNECTING; return; }
     o->state = NET_CONNECTED;
+    {   /* R3: an online rollback match (rb_net.c / rb_rollback.c) fills delay and rollback; its own round trip */
+        int rbn_started(void), rbn_rtt_ms(void); void rbn_stats(int *delay, int *last, int *maxk);
+        if (rbn_started()) { rbn_stats(&o->delay, &o->rollback_last, &o->rollback_max); o->players = 2; o->ping_ms = rbn_rtt_ms(); return; }
+    }
     int in_room = nnldn_players();
     o->players = in_room ? in_room : 1;
     o->ping_ms = (int)g_ping;

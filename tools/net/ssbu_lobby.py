@@ -34,6 +34,7 @@ PROTO = 1
 LOBBY_VERSION = "1.1"
 (JOIN, WELCOME, REJECT, PING, PONG, DATA, LEAVE, LIST, LISTING, LIST_END,
  PEERS, PUNCH, DIRECT, BCAST) = range(1, 15)
+RB = 16          # online rollback messages between two games (recomp-study/net_relay.c T_RB, rb_net.c)
 NAME_LEN, BUILD_LEN = 32, 40
 JOIN_LEN = 4 + 8 + 2 * NAME_LEN + BUILD_LEN + 4 + 2 + 1
 SUBNET, BROADCASTS = 0x0A0D0000, (0x0A0DFFFF, 0xFFFFFFFF)
@@ -214,6 +215,15 @@ class Lobby:
             self.drop(c, "left")
         elif kind == LIST and len(p) >= 16 and struct.unpack_from(">Q", p, 4)[0] == c.cookie:
             self.on_list(c, p[12:16], now)
+        elif kind == RB and 16 < len(p) <= 1500 and struct.unpack_from(">Q", p, 4)[0] == c.cookie:
+            # online rollback message: to one player of the same lobby code (destination 0 = all others, only with a private code)
+            dst = struct.unpack_from(">I", p, 12)[0]
+            if dst == 0 and c.part[1] == "public":
+                return
+            out = hdr(RB) + struct.pack(">I", c.ip) + p[16:]
+            for x in list(self.by_at.values()):
+                if x is not c and x.part == c.part and (dst == 0 or x.ip == dst):
+                    self.send(out, x.at)
         elif kind == DATA and len(p) >= 16:
             self.on_data(c, p, 4, now, ())
         elif kind == BCAST and len(p) >= 5:
