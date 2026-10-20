@@ -1116,6 +1116,7 @@ def step_link(cx):
     if not opus:
         say('  WARNING: no libopus: music and the other Opus sounds will be silent (deps step above; BUILDING.md)')
     copy_ffmpeg(cx)
+    copy_logo(cx)
 
 
 def link_linux(cx):
