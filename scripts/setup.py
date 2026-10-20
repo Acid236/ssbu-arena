@@ -84,6 +84,10 @@ class Fail(Exception):
     pass
 
 
+class TimedOut(Fail):
+    pass
+
+
 def say(msg=''):
     print(msg.encode('ascii', 'replace').decode('ascii'), flush=True)
 
@@ -175,9 +179,9 @@ class Ctx:
         env.update(extra)
         return env
 
-    def run(self, step, argv, cwd=None, env=None, log=None, ok=(0,)):
+    def run(self, step, argv, cwd=None, env=None, log=None, ok=(0,), timeout=None):
         """Run a child, its output to logs/<log or step>.log; returns this run's output (its last 256 KB). Raises Fail on a
-        bad exit code."""
+        bad exit code, TimedOut (a Fail) when it runs longer than timeout seconds (the child is killed)."""
         os.makedirs(self.logs, exist_ok=True)
         path = os.path.join(self.logs, (log or step) + '.log')
         t0 = time.time()
@@ -185,7 +189,10 @@ class Ctx:
             f.write(('\n$ %s\n' % ' '.join(argv)).encode())
             f.flush()                            # the header goes above the child's output, not after it
             start = f.tell()                     # the log is appended to: only what this child wrote is returned, or a
-            p = subprocess.run(argv, cwd=cwd or self.work, env=env or self.env(), stdout=f, stderr=subprocess.STDOUT)      # caller's check reads the result of an earlier, failed run
+            try:                                 # caller's check reads the result of an earlier, failed run
+                p = subprocess.run(argv, cwd=cwd or self.work, env=env or self.env(), stdout=f, stderr=subprocess.STDOUT, timeout=timeout)
+            except subprocess.TimeoutExpired:
+                raise TimedOut('%s did not finish in %s (stopped); see %s' % (' '.join(argv[:3]), fmt(timeout), path))
         with open(path, 'rb') as f:
             f.seek(max(start, os.path.getsize(path) - (256 << 10)))
             tail = f.read().decode('utf-8', 'replace')
@@ -1108,7 +1115,39 @@ def step_check(cx):
     shutil.rmtree(scratch, ignore_errors=True)
     os.makedirs(scratch)
     # the self-test exits with its number of failures (a crash is a negative exit code: a signal)
-    out = cx.run('check', [exe, main_elf, '60'], env=game_env(cx, SSBU_SDK_SELFTEST='1', SSBU_USERDATA=scratch), log='check_sdk', ok=tuple(range(256)))
+    # each game run has a time limit: a self-test that hangs on a PC (testers waited over an hour, 2026-10-20) is stopped
+    # and reported, and the install goes on: the game was built, these runs only check it
+    try:
+        out = cx.run('check', [exe, main_elf, '60'], env=game_env(cx, SSBU_SDK_SELFTEST='1', SSBU_USERDATA=scratch), log='check_sdk',
+                     ok=tuple(range(256)), timeout=SELFTEST_LIMIT)
+    except TimedOut as e:
+        say('  WARNING: the SDK self-test hung and was stopped (%s). The game is installed; if it does not start, send that log' % e)
+        out = None
+    if out is not None:
+        _sdk_result(cx, out)
+    for name, var, pick in (('pad', 'SSBU_PAD_SELFTEST', None), ('cxxrt', 'SSBU_CXXRT_SELFTEST', '=== self-test:')):
+        try:
+            out = cx.run('check', [exe, main_elf, '5'], env=game_env(cx, **{var: '1', 'SSBU_USERDATA': scratch}), log='check_' + name,
+                         timeout=SELFTEST_LIMIT)
+        except TimedOut as e:
+            say('  WARNING: %s hung and was stopped (%s)' % (var, e))
+            continue
+        if pick is None:
+            line = next((l for l in reversed(out.splitlines()) if 'pad' in l.lower() and '/' in l), out.strip().splitlines()[-1] if out.strip() else '')
+            say('  %s: %s' % (var, line.strip()))
+            continue
+        line = next((l for l in reversed(out.splitlines()) if l.startswith(pick)), '')
+        # the exception tables of main among the checks (eh_tests.h, read from the game DLL)
+        say('  %s: %s' % (var, line.strip() or 'no result line (logs/check_cxxrt.log)'))
+        if not line.rstrip().endswith(' 0 failed'):
+            say('  WARNING: the C++ runtime self-test reports failures (logs/check_cxxrt.log)')
+    _difftest(cx)
+
+
+SELFTEST_LIMIT = 600                     # seconds per self-test run (a normal one takes about 1 minute)
+
+
+def _sdk_result(cx, out):
     line = next((l for l in reversed(out.splitlines()) if l.startswith('SDK self-test:')), '')
     failed = [l.strip() for l in out.splitlines() if l.rstrip().endswith('FAILED')]
     known = [l for l in failed if cx.posix and l.startswith('album:')]     # recording movies to the album: not on Linux / macOS yet
@@ -1117,15 +1156,9 @@ def step_check(cx):
     say('  SSBU_SDK_SELFTEST: ' + line.strip())
     if known:
         say('  (the %d failures are all album movie recording, which the %s build does not have yet: accepted)' % (len(known), 'Linux' if cx.linux else 'macOS'))
-    out = cx.run('check', [exe, main_elf, '5'], env=game_env(cx, SSBU_PAD_SELFTEST='1', SSBU_USERDATA=scratch), log='check_pad')
-    line = next((l for l in reversed(out.splitlines()) if 'pad' in l.lower() and '/' in l), out.strip().splitlines()[-1] if out.strip() else '')
-    say('  SSBU_PAD_SELFTEST: ' + line.strip())
-    out = cx.run('check', [exe, main_elf, '5'], env=game_env(cx, SSBU_CXXRT_SELFTEST='1', SSBU_USERDATA=scratch), log='check_cxxrt')
-    line = next((l for l in reversed(out.splitlines()) if l.startswith('=== self-test:')), '')
-    # the exception tables of main among the checks (eh_tests.h, read from the game DLL)
-    say('  SSBU_CXXRT_SELFTEST: ' + (line.strip() or 'no result line (logs/check_cxxrt.log)'))
-    if not line.rstrip().endswith(' 0 failed'):
-        say('  WARNING: the C++ runtime self-test reports failures (logs/check_cxxrt.log)')
+
+
+def _difftest(cx):
     # the lifter's differential test against the Unicorn emulator, on a sample of the instruction shapes of main
     py, w = sys.executable, cx.work
     if not getattr(cx.a, 'full_check', False):
