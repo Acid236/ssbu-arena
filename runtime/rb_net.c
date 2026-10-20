@@ -20,6 +20,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <math.h>
 #include "rb.h"
 #include "rb_input.c"
 #include "rb_wire.c"
@@ -411,8 +412,18 @@ static uint64_t g_hacc = 0xcbf29ce484222325ull; static int g_hlines;
 static uint64_t g_hash[HR]; static long long g_hframe[HR], g_hfinal_upto; static long long g_desync, g_check_ok, g_desync_first = -1;
 static long long g_peer_check_f; static uint32_t g_peer_check;
 
+static int g_lockstep;                                 /* (hs13) a match without the rollback ring: every frame waits for the other pad */
+void rbn_set_lockstep(int on) { g_lockstep = on; }
+int rbn_loop(void) { return g_loop; }
 static int auto_delay(void) {
     if (g_delay_cfg >= 0) return g_delay_cfg;
+    if (g_lockstep) {                                   /* the delay that covers the whole one-way trip (+ 1 frame): the wait is short or none */
+        if (g_loop) return g_loop_lat + 1;
+        int rt = g_rtt_min_us > 0 ? g_rtt_min_us : g_rtt_us;
+        if (rt <= 0) return 4;
+        int d = (int)ceil(rt / 2000.0 / (1000.0 / 60.0)) + 1;
+        return d < 1 ? 1 : d > 12 ? 12 : d;
+    }
     if (g_loop) return 2;
     int rtt = g_rtt_min_us > 0 ? g_rtt_min_us : g_rtt_us;
     if (rtt <= 0) return 2;

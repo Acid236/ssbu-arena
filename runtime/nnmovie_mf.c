@@ -345,6 +345,7 @@ typedef struct Ext {
     char path[260];
     unsigned long long samples_read;
     unsigned long long seek_base;                     /* samples_read at the last SeekTo (SSBU_SKIP_MOVIES counts from there) */
+    int skip_eos;                                     /* (hs13) SSBU_SKIP_MOVIES ended this stream early */
     volatile uint64_t gen;                           /* bumped by SeekTo: samples read before it are refused by the decoders */
 } Ext;
 
@@ -661,7 +662,12 @@ static int ext_fill(Ext *e) {
         /* counted from the last SeekTo: the game seeks (to 0) again when its movie start is late (slow PC, threads
          * held); the samples read before are refused as stale, so a budget counted from the open left the stream with
          * no valid sample after such a seek (audio never started, the title screen never came: run-ahead / PR #46 hang) */
-        if (skip && e->samples_read - e->seek_base >= keep) { if (!e->eos) printf("movie: SSBU_SKIP_MOVIES: end of stream after %llu samples%c", e->samples_read, 10); e->eos = 1; return ST_END; }
+        if (skip && e->samples_read - e->seek_base >= keep) { if (!e->eos) printf("movie: SSBU_SKIP_MOVIES: end of stream after %llu samples%c", e->samples_read, 10); e->eos = 1; e->skip_eos = 1;
+            {   /* TEST ONLY (hs13), SSBU_MOVIE_TEST_RESYNC_AT_EOS=<flag>: the game's resync request raised at this early end of stream */
+                static int f = -1; if (f < 0) { const char *v = getenv("SSBU_MOVIE_TEST_RESYNC_AT_EOS"); f = v ? atoi(v) : 0; }
+                static int done; if (f > 0 && !done) { done = 1; InterlockedOr8((char *)(uintptr_t)GA(0x7107446040ULL), (char)f); printf("movie: TEST: resync request %d raised at the early end of stream%c", f, 10); }
+            }
+            return ST_END; }
     }
     if (e->eos || !e->rd) return ST_END;
     int best = -1;
@@ -814,10 +820,41 @@ static void ext_GetTrackConfiguration(Ctx *c) {       /* (int track, MediaData *
 static void ext_SelectTrack(Ctx *c) { Ext *e = ext_of(A0); if (!e) { RET(ST_INVALID); return; } ext_lock(e); int r = ext_select(e, (int)A1, 1); ext_unlock(e); RET(r); }
 static void ext_UnselectTrack(Ctx *c) { Ext *e = ext_of(A0); if (!e) { RET(ST_INVALID); return; } ext_lock(e); int r = ext_select(e, (int)A1, 0); ext_unlock(e); RET(r); }
 
+/* (R3 hs13, the boots that missed the title screen: tm4, hw1, tw6h, ~1 in 4 when two games boot at once) The game's movie Seek
+ * [0x71036e7620] flushes and restarts the decoders only when the player state is >= 4 (playing); in state 3 (prepared, the
+ * boot-time resync seek of a late movie start, more frequent on a loaded PC) it calls Extractor::SeekTo alone. With
+ * SSBU_SKIP_MOVIES the end of stream comes after 12 samples, i.e. possibly while the player is still prepared: the decoders
+ * had taken the end-of-stream input, so (as MediaCodec) they offered no input buffer again, the game's feed threads waited
+ * for ever after the SeekTo, the movie never ended. A real movie never ends that early. Now, after a seek that follows
+ * such an early (skip) end of stream, every decoder of this extractor that took the end of stream is flushed and offers
+ * all its inputs again (what Flush + Start would do). SSBU_MOVIE_SKIP_REARM=0: the old way (test). */
+static void dec_release_all(Dec *d);
+static void skip_rearm(Ext *e) {
+    static int on = -1;
+    if (on < 0) { const char *v = getenv("SSBU_MOVIE_SKIP_REARM"); on = !(v && v[0] == '0'); }
+    if (!on) return;
+    Dec *list[MAX_LIVE_DEC]; int n = 0;
+    AcquireSRWLockShared(&g_dec_live_lock);
+    for (int i = 0; i < MAX_LIVE_DEC; i++) if (g_dec_live[i] && ((Dec *)g_dec_live[i])->ext == e) list[n++] = (Dec *)g_dec_live[i];
+    ReleaseSRWLockShared(&g_dec_live_lock);
+    for (int k = 0; k < n; k++) {
+        Dec *d = list[k];
+        EnterCriticalSection(&d->cs);
+        int re = !d->dead && d->eos_in;
+        if (re) {
+            dec_release_all(d);
+            for (int i = 0; i < d->nin; i++) { d->in_state[i] = IN_OFFERED; d->in_list[i] = i; }
+            d->in_n = d->nin;
+        }
+        LeaveCriticalSection(&d->cs);
+        if (re) { printf("movie: SSBU_SKIP_MOVIES: seek after the early end of stream: %s decoder offers its inputs again (the game did not flush it)\n", d->is_video ? "video" : "audio"); signal_event(d, 0); }
+    }
+}
 static void ext_SeekTo(Ctx *c) {                      /* (int64 timeUs) */
     Ext *e = ext_of(A0);
     if (!e || !e->rd) { RET(ST_INVALID); return; }
     ext_lock(e);
+    int rearm = e->skip_eos; e->skip_eos = 0;
     release_pending(e);
     release_ahead(e, -1);
     e->gen++;
@@ -829,6 +866,7 @@ static void ext_SeekTo(Ctx *c) {                      /* (int64 timeUs) */
     for (int i = 0; i < e->ntracks; i++) e->tr[i].eos = 0;
     ext_unlock(e);
     printf("movie: SeekTo(%.3f s) %08lx (tick %llu)\n", (int64_t)A1 / 1e6, hr, (unsigned long long)GetTickCount64());
+    if (rearm) skip_rearm(e);
     RET(SUCCEEDED(hr) ? ST_OK : ST_FAILED);
 }
 

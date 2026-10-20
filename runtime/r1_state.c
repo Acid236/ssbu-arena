@@ -149,8 +149,20 @@ static void add_fighter_dlls(void) {
     CloseHandle(sn);
     if (g_cycle == 0 && g_phase == 0) LOG("r1: fighter DLLs: %d, writable sections %.1f KB\n", nmod, bytes / 1024.0);
 }
+/* (R3 hs13, tw1j) the full save's copy of every range (r->s, ~1.9 GB in a match) is page memory of its own, not CRT heap: the
+ * first save of the ring / run-ahead gives it back (decommits it) range by range while mark_setup moves it into the shadow,
+ * so the peak commit is ~one copy of the game's memory instead of two (tw1j: a failed malloc there, not checked, crashed in
+ * memcpy while the PC had 4-8 GB of free commit). Every allocation of that save is checked: on failure the save fails
+ * cleanly (g_save_failed = 2) and the caller turns rollback off for the match. */
+static void *rs_alloc(size_t n) { return n ? VirtualAlloc(NULL, n, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE) : NULL; }
+static void rs_free(void *p) { if (p) VirtualFree(p, 0, MEM_RELEASE); }
+static void release(void);
+static int g_rs_drop;                                   /* set by the first save's callers (the ring, run-ahead): r->s given back during mark_setup */
+static int g_rb_test_nomem = -1;                        /* SSBU_RB_NET_TEST_NOMEM (test only): 1 = the commit check says no, 2 = an allocation of the full save fails, 3 = the ring's own allocations fail, 4 = the shadow's commit fails */
+static int rb_test_nomem(void) { if (g_rb_test_nomem < 0) { const char *e = getenv("SSBU_RB_NET_TEST_NOMEM"); g_rb_test_nomem = e ? atoi(e) : 0; } return g_rb_test_nomem; }
+static double g_save_need_mb, g_save_avail_mb;          /* the last commit check (MB) */
 static void collect(Ctx *c) {
-    for (int i = 0; i < g_nr; i++) { free(g_r[i].s); free(g_r[i].dirty); free(g_r[i].async); }
+    for (int i = 0; i < g_nr; i++) { rs_free(g_r[i].s); g_r[i].s = NULL; free(g_r[i].dirty); free(g_r[i].async); }
     g_nr = 0;
     if (!g_nheap) find_heaps();
     for (int i = 0; i < g_nheap; i++) add_alloc(g_heap_base[i]);
@@ -339,6 +351,53 @@ static int fib_host(void *fiber, uint64_t *rsp, uint64_t *base) {
     if (!(sl < sb && sp >= sl && sp < sb && sb - sp < (64u << 20))) return 0;
     *rsp = sp; *base = sb; return 1;
 }
+/* (R3 hs13, tl4 / nmr: c00000ff in ntdll's unwinder at a lua2cpp throw, rsp on one fiber's host stack while the thread's
+ * TEB names another fiber) a restore must never copy a saved host stack over a stack some thread is running on now: the
+ * stack pointers of every guest thread and of this thread are read first, and a switched-away fiber whose host stack
+ * holds one of them is not copied back (counted, logged). SSBU_R1_LIVESTK=0: copied anyway (the old way, test). */
+static long long g_fib_live_skip, g_fib_live_seen; static int g_fib_live_on = -1;
+static uint64_t g_live_rsp[512], g_live_rip[512], g_live_fib[512]; static const char *g_live_nm[512]; static HANDLE g_live_h[512]; static int g_nlive;
+static uint8_t *live_teb_addr(HANDLE h);
+int guest_thread_info(int i, Ctx **c, const char **name, HANDLE *h);
+static void live_rsps(void) {
+    g_nlive = 0;
+    { volatile uint64_t here = (uint64_t)(uintptr_t)&here; g_live_rsp[g_nlive] = here; g_live_rip[g_nlive] = 0; g_live_nm[g_nlive] = "this thread"; g_live_h[g_nlive] = NULL; g_live_fib[g_nlive] = (uint64_t)(uintptr_t)GetCurrentFiber(); g_nlive++; }
+    Ctx *tc; const char *nm; HANDLE h;
+    for (int i = 0; guest_thread_info(i, &tc, &nm, &h) && g_nlive < 512; i++) {
+        if (!h || GetThreadId(h) == GetCurrentThreadId()) continue;
+        CONTEXT x; memset(&x, 0, sizeof x); x.ContextFlags = CONTEXT_CONTROL;
+        if (GetThreadContext(h, &x)) { uint8_t *t = live_teb_addr(h); g_live_rsp[g_nlive] = x.Rsp; g_live_rip[g_nlive] = x.Rip; g_live_nm[g_nlive] = nm ? nm : "?"; g_live_h[g_nlive] = h; g_live_fib[g_nlive] = t ? *(volatile uint64_t *)(t + 0x20) : 0; g_nlive++; }
+    }
+}
+static void live_teb(HANDLE h, uint64_t *fd, uint64_t *sb, uint64_t *sl) {     /* (diagnosis) that thread's TEB: FiberData, StackBase, StackLimit */
+    *fd = *sb = *sl = 0;
+    typedef LONG (WINAPI *QitFn)(HANDLE, int, void *, ULONG, ULONG *);
+    static QitFn qit; if (!qit) qit = (QitFn)(void *)GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtQueryInformationThread");
+    struct { LONG st; void *teb; void *pid, *tid; ULONG_PTR mask; LONG pri, bpri; } tb; memset(&tb, 0, sizeof tb);
+    HANDLE hh = h ? h : GetCurrentThread();
+    if (!qit || qit(hh, 0, &tb, sizeof tb, NULL) < 0 || !tb.teb) return;
+    uint8_t *t = tb.teb; *sb = *(uint64_t *)(t + 0x08); *sl = *(uint64_t *)(t + 0x10); *fd = *(uint64_t *)(t + 0x20);
+}
+static struct { HANDLE h; uint8_t *teb; } g_teb_cache[512]; static int g_nteb;
+static uint8_t *live_teb_addr(HANDLE h) {               /* a thread's TEB (cached: it never moves) */
+    for (int i = 0; i < g_nteb; i++) if (g_teb_cache[i].h == h) return g_teb_cache[i].teb;
+    typedef LONG (WINAPI *QitFn)(HANDLE, int, void *, ULONG, ULONG *);
+    static QitFn qit; if (!qit) qit = (QitFn)(void *)GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtQueryInformationThread");
+    struct { LONG st; void *teb; void *pid, *tid; ULONG_PTR mask; LONG pri, bpri; } tb; memset(&tb, 0, sizeof tb);
+    if (!qit || qit(h, 0, &tb, sizeof tb, NULL) < 0) return NULL;
+    if (g_nteb < 512) { g_teb_cache[g_nteb].h = h; g_teb_cache[g_nteb].teb = tb.teb; g_nteb++; }
+    return tb.teb;
+}
+static int live_running(void *fiber) {                 /* the host fiber is the current fiber of a thread (its TEB says so) */
+    for (int i = 0; i < g_nlive; i++) if (g_live_fib[i] && g_live_fib[i] == (uint64_t)(uintptr_t)fiber) return i + 1;
+    return 0;
+}
+static long long g_fib_teb_running;                     /* fibers taken as running at a capture because a thread's TEB names them (run tid said not) */
+static int live_on_stack(const uint8_t *blk) {          /* a fiber block (saved copy): +0x20 DeallocationStack, +0x10 StackBase */
+    uint64_t lo = *(const uint64_t *)(blk + 0x20), hi = *(const uint64_t *)(blk + 0x10);
+    for (int i = 0; i < g_nlive; i++) if (g_live_rsp[i] >= lo && g_live_rsp[i] < hi) return i + 1;
+    return 0;
+}
 static void fib_cb(uint64_t key, Ctx *c, uint64_t stack, uint64_t size, void *fiber) {
     DWORD tid = os_r1_fiber_tid(key);
     static int fiblog = -1; if (fiblog < 0) fiblog = getenv("SSBU_R1_FIBLOG") != NULL;
@@ -352,6 +411,7 @@ static void fib_cb(uint64_t key, Ctx *c, uint64_t stack, uint64_t size, void *fi
     f->key = key; f->c = c; f->fiber = fiber; f->susp = 0; f->stk = NULL; f->n = 0; f->imp = NULL; f->from = 0; f->sp = 0; os_r1_fiber_get(key, f->obj); f->fls = tid ? NULL : os_r1_fiber_fls(key); if (f->fls) memcpy(f->flsb, f->fls, sizeof f->flsb);
     if (!c) return;                                           /* initialised, never run */
     f->regs = *c; f->imp = c->in_import; f->from = c->import_from; f->sp = c->x[31];
+    if (!tid && g_fib_live_on && fiber && live_running(fiber)) { tid = GetThreadId(g_live_h[live_running(fiber) - 1] ? g_live_h[live_running(fiber) - 1] : GetCurrentThread()); g_fib_teb_running++; }   /* (hs13) running in truth: its stack is live, not saved */
     uint64_t rsp, base;
     if (!tid && fib_host(fiber, &rsp, &base)) {
         size_t n = (size_t)(base - rsp) + 64;
@@ -363,9 +423,14 @@ static void fib_cb(uint64_t key, Ctx *c, uint64_t stack, uint64_t size, void *fi
     } else if (!tid) g_fib_bad++;
     if (tid) g_fib_running++;
 }
+static uint64_t g_rest_lo[1024], g_rest_hi[1024]; static int g_nrest;     /* (hs13) the host stacks the last restore copied back */
+static int rest_stack(uint64_t a) { for (int i = 0; i < g_nrest; i++) if (a >= g_rest_lo[i] && a < g_rest_hi[i]) return 1; return 0; }
 static void fibers_restore_all(void) {
+    g_nrest = 0;
     g_ncur = 0; g_fib_mode = 1; os_r1_fibers(fib_cb);
     g_fib_same = g_fib_diff = g_fib_new = 0;
+    if (g_fib_live_on < 0) { const char *e = getenv("SSBU_R1_LIVESTK"); g_fib_live_on = !(e && e[0] == '0'); }
+    live_rsps();
     for (int i = 0; i < g_nfib; i++) {
         Fib *f = &g_fib[i];
         int j; for (j = 0; j < g_ncur; j++) if (g_cur[j].key == f->key) break;
@@ -377,7 +442,20 @@ static void fibers_restore_all(void) {
             continue;
         }
         int running_now = j < g_ncur && g_cur[j].tid != 0;
+        int live = f->susp && !running_now ? live_on_stack(f->blk) : 0;
+        if (live) {
+            g_fib_live_seen++;
+            if (g_fib_live_seen <= 20) {
+                uint64_t fd, sb, sl; live_teb(g_live_h[live - 1], &fd, &sb, &sl);
+                LOG("r1:   fiber %llx: its host stack %p [%llx..%llx] is IN USE now by %s (rsp %llx rip %llx; its TEB: fiber %llx stack %llx..%llx); saved rsp %llx + %zu, host fiber now %p, run tid now %lu: %s\n",
+                    (unsigned long long)f->key, f->fiber, (unsigned long long)*(uint64_t *)(f->blk + 0x20), (unsigned long long)*(uint64_t *)(f->blk + 0x10), g_live_nm[live - 1],
+                    (unsigned long long)g_live_rsp[live - 1], (unsigned long long)g_live_rip[live - 1], (unsigned long long)fd, (unsigned long long)sl, (unsigned long long)sb,
+                    (unsigned long long)f->rsp, f->n, cf, j < g_ncur ? (unsigned long)g_cur[j].tid : 0ul, g_fib_live_on ? "not copied back" : "copied back anyway (SSBU_R1_LIVESTK=0)");
+            }
+            if (g_fib_live_on) { g_fib_live_skip++; g_fib_diff++; continue; }
+        }
         if (f->susp && !running_now) {                        /* whole host + guest state back */
+            if (g_nrest < 1024) { g_rest_lo[g_nrest] = *(uint64_t *)(f->blk + 0x20); g_rest_hi[g_nrest] = *(uint64_t *)(f->blk + 0x10); g_nrest++; }
             memcpy((void *)(uintptr_t)f->rsp, f->stk, f->n);
             memcpy(f->fiber, f->blk, FIB_BLOCK);
             if (f->fls) memcpy(f->fls, f->flsb, sizeof f->flsb);
@@ -439,7 +517,7 @@ static void park_quiet(int restore_mode) {
         unpark(); SwitchToThread();
     }
 }
-static void fibers_save(void) { g_nfib = 0; g_fib_mode = 0; g_ncur = 0; g_fpool_used = 0; g_fib_bytes = 0; g_fib_bad = 0; g_fib_running = 0; os_r1_fibers(fib_cb); }
+static void fibers_save(void) { if (g_fib_live_on < 0) { const char *e = getenv("SSBU_R1_LIVESTK"); g_fib_live_on = !(e && e[0] == '0'); } if (g_fib_live_on) live_rsps(); g_nfib = 0; g_fib_mode = 0; g_ncur = 0; g_fpool_used = 0; g_fib_bytes = 0; g_fib_bad = 0; g_fib_running = 0; os_r1_fibers(fib_cb); }
 static void fibers_restore(void) {
     fibers_restore_all();
     int born = 0; for (int j = 0; j < g_ncur; j++) { int i; for (i = 0; i < g_nfib; i++) if (g_fib[i].key == g_cur[j].key) break; if (i == g_nfib) born++; }
@@ -459,7 +537,7 @@ static void fibers_report(void) {
 
 /* ---------------------------------------------------------------- save / restore */
 static const char *where(uint8_t *a);
-static int g_mark; static void mark_setup(void); static void blk1_init(void);
+static int g_mark; static int mark_setup(void); static void blk1_init(void);
 static int g_ra, g_save_failed; static int ra_hold_quiet(double limit);
 size_t nvn_r1_cb_save(void); void nvn_r1_cb_restore(void); static size_t g_ra_cb_bytes;      /* nvn_gl.c */
 static size_t g_saved_bytes;
@@ -468,14 +546,29 @@ static void save(Ctx *c) {
     collect(c);
     double t1 = now_ms();
     g_saved_bytes = 0;
-    for (int i = 0; i < g_nr; i++) {
-        Rng *r = &g_r[i];
-        r->s = malloc(r->n);
-        r->dirty = calloc(r->n / PG, 1);
-        r->async = calloc(r->n / PG, 1);
+    {   /* (hs13) the commit this needs, checked first: the copy below (decommitted again while the shadow takes it when
+         * g_rs_drop) + the shadow (as much again) + the ring's maps and pool; 1 GB more is left for the game and the driver */
+        size_t tot = 0; for (int i = 0; i < g_nr; i++) tot += g_r[i].n;
+        MEMORYSTATUSEX ms; ms.dwLength = sizeof ms;
+        double need = (g_rs_drop ? 1.0 : 2.0) * tot / 1048576.0 + 512.0, avail = GlobalMemoryStatusEx(&ms) ? ms.ullAvailPageFile / 1048576.0 : 1e12;
+        g_save_need_mb = need; g_save_avail_mb = avail;
+        if (rb_test_nomem() == 1 || avail < need + 1024.0) {
+            LOG("r1: FULL SAVE NOT MADE: not enough free commit memory: it needs %.0f MB (+ 1024 MB left for the game), %.0f MB free%s\n", need, avail, rb_test_nomem() == 1 ? " (TEST: SSBU_RB_NET_TEST_NOMEM=1)" : "");
+            g_save_failed = 2; return;
+        }
     }
-    if (!g_fpool) g_fpool = malloc(g_fpool_cap);
-    if (g_ecap < 65536) { g_ecap = 65536; g_e = realloc(g_e, g_ecap * sizeof *g_e); }   /* no allocation while threads are held */
+    {   int bad = 0;
+        for (int i = 0; i < g_nr && !bad; i++) {
+            Rng *r = &g_r[i];
+            r->s = (rb_test_nomem() == 2 && i == g_nr / 2) ? NULL : rs_alloc(r->n);
+            r->dirty = calloc(r->n / PG, 1);
+            r->async = calloc(r->n / PG, 1);
+            if (!r->s || !r->dirty || !r->async) { bad = 1; LOG("r1: FULL SAVE NOT MADE: allocation of %.1f MB for range %d of %d FAILED%s\n", r->n / 1048576.0, i, g_nr, rb_test_nomem() == 2 ? " (TEST: SSBU_RB_NET_TEST_NOMEM=2)" : ""); }
+        }
+        if (!bad && !g_fpool) { g_fpool = malloc(g_fpool_cap); if (!g_fpool) { bad = 1; LOG("r1: FULL SAVE NOT MADE: fiber pool allocation FAILED\n"); } }
+        if (!bad && g_ecap < 65536) { void *ne = realloc(g_e, 65536 * sizeof *g_e); if (ne) { g_e = ne; g_ecap = 65536; } else { bad = 1; LOG("r1: FULL SAVE NOT MADE: list allocation FAILED\n"); } }   /* no allocation while threads are held */
+        if (bad) { release(); g_save_failed = 2; return; }
+    }
     if (g_fast > 0 && g_cycle < g_learn) async_learn();
     double tp0 = now_ms();
     if (g_ra > 0) { if (!ra_hold_quiet(200)) { LOG("r1: RA: first save: no quiet moment within 200 ms: not now\n"); g_save_failed = 1; return; } } else park_quiet(0);
@@ -499,9 +592,11 @@ static void save(Ctx *c) {
                     }
             }
         }
-        if (g_mark > 0 && g_cycle == 0) { g_ctx_save = *c; mark_setup(); }     /* round 5: the marks start while the threads are still held (no unmarked gap after this full save) */
-        if (g_ra > 0) nvn_r1_cb_save();
+        int mfail = 0;
+        if (g_mark > 0 && g_cycle == 0) { g_ctx_save = *c; mfail = !mark_setup(); }     /* round 5: the marks start while the threads are still held (no unmarked gap after this full save) */
+        if (g_ra > 0 && !mfail) nvn_r1_cb_save();
         unpark();
+        if (mfail) { release(); g_save_failed = 2; return; }
         for (int i = 0; i < shown; i++) LOG("r1:   async page (written by host threads while main and the guest threads were held %d ms): %s\n", pause, where(g_e[i].a));
         LOG("r1: %zu pages written by host threads during a %d ms hold: left out of restore / verify; holding the guest threads took %.2f ms\n", np, pause, t1b - tp0);
     }
@@ -637,7 +732,7 @@ static void verify(void) {
         g_cycle, g_ff, bad, g_ne, extra, now_ms() - t0);
     os_compare("at the end of the re-run");
 }
-static void release(void) { for (int i = 0; i < g_nr; i++) { free(g_r[i].s); g_r[i].s = NULL; free(g_r[i].dirty); g_r[i].dirty = NULL; free(g_r[i].async); g_r[i].async = NULL; } }
+static void release(void) { for (int i = 0; i < g_nr; i++) { rs_free(g_r[i].s); g_r[i].s = NULL; free(g_r[i].dirty); g_r[i].dirty = NULL; free(g_r[i].async); g_r[i].async = NULL; } }
 
 /* ---------------------------------------------------------------- R1 round 2: the fast save (SSBU_R1_FAST=1)
  * The first SSBU_R1_LEARN cycles (default 5) are full ones (above): they learn the pages the simulation changes (union
@@ -779,11 +874,13 @@ static uint8_t *in_shadow(uint8_t *a, uint8_t **cmap, size_t *pi) {
     if ((uintptr_t)a >= WIN2 && (uintptr_t)a < WIN2 + WN2) { *pi = (size_t)((uintptr_t)a - WIN2) >> 12; *cmap = g_sh2c; return g_sh2 + ((uintptr_t)a - WIN2); }
     return NULL;
 }
-static void sh_commit(uint8_t *sh, uint8_t *cmap, size_t pi) {
-    if (cmap[pi]) return;
+static long long g_sh_fail;                             /* (hs13) shadow commits that failed */
+static int sh_commit(uint8_t *sh, uint8_t *cmap, size_t pi) {
+    if (cmap[pi]) return 1;
     size_t c0 = pi & ~(size_t)15;                         /* 64 KB at a time */
-    VirtualAlloc(sh - (pi - c0) * PG, 16 * PG, MEM_COMMIT, PAGE_READWRITE);
+    if (rb_test_nomem() == 4 || !VirtualAlloc(sh - (pi - c0) * PG, 16 * PG, MEM_COMMIT, PAGE_READWRITE)) { g_sh_fail++; return 0; }
     memset(cmap + c0, 1, 16);
+    return 1;
 }
 /* R3 (hs13 crash, 2026-10-20): window 2 (0x7100000000 + 8 GB) is the guest image + the script modules, but the OS may put HOST
  * memory in its free parts: in hs13 the main thread's own Windows stack was at 0x72659f4000. Marked by instrumented code (a host
@@ -846,8 +943,17 @@ static void hs_exclude_all(void) {
     }
     LOG("r1: host stacks: %d threads and the host fibers looked at; %lld pages in %lld ranges inside the guest windows left out\n", nth, g_hs_pages, g_hs_ranges);
 }
-/* after the first (full) save: shadows, extras, maps on */
-static void mark_setup(void) {
+/* (hs13) a mark_setup that could not finish: everything it made is given back, no mark map is set (marks stay off) */
+static void mark_undo(void) {
+    if (g_sh1) VirtualFree(g_sh1, 0, MEM_RELEASE);
+    if (g_sh2) VirtualFree(g_sh2, 0, MEM_RELEASE);
+    free(g_sh1c); free(g_sh2c); free(g_dc); free(g_ns1); free(g_ns2);
+    g_sh1 = g_sh2 = g_sh1c = g_sh2c = g_dc = g_ns1 = g_ns2 = NULL;
+    for (int i = 0; i < g_nx; i++) { free(g_x[i].b); g_x[i].b = NULL; }
+    g_nx = 0; g_xbytes = 0; g_win1 = NULL; g_wn1 = 0;
+}
+/* after the first (full) save: shadows, extras, maps on. 1 = done; 0 = out of memory (mark_undo done: no marks) */
+static int mark_setup(void) {
     size_t big = 0; uint8_t *base = NULL;
     for (int i = 0; i < g_nheap; i++) {
         MEMORY_BASIC_INFORMATION m; uint8_t *p = g_heap_base[i];
@@ -860,26 +966,46 @@ static void mark_setup(void) {
     g_sh1 = VirtualAlloc(NULL, g_wn1, MEM_RESERVE, PAGE_NOACCESS); g_sh1c = calloc(g_wn1 >> 12, 1);
     g_dc = calloc(g_wn1 >> 12, 1); g_ns1 = calloc(g_wn1 >> 12, 1); g_ns2 = calloc(WN2 >> 12, 1);
     g_sh2 = VirtualAlloc(NULL, WN2, MEM_RESERVE, PAGE_NOACCESS); g_sh2c = calloc(WN2 >> 12, 1);
+    if (!g_sh1 || !g_sh1c || !g_dc || !g_ns1 || !g_ns2 || !g_sh2 || !g_sh2c) { LOG("r1: MARK setup: allocation of the shadow / its maps FAILED: marks OFF\n"); mark_undo(); return 0; }
     hs_exclude_all();
     g_nx = 0; g_xbytes = 0;
     size_t shb = 0;
-    for (int i = 0; i < g_nr; i++) {
+    for (int i = 0; i < g_nr; i++) {                    /* the extras: the runs of pages outside both windows */
         Rng *r = &g_r[i];
         for (size_t p = 0; p < r->n / PG; p++) {
-            uint8_t *cm; size_t pi; uint8_t *sh = in_shadow(r->a + p * PG, &cm, &pi);
-            if (sh) { sh_commit(sh, cm, pi); memcpy(sh, r->s + p * PG, PG); shb += PG; }
-            else if (g_nx < 8192) {                         /* an extra: the run of pages outside both windows */
+            uint8_t *cm; size_t pi;
+            if (in_shadow(r->a + p * PG, &cm, &pi)) continue;
+            if (g_nx < 8192) {
                 if (g_nx && g_x[g_nx - 1].a + g_x[g_nx - 1].n == r->a + p * PG) g_x[g_nx - 1].n += PG;
-                else { g_x[g_nx].a = r->a + p * PG; g_x[g_nx].n = PG; g_nx++; }
+                else { g_x[g_nx].a = r->a + p * PG; g_x[g_nx].n = PG; g_x[g_nx].b = NULL; g_nx++; }
             }
         }
     }
     for (int i = 0; i < g_nx; i++) {
         g_x[i].b = malloc(g_x[i].n); g_xbytes += g_x[i].n;
-        for (int k = 0; k < g_nr; k++) if (g_x[i].a >= g_r[k].a && g_x[i].a < g_r[k].a + g_r[k].n) { memcpy(g_x[i].b, g_r[k].s + (g_x[i].a - g_r[k].a), g_x[i].n); break; }   /* the save point's bytes */
+        if (!g_x[i].b) { LOG("r1: MARK setup: allocation of %.1f KB for an extra FAILED: marks OFF\n", g_x[i].n / 1024.0); mark_undo(); return 0; }
+    }
+    {   /* the bytes of the save point into the shadow and the extras; with g_rs_drop the copy of the full save is given back 1 MB at a time behind */
+        int cx = 0; size_t xo = 0; long long dropped = 0;
+        for (int i = 0; i < g_nr; i++) {
+            Rng *r = &g_r[i]; size_t np = r->n / PG, d0 = 0;
+            for (size_t p = 0; p < np; p++) {
+                uint8_t *a = r->a + p * PG, *cm; size_t pi; uint8_t *sh = in_shadow(a, &cm, &pi);
+                if (sh) {
+                    if (!sh_commit(sh, cm, pi)) { LOG("r1: MARK setup: commit of the shadow FAILED after %.1f MB%s: marks OFF\n", shb / 1048576.0, rb_test_nomem() == 4 ? " (TEST: SSBU_RB_NET_TEST_NOMEM=4)" : ""); mark_undo(); return 0; }
+                    memcpy(sh, r->s + p * PG, PG); shb += PG;
+                } else {
+                    if (cx < g_nx && xo == g_x[cx].n) { cx++; xo = 0; }
+                    if (cx < g_nx && g_x[cx].a + xo == a) { memcpy(g_x[cx].b + xo, r->s + p * PG, PG); xo += PG; }
+                }
+                if (g_rs_drop && (p + 1 - d0 == 256 || p + 1 == np)) { VirtualFree(r->s + d0 * PG, (p + 1 - d0) * PG, MEM_DECOMMIT); dropped += (long long)(p + 1 - d0); d0 = p + 1; }
+            }
+        }
+        if (g_rs_drop) LOG("r1: MARK setup: the copy of the full save given back while the shadow took it (%.1f MB): peak commit ~one copy\n", dropped * (double)PG / 1048576.0);
     }
     uint8_t *m1 = VirtualAlloc(NULL, g_wn1 >> 12, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
     uint8_t *m2 = VirtualAlloc(NULL, WN2 >> 12, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    if (!m1 || !m2) { if (m1) VirtualFree(m1, 0, MEM_RELEASE); if (m2) VirtualFree(m2, 0, MEM_RELEASE); LOG("r1: MARK setup: allocation of the mark maps FAILED: marks OFF\n"); mark_undo(); return 0; }
     *pm1 = m1; *pm2 = m2; *plo1 = (uint64_t)(uintptr_t)g_win1; MemoryBarrier(); *pn2 = WN2; *pn1 = g_wn1;
     r1_m1 = m1; r1_m2 = m2; r1_lo1 = (uint64_t)(uintptr_t)g_win1; MemoryBarrier(); r1_n2 = WN2; r1_n1 = g_wn1;
     {   int nmod = 0; char names[1500]; int o = 0;
@@ -900,6 +1026,7 @@ static void mark_setup(void) {
     for (int i = 0; i < g_nx; i++) if (g_x[i].n >= 65536) LOG("r1:   extra %s + %.0f KB\n", where(g_x[i].a), g_x[i].n / 1024.0);
     LOG("r1: MARK on: window 1 = region at %p, %.1f GB (map %.1f MB), window 2 = %llx + %.0f GB (map %.1f MB); shadow filled with %.1f MB; extras %d ranges %.1f MB copied whole each time\n",
         (void *)g_win1, g_wn1 / 1073741824.0, (g_wn1 >> 12) / 1048576.0, WIN2, WN2 / 1073741824.0, (WN2 >> 12) / 1048576.0, shb / 1048576.0, g_nx, g_xbytes / 1048576.0);
+    return 1;
 }
 /* every marked page: dir 0 memory -> shadow (save), 1 shadow -> memory (restore); marks cleared. Returns pages. */
 /* Round 5 (cheaper sweep): window 1 is 62 GB (a 15.5 MB map) but the game commits only ~2 GB of it: the map is swept only
@@ -921,9 +1048,10 @@ static void blk1_init(void) {                           /* mark_setup, threads h
     if (g_full_sweep < 0) g_full_sweep = getenv("SSBU_R1_FULL_SWEEP") != NULL;
     if (g_full_sweep || g_blk1 || !g_win1) return;
     uint8_t *b = calloc((size_t)(g_wn1 >> 18) + 1, 1);
-    g_blk1 = b;
+    if (!b) return;                                     /* (hs13) out of memory: the whole map is swept (slower, the same pages) */
     {   /* window 2 (image + modules, 8 GB): the 64-page blocks of the first save's ranges there (nothing is committed there in a fight) */
         size_t nb2 = (size_t)(WN2 >> 18); uint8_t *b2 = calloc(nb2, 1); size_t k = 0;
+        if (!b2) { free(b); return; }
         for (int i = 0; i < g_nr; i++) {
             uintptr_t a = (uintptr_t)g_r[i].a;
             if (a < WIN2 || a >= WIN2 + WN2) continue;
@@ -931,6 +1059,8 @@ static void blk1_init(void) {                           /* mark_setup, threads h
         }
         for (size_t q = 0; q < nb2; q++) k += b2[q];
         g_blk2_list = malloc((k + 1) * sizeof *g_blk2_list); g_blk2_n = 0;
+        if (!g_blk2_list) { free(b2); free(b); return; }
+        g_blk1 = b;
         for (size_t q = 0; q < nb2; q++) if (b2[q]) g_blk2_list[g_blk2_n++] = (uint32_t)q;
         free(b2);
     }
@@ -992,7 +1122,7 @@ static size_t mark_sweep(int dir) {
 static void mark_save(Ctx *c) {
     if (g_mcheck) {                                     /* the full snapshot of the check is taken INSIDE the same hold (round 4) */
         collect(c);
-        for (int i = 0; i < g_nr; i++) g_r[i].s = malloc(g_r[i].n);
+        for (int i = 0; i < g_nr; i++) g_r[i].s = rs_alloc(g_r[i].n);
     }
     double t0 = now_ms();
     park(0);
@@ -1434,9 +1564,10 @@ static void ra_step(Ctx *c) {
     if (!g_ra_off && ra_fight_on()) {
         if (!g_ra_ready) {                               /* the first time: a full save, the shadow and the marks (one hitch) */
             double t0 = now_ms();
-            g_save_failed = 0; g_ra_wd_pause = 1;
-            save(c); release();
+            g_save_failed = 0; g_ra_wd_pause = 1; g_rs_drop = 1;
+            save(c); release(); g_rs_drop = 0;
             g_ra_wd_pause = 0;
+            if (g_save_failed == 2) { g_ra_off = 1; LOG("r1: RA: first save not made (out of memory): run-ahead OFF\n"); return; }
             if (g_save_failed) return;
             g_ra_ready = 1; g_cycle = 1; ok = 1;
             LOG("r1: RA: first save (full, shadow filled, marks on) at fight frame %lld in %.1f ms\n", g_ff, now_ms() - t0);

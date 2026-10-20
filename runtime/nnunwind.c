@@ -180,12 +180,21 @@ typedef struct { uint64_t cfa; jmp_buf *jb; } CatchSlot;
 static CatchSlot g_catch[CATCH_SLOTS];
 static SRWLOCK g_catch_lock = SRWLOCK_INIT;
 
+/* (R3 hs13) A record belongs to the HOST stack its jmp_buf is on: two coroutines can use the same guest stack (the same CFA)
+ * on two host fibers (a coroutine object made again, a fiber given a new host fiber; with the rollback ring both stay
+ * reachable), and a throw must come back to the frame on the stack it runs on, never longjmp across stacks (that ended in
+ * ntdll's unwinder with 0xC00000FF: tl4 / lh4 / li). Records of the same CFA on other stacks are left alone. */
+static int catch_here(const jmp_buf *jb) {            /* jb is on the stack this thread runs on now (TEB DeallocationStack .. StackBase) */
+    NT_TIB *tib = (NT_TIB *)NtCurrentTeb();
+    uint64_t a = (uint64_t)(uintptr_t)jb, lo = *(uint64_t *)((uint8_t *)tib + 0x1478), hi = (uint64_t)(uintptr_t)tib->StackBase;
+    return a >= lo && a < hi;
+}
 static void catch_put(uint64_t cfa, jmp_buf *jb) {
     unsigned h = (unsigned)((cfa >> 4) * 2654435761u) & (CATCH_SLOTS - 1), first_free = CATCH_SLOTS;
     AcquireSRWLockExclusive(&g_catch_lock);
     for (unsigned n = 0; n < 64; n++) {
         unsigned i = (h + n) & (CATCH_SLOTS - 1);
-        if (g_catch[i].cfa == cfa) { first_free = i; break; }                 /* a frame at the same guest stack address replaces a stale one */
+        if (g_catch[i].cfa == cfa && catch_here(g_catch[i].jb)) { first_free = i; break; }   /* a frame at the same guest stack address ON THIS STACK replaces a stale one */
         if (g_catch[i].cfa <= 1 && first_free == CATCH_SLOTS) first_free = i;
         if (g_catch[i].cfa == 0) break;
     }
@@ -199,7 +208,7 @@ static jmp_buf *catch_take(uint64_t cfa, jmp_buf *only) {                     /*
     AcquireSRWLockExclusive(&g_catch_lock);
     for (unsigned n = 0; n < 64; n++) {
         unsigned i = (h + n) & (CATCH_SLOTS - 1);
-        if (g_catch[i].cfa == cfa) { if (!only || g_catch[i].jb == only) { jb = g_catch[i].jb; g_catch[i].cfa = 1; g_catch[i].jb = NULL; } break; }
+        if (g_catch[i].cfa == cfa && catch_here(g_catch[i].jb)) { if (!only || g_catch[i].jb == only) { jb = g_catch[i].jb; g_catch[i].cfa = 1; g_catch[i].jb = NULL; } break; }
         if (g_catch[i].cfa == 0) break;
     }
     ReleaseSRWLockExclusive(&g_catch_lock);
@@ -315,6 +324,16 @@ static void eh_raise(Ctx *c, int reason) {
         if (!jb) {
             printf("\nunwind: f_%llx handled an exception but was not entered through nro_catch_call (frame %llx)\n", (unsigned long long)pad.function.start, (unsigned long long)cfa);
             eh_terminate(c, "no host frame to return to");
+        }
+        {   /* (R3 hs13, diagnosis) the jmp_buf must be on the stack this thread runs on now (its TEB limits): a longjmp across
+             * stacks ends in ntdll's unwinder with 0xC00000FF (tl4 / nmr / le3a / lg2a after a rollback) */
+            NT_TIB *tib = (NT_TIB *)NtCurrentTeb(); uint64_t a = (uint64_t)(uintptr_t)jb, lo = *(uint64_t *)((uint8_t *)tib + 0x1478), hi = (uint64_t)(uintptr_t)tib->StackBase;
+            if (a < lo || a >= hi) {
+                volatile uint64_t here = 0;
+                printf("\nunwind: CROSS-STACK longjmp: handler f_%llx frame cfa %llx, jmp_buf %p is NOT on this thread's stack %llx..%llx (rsp ~%p, fiber %p, thread %lu)\n",
+                       (unsigned long long)pad.function.start, (unsigned long long)cfa, (void *)jb, (unsigned long long)lo, (unsigned long long)hi, (void *)&here, GetCurrentFiber(), (unsigned long)GetCurrentThreadId());
+                fflush(stdout);
+            }
         }
         longjmp(*jb, 1);
     }
