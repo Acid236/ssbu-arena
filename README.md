@@ -139,6 +139,7 @@ your dump --> tools/extract --> main executable, SDK, script modules, data
           nvn_vk*.c, nvn_gl.c            the console's graphics API (NVN) on Vulkan / OpenGL
           mx_translate.c                 the game's GPU shader machine code -> GLSL -> SPIR-V
           nnpad_sdl.c                    controllers through SDL3
+          nnpad_gca.c                    GameCube controller adapter over WinUSB (shown to SDL as virtual gamepads)
 ```
 
 - **Game code** is recompiled, not emulated: a mechanical translation, complete and exact, but not readable source.

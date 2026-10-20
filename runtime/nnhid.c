@@ -23,6 +23,7 @@
 enum { BTN_A = 0, BTN_B, BTN_X, BTN_Y, BTN_STICK_L, BTN_STICK_R, BTN_L, BTN_R, BTN_ZL, BTN_ZR, BTN_PLUS, BTN_MINUS,
        BTN_LEFT, BTN_UP, BTN_RIGHT, BTN_DOWN, BTN_SL_LEFT, BTN_SL_UP, BTN_SL_RIGHT, BTN_SL_DOWN };
 #define STYLE_FULLKEY 1u
+#define STYLE_GC 0x20u                                      /* NpadStyleTag_NpadGc = bit 5 (libnx hid.h) */
 #define STICK_MAX 32767
 
 static volatile LONG64 g_sampling;
@@ -501,7 +502,11 @@ static int id_supported(uint32_t id) {
 /* Is a controller connected as this npad id? Player 1 always exists in scripted runs (the script is its pad). */
 static int player_connected(uint32_t id) {
     hid_setup();
-    if (id > 7 || !(g_supported_styles & STYLE_FULLKEY) || !id_supported(id)) return 0;
+    if (id > 7 || !id_supported(id)) return 0;
+    {   /* a GameCube controller needs the game to support its own style or the Pro one it is shown as */
+        uint32_t need = STYLE_FULLKEY | (sdl_on() && nnpad_is_gc((int)id) ? STYLE_GC : 0);
+        if (!(g_supported_styles & need)) return 0;
+    }
     if (g_x_synth == 1 && id == 0) return x_present(g_source[id]);      /* synthetic pad run: player 1 exists only as that pad */
     if (g_x_synth == 2 && id == 1) return x_present(g_source[id]);      /* self-test: player 2 is the test pad, whatever the keyboard player is */
     if (id == 0 && scripted_run()) return 1;
@@ -544,11 +549,15 @@ static void fight_shot_poll(int ticks) {
     ff += ticks;
     if (ff >= list[next]) { printf("shot: fight frame %lld reached at poll %lld (wanted %d): the next queued present is saved\n", ff, (long long)g_seq_polls, list[next]); fflush(stdout); nvn_front_shot_fight(list[next]); next++; }
 }
-static void fill_pad(uint64_t out, uint32_t id, int style_is_fullkey) {
-    { void r1_wrote(uint64_t, uint64_t); r1_wrote(out, 0x28); }   /* R1: marked (nothing without SSBU_R1_MARK) */
-    memset((void *)(uintptr_t)out, 0, 0x28);
+/* kind: 0 = a style the controller is not reported in (zeroed), 1 = NpadFullKeyState (Pro Controller, 0x28 bytes), 2 = NpadGcState (0x30 bytes:
+ * the same first 0x24 bytes, then analog trigger L at +0x24 and R at +0x28, 0..0x7fff; the layout follows libnx / suyu, NOT VERIFIED on a console). */
+static void fill_pad(uint64_t out, uint32_t id, int kind) {
+    size_t size = kind == 2 ? 0x30 : 0x28;
+    { void r1_wrote(uint64_t, uint64_t); r1_wrote(out, size); }   /* R1: marked (nothing without SSBU_R1_MARK) */
+    memset((void *)(uintptr_t)out, 0, size);
     wr64(out, (uint64_t)InterlockedIncrement64(&g_sampling));
-    if (id > 7 || !style_is_fullkey) return;                  /* every controller here is a full-key (Pro) controller */
+    if (id > 7 || !kind) return;                              /* the other styles are never filled */
+    unsigned trig_l = 0, trig_r = 0;
     static long long l1_ticks;                               /* L1: fight-frame ticks seen at player 1's polls (SSBU_L1 report) */
     int r1_on(void), r1_poll(int ticks); void r1_pad(uint64_t *b, int *lx, int *ly, int *rx, int *ry);    /* R1 (r1_state.c, SSBU_R1 only) */
     if (id == 0) { int fight_seq_ticks(void); int nt = fight_seq_ticks();
@@ -579,6 +588,7 @@ static void fill_pad(uint64_t out, uint32_t id, int style_is_fullkey) {
                 buttons |= ps.buttons;
                 if (ps.lx || ps.ly) { lx = ps.lx; ly = ps.ly; }
                 if (ps.rx || ps.ry || !rx) { rx = ps.rx; ry = ps.ry; }
+                if (kind == 2 && ps.gc) { trig_l = (unsigned)ps.trig_l; trig_r = (unsigned)ps.trig_r; }
             }
         }
     } else if (x_present(slot) && devices_live() && !menu_input_blocked()) {
@@ -616,6 +626,7 @@ static void fill_pad(uint64_t out, uint32_t id, int style_is_fullkey) {
     wr32(out + 0x18, (uint32_t)rx);
     wr32(out + 0x1c, (uint32_t)ry);
     wr32(out + 0x20, wired ? 3 : 1);                          /* NpadAttribute: bit 0 connected, bit 1 wired */
+    if (kind == 2) { wr32(out + 0x24, trig_l); wr32(out + 0x28, trig_r); }
 }
 
 /* Our own menus and the on-screen keyboard (osk.c): the buttons of EVERY connected pad together, in the Npad bit order
@@ -691,18 +702,26 @@ static void hid_SetSupportedNpadIdType(Ctx *c) {            /* (const NpadIdType
     for (int i = 0; i < n; i++) g_supported_ids[i] = rd32(A0 + (uint64_t)i * 4);
     g_supported_id_count = n;
 }
+/* The style a connected controller is shown in: the adapter's GameCube controllers as NpadStyleGc when the game asked for that
+ * style (and controllers.ini gamecube_style is native, the default), every other controller as a Pro Controller. */
+static uint32_t npad_style(uint32_t id) {
+    if (!player_connected(id)) return 0;
+    if (sdl_on() && nnpad_is_gc((int)id) && nnpad_gc_native() && (g_supported_styles & STYLE_GC)) return STYLE_GC;
+    return STYLE_FULLKEY;
+}
 static void hid_GetNpadStyleSet(Ctx *c) {   /* (const NpadIdType &) */
     uint32_t id = rd32(A0);
-    int r = player_connected(id);
+    uint32_t r = npad_style(id);
     {   /* D2 debug (SSBU_HIDLOG): each distinct (id, caller, answer) once */
         static int on = -1, n; static uint64_t seen[64];
         if (on < 0) on = getenv("SSBU_HIDLOG") != NULL;
         if (on) { uint64_t k = ((uint64_t)id << 40) ^ (c->x[30] << 1) ^ (uint64_t)r; int i; for (i = 0; i < n; i++) if (seen[i] == k) break;
-            if (i == n && n < 64) { seen[n++] = k; printf("hidlog: GetNpadStyleSet(id %x) from %llx -> %d\n", id, (unsigned long long)c->x[30] - 4, r); } }
+            if (i == n && n < 64) { seen[n++] = k; printf("hidlog: GetNpadStyleSet(id %x) from %llx -> %#x\n", id, (unsigned long long)c->x[30] - 4, r); } }
     }
-    RET(r ? STYLE_FULLKEY : 0);
+    RET(r);
 }
 static void hid_GetNpadState_FullKey(Ctx *c) { fill_pad(A0, rd32(A1), 1); }
+static void hid_GetNpadState_Gc(Ctx *c) { fill_pad(A0, rd32(A1), 2); }
 static void hid_GetNpadState_Other(Ctx *c) { fill_pad(A0, rd32(A1), 0); }
 static void hid_GetPlayerLedPattern(Ctx *c) {               /* the console's patterns for players 1..8 */
     static const uint8_t led[8] = {1, 3, 7, 15, 9, 5, 13, 6};
@@ -857,18 +876,29 @@ static void vib_apply(uint32_t id) {
 static void hid_InitializeVibrationDevice(Ctx *c) {         /* (const VibrationDeviceHandle &) */
     uint32_t id, dev;
     hid_setup();
-    if (vib_slot(rd32(A0), &id, &dev)) { memcpy(g_vib[id][dev].v, g_vib_default, sizeof g_vib_default); g_vib[id][dev].set = 1; }
+    uint32_t handle = rd32(A0);
+    if (vib_slot(handle, &id, &dev)) { memcpy(g_vib[id][dev].v, g_vib_default, sizeof g_vib_default); g_vib[id][dev].set = 1; }
 }
 static void hid_GetVibrationDeviceInfo(Ctx *c) {            /* (VibrationDeviceInfo *out, handle): { type, position } */
     uint32_t id, dev;
-    if (!vib_slot(rd32(A1), &id, &dev)) { wr32(A0, 0); wr32(A0 + 4, 0); return; }
+    uint32_t handle = rd32(A1);
+    uint32_t style = handle & 0xff;
+    uint32_t gid = (handle >> 8) & 0xff;
+    int gc_mounted = style == 8 && gid < 8 && ((gid == 7 && g_gc_test_mounted) || (sdl_on() && nnpad_is_gc((int)gid)));
+    if (gc_mounted) {
+        wr32(A0, 2);                                        /* VibrationDeviceType_GcErm: the GameCube controller's eccentric motor */
+        wr32(A0 + 4, (handle >> 16 & 0xff) == 0 ? 1 : 2);
+        return;
+    }
+    if (!vib_slot(handle, &id, &dev)) { wr32(A0, 0); wr32(A0 + 4, 0); return; }
     wr32(A0, 1);                                            /* VibrationDeviceType_LinearResonantActuator */
     wr32(A0 + 4, dev == 0 ? 1 : 2);                         /* VibrationDevicePosition_Left / _Right */
 }
 static void hid_SendVibrationValue(Ctx *c) {                /* (handle, const VibrationValue &{ampLow, freqLow, ampHigh, freqHigh}) */
     uint32_t id, dev;
     { int r1_ra_phase(void); if (r1_ra_phase() == 1) return; }      /* R1 round 5, run-ahead: a speculative pass's rumble is not felt (the real pass sends it) */
-    if (!vib_slot(rd32(A0), &id, &dev)) return;
+    uint32_t handle = rd32(A0);
+    if (!vib_slot(handle, &id, &dev)) return;
     memcpy(g_vib[id][dev].v, (void *)(uintptr_t)A1, 16);
     g_vib[id][dev].set = 1;
     vib_apply(id);
@@ -890,24 +920,29 @@ static void hid_GetActualVibrationValue(Ctx *c) {           /* (VibrationValue *
  * GameCube style (8) has a GameCube device, and only a mounted one (a GameCube controller on that npad) does anything:
  * Start runs the motor at full amplitude, Stop / StopHard stop it, a command above 2 is ignored.  Without a mounted
  * device Send does nothing and GetActual answers Stop.
- * Here no npad ever holds a GameCube controller (no GameCube adapter support: row "controllers"), so that is always the
- * path taken; the motor code below is what a mounted device would do on the XInput pad of the npad (both motors full). */
+ * Mounted devices are the controllers of the GameCube adapter (nnpad_gca.c: Start turns the adapter's motor on through the pad's
+ * rumble); on an npad without one that is the path taken. The XInput code below is what a self-test's mounted device does. */
 static uint64_t g_gc_erm[8];                                /* the command a mounted device is executing */
 static int gc_handle_check(Ctx *c, uint32_t handle, const char *what) {      /* 1 = the handle names a mounted GameCube device */
     uint32_t style = handle & 0xff, id = (handle >> 8) & 0xff, dev = (handle >> 16) & 0xff;
     if (!((style >= 3 && style <= 8) || style == 13 || style == 32 || style == 33) || !(id < 8 || id == 0x10 || id == 0x20) || dev > 2)
         guest_trap(what, c->x[30] - 4);
-    return style == 8 && id == 7 && g_gc_test_mounted;      /* no GameCube controller exists outside the self-test */
+    return style == 8 && id < 8 && ((id == 7 && g_gc_test_mounted) || (sdl_on() && nnpad_is_gc((int)id)));      /* a mounted device: a controller of the GameCube adapter (or the self-test's) */
 }
 static void hid_SendVibrationGcErmCommand(Ctx *c) {         /* (const VibrationDeviceHandle &, const VibrationGcErmCommand &) */
     uint32_t handle = rd32(A0), id = (handle >> 8) & 0xff;
     uint64_t command = rd64(A1);
     { int r1_ra_phase(void); if (r1_ra_phase() == 1) return; }      /* R1 round 5, run-ahead: not in a speculative pass */
     hid_setup();
-    if (!gc_handle_check(c, handle, "nn::hid::SendVibrationGcErmCommand with an invalid handle (the hid module refuses it and the SDK aborts, sdk 0x2537d4)")) return;
-    if (command > 2) return;
+    int mounted = gc_handle_check(c, handle, "nn::hid::SendVibrationGcErmCommand with an invalid handle (the hid module refuses it and the SDK aborts, sdk 0x2537d4)");
+    if (!mounted || command > 2) return;
     g_gc_erm[id] = command;
     int slot = g_source[id];
+    if (sdl_on() && nnpad_is_gc((int)id)) {                  /* the adapter's rumble motor: Start = on, Stop / StopHard = off */
+        float v = command == 1 && devices_live() ? 1.0f : 0.0f;
+        nnpad_rumble((int)id, v, v);
+        return;
+    }
     if (x_set_state && x_present(slot)) {
         XVibration v;
         v.left = v.right = (WORD)(command == 1 && devices_live() ? 65535 : 0);
@@ -1151,8 +1186,23 @@ static int th_six(uint32_t id, float accel[3], float gyro[3], int *rest) {
 }
 static void th_test_mode(int on) { g_pad_test = on; if (on) { _putenv("SSBU_REC=NUL"); hid_setup(); } }
 static uint32_t th_led(uint32_t id) { Ctx c; memset(&c, 0, sizeof c); c.x[0] = (uint64_t)(uintptr_t)&id; hid_GetPlayerLedPattern(&c); return (uint32_t)c.x[0]; }
+static void th_gc_state(uint32_t id, uint64_t *b, uint32_t trig[2], uint32_t *attr) {
+    uint8_t buf[0x30];
+    Ctx c;
+    memset(&c, 0, sizeof c); c.x[0] = (uint64_t)(uintptr_t)buf; c.x[1] = (uint64_t)(uintptr_t)&id;
+    hid_GetNpadState_Gc(&c);
+    *b = rd64((uint64_t)(uintptr_t)buf + 8);
+    trig[0] = rd32((uint64_t)(uintptr_t)buf + 0x24); trig[1] = rd32((uint64_t)(uintptr_t)buf + 0x28);
+    *attr = rd32((uint64_t)(uintptr_t)buf + 0x20);
+}
+static void th_gc_erm(uint32_t id, uint64_t command) {
+    uint32_t handle = 8 | id << 8;
+    Ctx c;
+    memset(&c, 0, sizeof c); c.x[0] = (uint64_t)(uintptr_t)&handle; c.x[1] = (uint64_t)(uintptr_t)&command;
+    hid_SendVibrationGcErmCommand(&c);
+}
 int nnhid_pad_selftest(void) {
-    NnHidHooks h = {th_style, th_state, th_vibrate, th_six, th_test_mode, th_led};
+    NnHidHooks h = {th_style, th_state, th_vibrate, th_six, th_test_mode, th_led, th_gc_state, th_gc_erm};
     return nnpad_selftest(&h);
 }
 
@@ -1168,7 +1218,7 @@ static const ImportDef hid_imports[] = {
     {H("12GetNpadStateEPNS0_16NpadJoyDualStateERKj"), hid_GetNpadState_Other},
     {H("12GetNpadStateEPNS0_16NpadJoyLeftStateERKj"), hid_GetNpadState_Other},
     {H("12GetNpadStateEPNS0_17NpadJoyRightStateERKj"), hid_GetNpadState_Other},
-    {H("12GetNpadStateEPNS0_11NpadGcStateERKj"), hid_GetNpadState_Other},
+    {H("12GetNpadStateEPNS0_11NpadGcStateERKj"), hid_GetNpadState_Gc},
     {H("12GetNpadStateEPNS0_17NpadHandheldStateERKj"), hid_GetNpadState_Other},
     {H("22GetNpadControllerColorEPNS0_19NpadControllerColorERKj"), hid_ControllerColor1},
     {H("22GetNpadControllerColorEPNS0_19NpadControllerColorES2_RKj"), hid_ControllerColor2},

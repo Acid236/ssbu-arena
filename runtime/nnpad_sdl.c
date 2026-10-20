@@ -38,11 +38,12 @@ typedef struct {
     char ignore[16][40]; int nignore;   /* [general] ignore = <GUID>: devices that are never used */
     int kb_player;                      /* -2 auto, -1 none, 0..7 */
     int kb_vk[24];
+    int gc_pro;                         /* [general] gamecube_style = pro: GameCube controllers reach the game as Pro Controllers (default: native) */
 } Cfg;
 typedef struct {
     int used, ignored;
     SDL_JoystickID id; SDL_Gamepad *gp; SDL_Joystick *js;
-    int slot, wireless, dropped, nbtn, naxes, nhats, gtype, has_accel, has_gyro, virt;
+    int slot, wireless, dropped, nbtn, naxes, nhats, gtype, has_accel, has_gyro, virt, gca;      /* gca: a port of the GameCube adapter (nnpad_gca.c) */
     char guid[40], name[80];
     Uint16 rl, rh; ULONGLONG rsent;
 } Dev;
@@ -147,6 +148,9 @@ static const char *const g_default_ini =
 "; Vibration: on / off and a strength factor (0..2)\r\n"
 "rumble = on\r\n"
 "rumble_strength = 1.0\r\n"
+"; GameCube controllers on the GameCube adapter (Nintendo WUP-028, Mayflash in Switch mode; needs the adapter's WinUSB driver,\r\n"
+"; see nnpad_gca.c): native = the game sees real GameCube controllers (as on the console); pro = the game sees Pro Controllers.\r\n"
+"gamecube_style = native\r\n"
 "; Devices that must never be used (GUIDs from --pad-test; e.g. a keyboard receiver that presents itself as a joystick). One line per device:\r\n"
 "; ignore = 03000000efbe00006d04000000000000\r\n"
 "\r\n"
@@ -280,6 +284,7 @@ static void cfg_parse(Cfg *c, char *text) {
         if (_stricmp(key, "name")) for (char *p = val; *p; p++) if ((*p == ';' || *p == '#') && p > val && (p[-1] == ' ' || p[-1] == '\t')) { *p = 0; break; }
         for (char *p = val + strlen(val); p > val && (p[-1] == ' ' || p[-1] == '\t'); ) *--p = 0;
         if (sect == 1 && !_stricmp(key, "ignore")) { if (c->nignore < 16) snprintf(c->ignore[c->nignore++], sizeof c->ignore[0], "%s", val); }
+        else if (sect == 1 && !_stricmp(key, "gamecube_style")) c->gc_pro = !_stricmp(val, "pro");
         else if (sect == 1) cfg_set(c, &c->def, 0, key, val);
         else if (sect == 4 && cur) cfg_set(c, cur, 1, key, val);
         else if (sect == 2 && !_strnicmp(key, "player", 6) && key[6] >= '1' && key[6] <= '8' && !key[7]) {
@@ -383,11 +388,21 @@ static int slot_usable(int p, const char *guid) {            /* configured reser
     return 1;
 }
 static int slot_taken(int p) { for (int i = 0; i < MAXDEV; i++) if (g_dev[i].used && !g_dev[i].ignored && g_dev[i].slot == p) return 1; return 0; }
+static int gca_port_from_name(const char *name) {      /* "GameCube Controller (port 2)" -> 1; "... (adapter 2, port 3)" -> 6; else -1 (nnpad_gca.c names them) */
+    const char *p = strstr(name, "port "), *a = strstr(name, "adapter ");
+    if (!p || strncmp(name, "GameCube Controller (", 21)) return -1;
+    int port = atoi(p + 5) - 1, ad = a ? atoi(a + 8) - 1 : 0;
+    return port >= 0 && port < 4 && ad >= 0 && ad < 2 ? ad * 4 + port : -1;
+}
 static int assign_slot(const Dev *d) {
     for (int p = 0; p < 8; p++) if (g_cfg.pguid[p][0] && !_stricmp(g_cfg.pguid[p], d->guid) && !slot_taken(p)) return p;
     for (int i = 0; i < g_mem_n; i++) {
         int p = g_mem[i].slot;
         if (!_stricmp(g_mem[i].guid, d->guid) && !slot_taken(p) && slot_usable(p, d->guid) && p != g_kb_slot) return p;
+    }
+    if (d->gca) {      /* adapter port N is player N when that slot is free */
+        int p = gca_port_from_name(d->name);
+        if (p >= 0 && !slot_taken(p) && slot_usable(p, d->guid) && !g_cfg.pguid[p][0] && p != g_kb_slot) return p;
     }
     for (int p = 0; p < 8; p++) if (!slot_taken(p) && slot_usable(p, d->guid) && !g_cfg.pguid[p][0] && p != g_kb_slot) return p;
     return -1;
@@ -415,6 +430,7 @@ static void dev_add(SDL_JoystickID id) {
     memset(d, 0, sizeof *d);
     d->used = 1; d->id = id; d->slot = -1;
     d->virt = SDL_IsJoystickVirtual(id);
+    d->gca = d->virt && SDL_GetJoystickVendorForID(id) == 0x057E && SDL_GetJoystickProductForID(id) == 0x0337;
     SDL_GUIDToString(SDL_GetJoystickGUIDForID(id), d->guid, sizeof d->guid);
     snprintf(d->name, sizeof d->name, "%s", SDL_GetJoystickNameForID(id) ? SDL_GetJoystickNameForID(id) : "?");
     if (g_only_virtual && !d->virt) { d->ignored = 1; return; }
@@ -426,6 +442,7 @@ static void dev_add(SDL_JoystickID id) {
     if (!d->gp && (!strncmp(d->name, "0x", 2) || d->naxes < 2 || d->nbtn < 4)) {       /* "0xVID/0xPID" is SDL's name for a HID device without a product string: not a pad */ d->ignored = 1; say("nn::pad: ignored \"%s\" %s: no mapping and only %d axes / %d buttons\n", d->name, d->guid, d->naxes, d->nbtn); SDL_CloseJoystick(d->js); d->js = NULL; return; }
     if (d->gp) {
         d->gtype = SDL_GetGamepadType(d->gp);
+        if (d->gca) d->gtype = SDL_GAMEPAD_TYPE_GAMECUBE;
         d->has_accel = SDL_GamepadHasSensor(d->gp, SDL_SENSOR_ACCEL); d->has_gyro = SDL_GamepadHasSensor(d->gp, SDL_SENSOR_GYRO);
         if (d->has_accel) SDL_SetGamepadSensorEnabled(d->gp, SDL_SENSOR_ACCEL, true);
         if (d->has_gyro) SDL_SetGamepadSensorEnabled(d->gp, SDL_SENSOR_GYRO, true);
@@ -499,6 +516,7 @@ int nnpad_init(void) {
     if (!SDL_Init(SDL_INIT_GAMEPAD | SDL_INIT_JOYSTICK | SDL_INIT_EVENTS)) { printf("nn::pad: SDL_Init failed: %s\n", SDL_GetError()); unlock(); return 0; }
     SDL_SetJoystickEventsEnabled(false); SDL_SetGamepadEventsEnabled(false);       /* state is read directly; events would only fill a queue */
     g_sdl_ok = 1;
+    if (!g_only_virtual) gca_start();                    /* the GameCube adapter over WinUSB (nnpad_gca.c); its ports come in as virtual gamepads */
     poll_devices();
     say("nn::pad: SDL %d.%d.%d ready (no video); %s\n", SDL_GetVersion() / 1000000, SDL_GetVersion() / 1000 % 1000, SDL_GetVersion() % 1000, g_cfg.path);
     unlock();
@@ -506,9 +524,12 @@ int nnpad_init(void) {
 }
 void nnpad_poll(int force) {
     LARGE_INTEGER t;
+    static unsigned s_gca_seen;
     if (!g_sdl_ok) return;
     QueryPerformanceCounter(&t);
-    if (!force && (t.QuadPart - g_last_poll.QuadPart) * 1000 < g_qpf.QuadPart) return;
+    unsigned gs = gca_seq();                           /* an adapter report applied since the last refresh must not wait for the 1 ms gate */
+    if (!force && (t.QuadPart - g_last_poll.QuadPart) * 1000 < g_qpf.QuadPart && gs == s_gca_seen) return;
+    s_gca_seen = gs;
     lock();
     g_last_poll = t;
     poll_devices();
@@ -537,8 +558,8 @@ static int def_map(const Dev *d, int labels, int b, Src *o) {          /* the bu
         static const int face[4] = {SDL_GAMEPAD_BUTTON_SOUTH, SDL_GAMEPAD_BUTTON_EAST, SDL_GAMEPAD_BUTTON_WEST, SDL_GAMEPAD_BUTTON_NORTH};
         static const int pos[4] = {1, 0, 3, 2};                         /* south -> B, east -> A, west -> Y, north -> X */
         for (int i = 0; i < 4; i++) {
-            int target = pos[i];
-            if (labels) {
+            int target = d->gca ? i : pos[i];                           /* the adapter's pads: south A, east B, west X, north Y (nnpad_gca.c), whatever SDL labels say */
+            if (labels && !d->gca) {
                 SDL_GamepadButtonLabel l = SDL_GetGamepadButtonLabel(d->gp, (SDL_GamepadButton)face[i]);
                 target = l == SDL_GAMEPAD_BUTTON_LABEL_A ? 0 : l == SDL_GAMEPAD_BUTTON_LABEL_B ? 1 : l == SDL_GAMEPAD_BUTTON_LABEL_X ? 2 : l == SDL_GAMEPAD_BUTTON_LABEL_Y ? 3 : pos[i];
             }
@@ -549,8 +570,8 @@ static int def_map(const Dev *d, int labels, int b, Src *o) {          /* the bu
         case 5: o[n++] = mk(SK_BTN, SDL_GAMEPAD_BUTTON_RIGHT_STICK, 0); break;
         case 6: o[n++] = mk(SK_BTN, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER, 0); break;
         case 7: o[n++] = mk(SK_BTN, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, 0); break;
-        case 8: o[n++] = mk(SK_AXP, SDL_GAMEPAD_AXIS_LEFT_TRIGGER, 0); break;
-        case 9: o[n++] = mk(SK_AXP, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER, 0); break;
+        case 8: if (!d->gca) o[n++] = mk(SK_AXP, SDL_GAMEPAD_AXIS_LEFT_TRIGGER, 0); break;      /* a GameCube pad has no ZL: its analog triggers are reported as such */
+        case 9: o[n++] = d->gca ? mk(SK_BTN, SDL_GAMEPAD_BUTTON_MISC2, 0) : mk(SK_AXP, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER, 0); break;      /* GameCube Z acts as ZR, as on the console */
         case 10: o[n++] = mk(SK_BTN, SDL_GAMEPAD_BUTTON_START, 0); break;
         case 11: o[n++] = mk(SK_BTN, SDL_GAMEPAD_BUTTON_BACK, 0); break;
         case 12: o[n++] = mk(SK_BTN, SDL_GAMEPAD_BUTTON_DPAD_LEFT, 0); break;
@@ -670,8 +691,23 @@ static void dev_state(const Dev *d, NnPadState *o) {      /* lock held */
         *px = (int)(x * k * 32767.0f + (x * k >= 0 ? 0.5f : -0.5f)); *py = (int)(y * k * 32767.0f + (y * k >= 0 ? 0.5f : -0.5f));
     }
     sensors(d, o);
+    if (d->gca) {
+        o->gc = 1;
+        o->trig_l = (int)(src_val(d, mk(SK_AXP, SDL_GAMEPAD_AXIS_LEFT_TRIGGER, 0)) * 32767.0f + 0.5f);
+        o->trig_r = (int)(src_val(d, mk(SK_AXP, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER, 0)) * 32767.0f + 0.5f);
+    }
 }
 static Dev *dev_of(int player) { for (int i = 0; i < MAXDEV; i++) if (g_dev[i].used && !g_dev[i].ignored && g_dev[i].slot == player) return &g_dev[i]; return NULL; }
+int nnpad_is_gc(int player) {
+    int r;
+    if (!g_sdl_ok || player < 0 || player > 7) return 0;
+    lock();
+    Dev *d = dev_of(player);
+    r = d && d->gca;
+    unlock();
+    return r;
+}
+int nnpad_gc_native(void) { return !g_cfg.gc_pro; }
 
 int nnpad_present(int player) {
     int r = 0;
@@ -690,7 +726,7 @@ int nnpad_get(int player, NnPadState *out) {
     nnpad_poll(0);
     lock();
     Dev *d = dev_of(player);
-    if (d && !d->dropped) { dev_state(d, out); r = 1; }
+    if (d && !d->dropped) { dev_state(d, out); if (d->gca) gca_sample(d->id); r = 1; }
     unlock();
     return r;
 }
@@ -713,7 +749,8 @@ void nnpad_rumble(int player, float low, float high) {
     Dev *d;
     if (!g_sdl_ok || player < 0 || player > 7) return;
     lock();
-    if ((d = dev_of(player)) != NULL && (d->gp || d->js)) {
+    d = dev_of(player);
+    if (d && (d->gp || d->js)) {
         float s = eff_rumble(d) ? EFF(d, rstr) : 0.0f;
         float l = low * s, h = high * s;
         Uint16 rl = (Uint16)(l >= 1 ? 65535 : l <= 0 ? 0 : (int)(l * 65535.0f)), rh = (Uint16)(h >= 1 ? 65535 : h <= 0 ? 0 : (int)(h * 65535.0f));
@@ -995,6 +1032,63 @@ int nnpad_selftest(const NnHidHooks *h) {
     settle();
     js[0] = SDL_OpenJoystick(id[0]);
     check(h->style(0) == 1, "replug: back in its old slot (player 1)");
+
+    /* ---- a port of the GameCube adapter (nnpad_gca.c makes these virtual gamepads): shown to the game as a GameCube controller */
+    {
+        SDL_VirtualJoystickDesc d;
+        SDL_JoystickID gid;
+        SDL_Joystick *gj;
+        uint32_t trig[2], gattr;
+        uint64_t gb;
+        int p = -1;
+        SDL_INIT_INTERFACE(&d);
+        d.type = SDL_JOYSTICK_TYPE_GAMEPAD; d.vendor_id = 0x057E; d.product_id = 0x0337;
+        d.naxes = SDL_GAMEPAD_AXIS_COUNT; d.nbuttons = SDL_GAMEPAD_BUTTON_COUNT;
+        d.name = "GameCube Controller (port 3)"; d.userdata = (void *)(intptr_t)13; d.Rumble = vj_rumble;
+        gid = SDL_AttachVirtualJoystick(&d);
+        settle();
+        gj = SDL_OpenJoystick(gid);
+        for (int i = 0; i < 8; i++) if (nnpad_is_gc(i)) p = i;
+        check(gid != 0 && p == 2, "GameCube adapter: port 3 takes player 3 and is known as a GameCube controller");
+        if (p >= 0) {
+            check(h->style((uint32_t)p) == 0x20 && nnpad_gc_native(), "GameCube adapter: the game gets style Gc (bit 5), the Pro Controller's style stays for the other pads");
+            vj_clear(gj, SDL_GAMEPAD_BUTTON_COUNT, 6);
+            SDL_SetJoystickVirtualButton(gj, SDL_GAMEPAD_BUTTON_SOUTH, true); settle(); h->gc_state((uint32_t)p, &gb, trig, &gattr);
+            int a = gb == 1ull << 0 && gattr == 3;
+            SDL_SetJoystickVirtualButton(gj, SDL_GAMEPAD_BUTTON_SOUTH, false); SDL_SetJoystickVirtualButton(gj, SDL_GAMEPAD_BUTTON_EAST, true); settle(); h->gc_state((uint32_t)p, &gb, trig, &gattr);
+            int b = gb == 1ull << 1;
+            SDL_SetJoystickVirtualButton(gj, SDL_GAMEPAD_BUTTON_EAST, false); SDL_SetJoystickVirtualButton(gj, SDL_GAMEPAD_BUTTON_WEST, true); settle(); h->gc_state((uint32_t)p, &gb, trig, &gattr);
+            int x = gb == 1ull << 2;
+            SDL_SetJoystickVirtualButton(gj, SDL_GAMEPAD_BUTTON_WEST, false); SDL_SetJoystickVirtualButton(gj, SDL_GAMEPAD_BUTTON_NORTH, true); settle(); h->gc_state((uint32_t)p, &gb, trig, &gattr);
+            int y = gb == 1ull << 3;
+            SDL_SetJoystickVirtualButton(gj, SDL_GAMEPAD_BUTTON_NORTH, false); SDL_SetJoystickVirtualButton(gj, SDL_GAMEPAD_BUTTON_MISC2, true); settle(); h->gc_state((uint32_t)p, &gb, trig, &gattr);
+            int z = gb == 1ull << 9;
+            SDL_SetJoystickVirtualButton(gj, SDL_GAMEPAD_BUTTON_MISC2, false); SDL_SetJoystickVirtualButton(gj, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER, true); SDL_SetJoystickVirtualButton(gj, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, true); settle(); h->gc_state((uint32_t)p, &gb, trig, &gattr);
+            int lr = gb == (1ull << 6 | 1ull << 7);
+            if (!(a && b && x && y && z && lr)) printf("    a=%d b=%d x=%d y=%d z=%d lr=%d buttons=%llx attr=%u\n", a, b, x, y, z, lr, (unsigned long long)gb, gattr);
+            check(a && b && x && y && z && lr, "GameCube adapter: A B X Y = Pro A B X Y, Z = ZR (as on the console), L / R clicks = L / R");
+            SDL_SetJoystickVirtualButton(gj, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER, false); SDL_SetJoystickVirtualButton(gj, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, false);
+            settle(); h->gc_state((uint32_t)p, &gb, trig, &gattr);
+            int rest = trig[0] == 0 && trig[1] == 0 && gb == 0;
+            SDL_SetJoystickVirtualAxis(gj, SDL_GAMEPAD_AXIS_LEFT_TRIGGER, 32767); SDL_SetJoystickVirtualAxis(gj, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER, 0); settle(); h->gc_state((uint32_t)p, &gb, trig, &gattr);
+            int full = near_((int)trig[0], 32767, 2) && near_((int)trig[1], 16384, 2) && !(gb >> 8 & 3);
+            if (!(rest && full)) printf("    rest=%d full=%d triggers %u %u buttons %llx\n", rest, full, trig[0], trig[1], (unsigned long long)gb);
+            check(rest && full, "GameCube adapter: analog triggers 0..0x7fff in the state (full / half / rest), no ZL / ZR button from them");
+            SDL_SetJoystickVirtualAxis(gj, SDL_GAMEPAD_AXIS_LEFT_TRIGGER, -32768); SDL_SetJoystickVirtualAxis(gj, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER, -32768);
+            h->gc_erm((uint32_t)p, 1);
+            check(g_vj[13].lo == 65535 && g_vj[13].hi == 65535, "GameCube adapter: rumble command Start reaches the controller's motor");
+            h->gc_erm((uint32_t)p, 0);
+            check(g_vj[13].lo == 0 && g_vj[13].hi == 0, "GameCube adapter: rumble command Stop stops it");
+            Sleep(1100); write_text(path, "[general]\r\ngamecube_style = pro\r\n"); Sleep(1100); nnpad_poll(1);
+            check(h->style((uint32_t)p) == 1 && !nnpad_gc_native(), "GameCube adapter: gamecube_style = pro shows it to the game as a Pro Controller");
+            Sleep(1100); write_text(path, "[general]\r\n"); Sleep(1100); nnpad_poll(1);
+            check(h->style((uint32_t)p) == 0x20 && nnpad_gc_native(), "GameCube adapter: gamecube_style back to native");
+        }
+        SDL_CloseJoystick(gj);
+        SDL_DetachVirtualJoystick(gid);
+        settle();
+        check(!nnpad_is_gc(2) && h->style(2) == 0, "GameCube adapter: unplugged port: player 3 is gone");
+    }
 
     /* ---- buttons, positional layout */
     {

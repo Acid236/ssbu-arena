@@ -228,6 +228,20 @@ Options are environment variables, set with `--env NAME=VALUE` (full list: comme
 functions that are not the real behaviour), `SSBU_TRACE`, `SSBU_PAD_BACKEND=xinput`, `SSBU_FIXED_SEED=<n>`.
 Pad mapping file and tools: `ssbu_native.exe --pad-test`, `--pad-map <n>`.
 
+## GameCube controller adapter
+
+The Nintendo adapter (WUP-028) and clones such as the Mayflash 4-port adapter **in its "Switch" mode** (both are USB `057e:0337`) are read directly (`runtime/nnpad_gca.c`). Each controller plugged into a port reaches the game as a **GameCube controller** (style `Gc`, with its analog triggers and its rumble motor), not as a Pro Controller.
+
+It needs the adapter's **WinUSB driver**, the one Slippi's installer ("install GameCube adapter drivers") or Zadig (WinUSB on `WUP-028`) puts on it. Nothing is installed or changed by this project. It works with only one app at a time, so close Delfinovin or Slippi before playing.
+
+| Setting | Effect |
+|---|---|
+| `SSBU_GCA=0` | does not look for the adapter at all |
+| `SSBU_GCA_STATS=1` | every 2 s in the log: reports per second, interval, apply time, age of the state at the game's samples |
+| `controllers.ini`, `[general]` `gamecube_style = pro` | shows these controllers to the game as Pro Controllers (default `native`) |
+
+If a GameCube controller misbehaves in the game, try `gamecube_style = pro`, which keeps the adapter and changes only how the game is told about it.
+
 ## In-game menu (F1)
 
 A settings menu drawn over the game's picture (Dear ImGui, Vulkan renderer only). It is **off by default**: turn it on with

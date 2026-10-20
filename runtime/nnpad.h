@@ -12,9 +12,13 @@ typedef struct {
     int has_motion;             /* the device has a gyro and accelerometer */
     float accel[3];             /* in G, Nintendo axes (see nnpad_sdl.c; the frame is NOT VERIFIED against a console) */
     float gyro[3];              /* in revolutions per second, same axes */
+    int gc;                     /* a GameCube controller (nnpad_gca.c): nnhid.c reports it as a GameCube controller when the game supports that style */
+    int trig_l, trig_r;         /* analog triggers 0..32767 (gc only) */
 } NnPadState;
 
 int  nnpad_init(void);                           /* SDL up (no video, no window); 0 = failed. Also loads controllers.ini. */
+int  nnpad_is_gc(int player);                    /* the device of this player slot is a GameCube controller (from the adapter) */
+int  nnpad_gc_native(void);                      /* controllers.ini gamecube_style: 1 = native GameCube style (default), 0 = as a Pro Controller */
 void nnpad_poll(int force);                      /* hot-plug, config reload; cheap when called often (at most once per ms) */
 int  nnpad_present(int player);                  /* a device is assigned to this player slot */
 int  nnpad_get(int player, NnPadState *out);     /* 0 = none */
@@ -55,6 +59,14 @@ typedef struct {
     int (*six)(uint32_t id, float accel[3], float gyro[3], int *at_rest);
     void (*test_mode)(int on);
     uint32_t (*led)(uint32_t id);
+    void (*gc_state)(uint32_t id, uint64_t *buttons, uint32_t trig[2], uint32_t *attr);   /* NpadGcState as the game reads it */
+    void (*gc_erm)(uint32_t id, uint64_t command);                                        /* SendVibrationGcErmCommand with a GameCube handle */
 } NnHidHooks;
-int nnpad_selftest(const NnHidHooks *h);         /* number of failed checks; only virtual devices count while it runs */
+int  nnpad_selftest(const NnHidHooks *h);         /* number of failed checks; only virtual devices count while it runs */
+
+/* nnpad_gca.c: the GameCube controller adapter over WinUSB, published to SDL as virtual gamepads (vendor 057e, product 0337) */
+int  gca_start(void);                            /* after SDL_Init: 1 = looking for adapters; 0 = off (SSBU_GCA=0) or no WinUSB */
+int  gca_port_of(unsigned joy_id);               /* adapter * 4 + port of a virtual gamepad made here, else -1 */
+void gca_sample(unsigned joy_id);                /* the game reads this device now (SSBU_GCA_STATS: age of the state) */
+unsigned gca_seq(void);                          /* reports applied so far: a change means SDL's state is stale (nnpad_poll) */
 #endif
