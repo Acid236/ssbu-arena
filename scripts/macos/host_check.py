@@ -96,10 +96,10 @@ def menu_symbols(work, mac):
 
     def syms(argv, kinds=None):
         r = subprocess.run(argv, capture_output=True, text=True, errors='replace')
-        return {ln.split()[-1] for ln in r.stdout.splitlines() if len(ln.split()) >= 2 and not ln.endswith(':') and (not kinds or ln.split()[-2] in kinds)}
+        return {ln.split()[-1] for ln in r.stdout.splitlines() if ln.strip() and not ln.endswith(':') and (not kinds or (len(ln.split()) >= 2 and ln.split()[-2] in kinds))}
     undef = set()
     for o in menu:
-        undef |= syms(['nm', '-u', o], ('U',))      # (weak undefined names may stay undefined)
+        undef |= syms(['nm', '-u', o], None if mac else ('U',))      # (Linux: weak undefined names may stay undefined; macOS nm -u prints names only)
     defined = set()
     for n in os.listdir(objdir):
         if n.endswith('.obj'):
@@ -118,7 +118,8 @@ def menu_symbols(work, mac):
     sys_defined = set()
     for lib in libs:
         sys_defined |= {n.split('@')[0] for n in syms(['nm', '-D', '--defined-only', os.path.realpath(lib)])}
-    missing = [n for n in left if n not in sys_defined]
+    linker = {'__dso_handle', '_GLOBAL_OFFSET_TABLE_'}      # made by the link itself (crtbegin.o, the linker)
+    missing = [n for n in left if n not in sys_defined and n not in linker]
     text = 'settings menu: %d undefined names: %d from other host objects, %d from %s' % (
         len(undef), len(undef) - len(left), len(left) - len(missing), ' '.join(os.path.basename(x) for x in libs))
     if missing:
