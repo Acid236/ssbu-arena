@@ -111,6 +111,17 @@ CXX_SOURCES = ([os.path.join(HERE, 'menu.cpp')] + [os.path.join(IMGUI, n) for n 
                if HAVE_IMGUI else [])
 CXX_FLAGS = ['-x', 'c++', '-std=c++14', '-O1', '-g', '-w', '-fno-exceptions', '-fno-rtti', '-D_CRT_SECURE_NO_WARNINGS', '-DIMGUI_USER_CONFIG="menu_imconfig.h"', '-I', HERE, '-I', IMGUI]
 LIBS = ['-luser32', '-lgdi32', '-lwinmm', '-lmfplat', '-lmfreadwrite', '-lmfuuid', '-lole32', '-lshlwapi', '-lshell32', '-lsetupapi']
+# Media Foundation delay-loaded: Windows N without the Media Feature Pack has no MFPlat.dll, and the exe must still start
+# there (the movies then play with FFmpeg, mf_ffmpeg.c); nnmovie_mf.c's movie_mf_present() is asked before any call.
+LIBS += ['-ldelayimp', '-Wl,/DELAYLOAD:MFPlat.DLL', '-Wl,/DELAYLOAD:MFReadWrite.dll']
+# mf_ffmpeg.c: the movie fallback for PCs whose Media Foundation cannot play the movies (plat_mf.c on FFmpeg's DLLs, which
+# the exe loads at run time: nothing is linked). Built only with FFmpeg's headers: FFMPEG_ROOT (scripts\setup.py sets it),
+# default deps\ffmpeg, the package scripts\fetch_media.py downloads; without them the exe simply has no fallback.
+FFMPEG_ROOT = os.environ.get('FFMPEG_ROOT') or os.path.join(HERE, 'deps', 'ffmpeg')
+HAVE_FFMPEG = os.path.isfile(os.path.join(FFMPEG_ROOT, 'include', 'libavcodec', 'avcodec.h'))
+if HAVE_FFMPEG and not TARGET_LINUX:
+    HOST_SOURCES.append('mf_ffmpeg.c')
+    HOST_FLAGS = HOST_FLAGS + ['-I', os.path.join(FFMPEG_ROOT, 'include')]
 if TARGET_LINUX:
     def pkg(*args):
         return subprocess.run(['pkg-config'] + list(args) + ['sdl3', 'freetype2', 'openssl', 'libavformat', 'libavcodec', 'libswscale', 'libswresample', 'libavutil'], capture_output=True, text=True, check=True).stdout.split()
@@ -255,7 +266,8 @@ def cmd_link(host_only=False):
     for n in HOST_SOURCES + ['gamedll.c'] + ([] if HAVE_IMGUI else ['menu_stub.c']):
         src, obj = os.path.join(HERE, n), os.path.join(objdir, n[:-2] + '.obj')
         objs.append(obj)
-        if not os.path.exists(obj) or os.path.getmtime(obj) < max(os.path.getmtime(src), newest_dep, newest_vk if n == 'nvn_vk.c' else 0):
+        if not os.path.exists(obj) or os.path.getmtime(obj) < max(os.path.getmtime(src), newest_dep, newest_vk if n == 'nvn_vk.c' else 0,
+                                                                       os.path.getmtime(os.path.join(HERE, 'plat_mf.c')) if n == 'mf_ffmpeg.c' else 0):   # mf_ffmpeg.c includes plat_mf.c
             jobs.append((src, obj))
     for src in CXX_SOURCES:                          # U1: the settings menu (C++); imgui's own files depend on their source and menu_imconfig.h only
         obj = os.path.join(objdir, os.path.splitext(os.path.basename(src))[0] + '_cxx.obj')

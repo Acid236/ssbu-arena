@@ -25,7 +25,8 @@ also written to build\\install_state.json; scripts/setup.py keeps its own build\
               runtime\\fonts_open are used.
  6. tools     LLVM/clang 9 and the prebuilt runtime (or SDL3, Vulkan-Headers, glslang, suyu, MSVC to build everything).
  7. dlc       build\\config\\dlc.txt from the DLC file names (the runtime unlocks that content; names only).
- 7. media     libopus (music) into deps\\opus; the Store codecs for the movies are checked (links printed when missing).
+ 7. media     libopus (music) into deps\\opus; FFmpeg (the movies where Windows cannot play WebM) into deps\\ffmpeg, both
+              SHA-256 checked; the Store codecs for the movies are checked (links printed when missing).
  8. build     scripts/setup.py: deps stage convert modules tables lift sdk compile nro link check.
  9. shortcuts "SSBU native" on the desktop and in the Start menu, "SSBU native - Installer" in the Start menu (scripts/shortcuts.py).
 10. unblock   Unblock-File over tools, scripts and the built exe / dlls (cheap, idempotent).
@@ -801,10 +802,18 @@ def step_media(cx):
     else:
         got = fetch_media.fetch_opus(DEPS)
         msg = 'libopus ready' if got else 'no music (libopus could not be fetched; the game runs silent)'
+    # FFmpeg: the movies' fallback where Windows cannot play WebM (codecs missing or broken, Windows N); always fetched,
+    # since the Store check below cannot tell a broken copy of the codecs from a working one
+    if a.dry_run:
+        ff = fetch_media.ffmpeg_ready(DEPS)
+        msg += '; FFmpeg is already in deps\\ffmpeg' if ff else '; would download FFmpeg (movie fallback, 3 MB) into deps\\ffmpeg, SHA-256 checked'
+    else:
+        ff = fetch_media.fetch_ffmpeg(DEPS)
+        msg += '; FFmpeg ready (movie fallback)' if ff else '; no FFmpeg (movies only with Windows\' own codecs)'
     codecs = fetch_media.check_codecs()
     missing = [k for k, v in codecs.items() if v is not True]
     if missing:
-        msg += '; movie codecs missing or unknown (Store links printed above): ' + ', '.join(missing)
+        msg += '; Store codecs missing or unknown: ' + ', '.join(missing) + (' (FFmpeg plays the movies)' if ff else ' (Store links printed above)')
     return ('dry' if a.dry_run else 'done'), msg
 
 

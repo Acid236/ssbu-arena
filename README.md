@@ -194,8 +194,8 @@ tools, or an existing dump you made legally. This project cannot do that step fo
 **Does it include the game?** No. Not the game, not the keys, not the firmware, and no links to them.
 
 **Which GPU do I need?** Any GPU with a Vulkan 1.3 driver. An integrated Intel Raptor Lake GPU played a whole match at
-59-60 fps in our tests. Windows 10/11 x64. The movies need the free VP9 Video Extensions and Web Media Extensions from
-the Microsoft Store.
+59-60 fps in our tests. Windows 10/11 x64. The movies play with Windows' own VP9 Video Extensions and Web Media
+Extensions (free, Microsoft Store) when they work, otherwise with FFmpeg, which the installer downloads.
 
 **Can I play online?** Experimental. The game's Local Wireless mode works over a LAN, a room code or a lobby server:
 [docs/ONLINE.md](docs/ONLINE.md). Rollback netcode is in progress and is not available yet.

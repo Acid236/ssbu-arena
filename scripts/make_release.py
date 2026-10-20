@@ -259,6 +259,13 @@ def main():
                GLSLANG_ROOT=tools['glslang'], SUYU_ROOT=tools['suyu'], RECOMP_EXE=EXE)
     env['IMGUI_ROOT'] = imgui or os.path.join(build, 'no-imgui')     # build.py would otherwise look beside the study tree
     os.environ['IMGUI_ROOT'] = env['IMGUI_ROOT']                     # the audit imports the staged build.py in this process
+    # the movie fallback (mf_ffmpeg.c) is compiled with FFmpeg's headers; a package exe without it would leave players whose
+    # Windows cannot play WebM on a black screen, so they are required (python scripts/fetch_media.py puts them in deps\ffmpeg)
+    ffmpeg = find([os.environ.get('FFMPEG_ROOT'), os.path.join(deps, 'ffmpeg')],
+                  lambda d: os.path.exists(os.path.join(d, 'include', 'libavcodec', 'avcodec.h')))
+    if not ffmpeg:
+        sys.exit('not found: FFmpeg headers (deps\\ffmpeg\\include): run python scripts/fetch_media.py, or set FFMPEG_ROOT')
+    env['FFMPEG_ROOT'] = os.environ['FFMPEG_ROOT'] = ffmpeg
 
     def run(argv, what):
         r = subprocess.run(argv, cwd=work, env=env, capture_output=True, text=True, errors='replace')

@@ -823,7 +823,21 @@ def step_sdk(cx):
 def build_env(cx):
     if cx.linux:
         return cx.env(RECOMP_GEN='gen_eh_o2', RECOMP_OBJ='obj_eh_o1', RECOMP_DLL=game_lib(cx), RECOMP_NRO_SUFFIX='_eh_o2', RECOMP_TARGET='linux')
-    return cx.env(RECOMP_GEN='gen_eh_o2', RECOMP_OBJ='obj_eh_o1', RECOMP_DLL='ssbu_game_eh_o1.dll', RECOMP_NRO_SUFFIX='_eh_o2')
+    # FFMPEG_ROOT: build.py compiles the movie fallback (mf_ffmpeg.c) with the headers install.py put in deps\ffmpeg
+    return cx.env(RECOMP_GEN='gen_eh_o2', RECOMP_OBJ='obj_eh_o1', RECOMP_DLL='ssbu_game_eh_o1.dll', RECOMP_NRO_SUFFIX='_eh_o2',
+                  FFMPEG_ROOT=os.environ.get('FFMPEG_ROOT') or os.path.join(REPO, 'deps', 'ffmpeg'))
+
+
+def copy_ffmpeg(cx):
+    """The movie fallback's FFmpeg DLLs (deps\\ffmpeg\\bin, install.py) beside the exe, where mf_ffmpeg.c loads them from.
+    Returns how many were copied (0: none there; the movies then play only where Windows' own codecs can)."""
+    src = os.path.join(os.environ.get('FFMPEG_ROOT') or os.path.join(REPO, 'deps', 'ffmpeg'), 'bin')
+    names = [n for n in (os.listdir(src) if os.path.isdir(src) else []) if n.lower().endswith('.dll')]
+    for n in names:
+        shutil.copy2(os.path.join(src, n), os.path.join(cx.work, n))
+    say('  FFmpeg (movie fallback): %s' % ('%d DLLs beside the exe' % len(names) if names else
+                                           'not in deps\\ffmpeg: movies only where Windows\' own codecs can play them'))
+    return len(names)
 
 
 def step_compile(cx):
@@ -864,6 +878,7 @@ def step_link(cx):
             EXE, ', ' + opus[0] + ' (music)' if opus else '', os.path.getsize(os.path.join(cx.work, 'ssbu_game_eh_o1.dll')) / 1048576.0))
         if not opus:
             say('  WARNING: no libopus (neither in the runtime package nor in deps\\opus): music and the other Opus sounds will be silent')
+        copy_ffmpeg(cx)
         return
     cx.run('link', [os.environ.get('COMSPEC', 'cmd.exe'), '/c', os.path.join(cx.work, 'build_glslang.bat')], env=cx.env())
     cx.run('link', [sys.executable, 'build.py', 'link'], env=cx.env(**{k: v for k, v in build_env(cx).items() if k != 'RECOMP_NRO_SUFFIX'}, RECOMP_EXE=EXE))
@@ -879,6 +894,7 @@ def step_link(cx):
                                                                                          ', ' + name if opus else ''))
     if not opus:
         say('  WARNING: no libopus: music and the other Opus sounds will be silent (deps step above; BUILDING.md)')
+    copy_ffmpeg(cx)
 
 
 def link_linux(cx):
