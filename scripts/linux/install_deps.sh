@@ -8,6 +8,8 @@
 #
 #   scripts/linux/install_deps.sh              everything
 #   scripts/linux/install_deps.sh --no-system  skip step 1 (you install the packages yourself)
+#   scripts/linux/install_deps.sh --steamos-host   on a Steam Deck: use pacman on SteamOS itself (see below) instead of
+#                                              stopping with the advice to build in a distrobox container
 #
 # Package lists: Arch-based distributions were used to build and test the port. The Debian/Ubuntu and Fedora lists are
 # the equivalent package names and have not been tried; `scripts/setup.py --target linux` checks every library and says
@@ -17,10 +19,12 @@ set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 DEPS="$REPO/deps"
 SYSTEM=1
+STEAMOS_HOST=0
 for arg in "$@"; do
     case "$arg" in
         --no-system) SYSTEM=0 ;;
-        -h|--help) sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --steamos-host) STEAMOS_HOST=1 ;;
+        -h|--help) sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "unknown option $arg" >&2; exit 2 ;;
     esac
 done
@@ -30,10 +34,37 @@ say() { printf '\033[1m==> %s\033[0m\n' "$*"; }
 # ---------------------------------------------------------------------------------------------- 1. system packages
 if [ "$SYSTEM" = 1 ]; then
     . /etc/os-release
+    # SteamOS (Steam Deck): the system is read-only, the deck user has no password until one is set, and every SteamOS
+    # update puts the system back, removing what pacman installed. A distrobox container (SteamOS 3.5 and newer include
+    # distrobox and podman) keeps the tools in your home folder, survives updates, and the game runs from it with the
+    # Deck's GPU and sound. Inside the container /etc/os-release is the container's, so this check does not stop there.
+    if [ "${ID:-}" = "steamos" ] && [ "$STEAMOS_HOST" = 0 ]; then
+        say "SteamOS (Steam Deck): build inside a distrobox container"
+        echo "  In Desktop Mode, open Konsole and run, from this folder:"
+        echo
+        echo "    distrobox create --name ssbu --image docker.io/library/archlinux:latest"
+        echo "    distrobox enter ssbu"
+        echo "    scripts/linux/install_deps.sh"
+        echo "    deps/venv/bin/python scripts/setup.py --target linux --dump <your dump folder>"
+        echo
+        echo "  Keep this folder in your home folder (the container sees your home folder). Play with ./play.sh from"
+        echo "  inside the container too (distrobox enter ssbu first)."
+        echo "  To install on SteamOS itself instead (needs a sudo password, 'sudo steamos-readonly disable' and the"
+        echo "  pacman keys; a SteamOS update removes the packages again), run this script with --steamos-host."
+        exit 1
+    fi
     if command -v pacman >/dev/null; then
         say "Arch-based system ($PRETTY_NAME): pacman"
+        EXTRA=""
+        # a Steam Deck (in a distrobox container a fresh Arch has no GPU driver and no sound client library): the Deck's
+        # Vulkan driver (Mesa RADV) and libpulse, which SDL3 loads to play through the Deck's PipeWire
+        if [ "$(cat /sys/devices/virtual/dmi/id/board_vendor 2>/dev/null)" = "Valve" ]; then
+            EXTRA="vulkan-radeon libpulse"
+            echo "  Steam Deck: also $EXTRA"
+        fi
+        # shellcheck disable=SC2086
         sudo pacman -S --needed clang pkgconf sdl3 freetype2 openssl ffmpeg glslang vulkan-icd-loader \
-            libglvnd opus python git
+            libglvnd opus python git $EXTRA
     elif command -v apt-get >/dev/null; then
         say "Debian/Ubuntu-based system ($PRETTY_NAME): apt (SDL3 needs Debian 13 / Ubuntu 25.04 or newer)"
         sudo apt-get install -y clang pkg-config libsdl3-dev libfreetype-dev libssl-dev libavformat-dev libavcodec-dev \
