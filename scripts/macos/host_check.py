@@ -21,18 +21,21 @@ import setup  # noqa: E402
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('--work', default=os.path.join(REPO, 'build-macos', 'work'))
+    ap.add_argument('--target', choices=('macos', 'linux'), default='macos')
+    ap.add_argument('--work', default=None)
     ap.add_argument('--vulkan-headers', required=True)
     ap.add_argument('--suyu', required=True)
     ap.add_argument('--clang', default='clang')
     a = ap.parse_args()
 
+    mac = a.target == 'macos'
     cx = type('Cx', (), {})()
-    cx.work = os.path.abspath(a.work)
+    cx.linux, cx.mac, cx.posix = not mac, mac, True
+    cx.work = os.path.abspath(a.work or os.path.join(REPO, 'build-' + a.target, 'work'))
     os.makedirs(cx.work, exist_ok=True)
     setup.step_stage(cx)
     env = {k: v for k, v in os.environ.items() if not k.startswith(('RECOMP_', 'SSBU_'))}
-    env.update(PYTHONIOENCODING='utf-8', RECOMP_TARGET='macos', RECOMP_CLANG=a.clang, RECOMP_EXE='ssbu_native',
+    env.update(PYTHONIOENCODING='utf-8', RECOMP_TARGET=a.target, RECOMP_CLANG=a.clang, RECOMP_EXE='ssbu_native',
                VULKAN_HEADERS=os.path.abspath(a.vulkan_headers), SUYU_ROOT=os.path.abspath(a.suyu),
                IMGUI_ROOT=os.path.join(cx.work, 'no-imgui'))
 
@@ -61,17 +64,17 @@ def main():
     elif code:
         verdict = 'every host file compiles; the link fails'
     else:
-        verdict = 'the host runtime compiles and links for macOS'
+        verdict = 'the host runtime compiles and links for %s' % ('macOS' if mac else 'Linux')
     print('\nRESULT: ' + verdict)
-    mod_ok, mod_out = module_check(cx.work, run, a.clang)
+    mod_ok, mod_out = module_check(cx.work, run, a.clang, mac)
     print(mod_out)
-    mod_verdict = ('a module library built as build_nro.py builds one (.dylib) loads through LoadLibraryA("<name>.dll") and runs'
+    mod_verdict = ('a module library built as build_nro.py builds one (%s) loads' % ('.dylib' if mac else '.so') + ' through LoadLibraryA("<name>.dll") and runs'
                    if mod_ok else 'the module library check FAILED')
     print('RESULT: ' + mod_verdict)
     summary = os.environ.get('GITHUB_STEP_SUMMARY')
     if summary:
         with open(summary, 'a', encoding='utf-8') as f:
-            f.write('## macOS host runtime\n\n%s\n\n%s\n\n```\n%s\n```\n\n```\n%s\n```\n' % (verdict, mod_verdict, mod_out[-8000:], out[-60000:]))
+            f.write('## ' + a.target + ' host runtime\n\n%s\n\n%s\n\n```\n%s\n```\n\n```\n%s\n```\n' % (verdict, mod_verdict, mod_out[-8000:], out[-60000:]))
     return 1 if code or not mod_ok else 0
 
 
@@ -106,7 +109,7 @@ sys.exit(1 if r.returncode or not os.path.exists(lib) else 0)
 '''
 
 
-def module_check(work, run, clang):
+def module_check(work, run, clang, mac=True):
     """The module path of the macOS build without any game code: a small C file compiled with build_nro.py's flags and
     linked by build.py's link_dll (-dynamiclib, @rpath install name, undefined names left to load time) into
     module_check/test_mod<LIB_EXT>, then loaded by a program on plat_posix.c the way nnro.c loads a module."""
@@ -120,11 +123,12 @@ def module_check(work, run, clang):
         return False, 'module build:\n' + out
     pkg = subprocess.run(['pkg-config', '--cflags', '--libs', 'sdl3', 'openssl'], capture_output=True, text=True).stdout.split()
     exe = os.path.join(d, 'loader')
-    c2, o2 = run([clang, '-O1', '-w', '-mmacosx-version-min=14.4', '-include', 'plat/plat_pre.h', '-I', 'plat', os.path.join(d, 'loader.c'), 'plat_posix.c', '-o', exe] + pkg)
+    c2, o2 = run([clang, '-O1', '-w'] + (['-mmacosx-version-min=14.4'] if mac else []) + ['-include', 'plat/plat_pre.h', '-I', 'plat', os.path.join(d, 'loader.c'), 'plat_posix.c', '-o', exe] + pkg
+                 + ([] if mac else ['-lm', '-ldl', '-lpthread']))
     if c2:
         return False, out + '\nloader build:\n' + o2
     c3, o3 = run([exe])
-    c4, o4 = run(['otool', '-L', os.path.join(d, 'test_mod.dylib')])
+    c4, o4 = run(['otool', '-L', os.path.join(d, 'test_mod.dylib')] if mac else ['readelf', '-d', os.path.join(d, 'test_mod.so')])
     return c3 == 0, out + o3 + o4
 
 

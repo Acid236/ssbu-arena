@@ -28,6 +28,9 @@ static int have_targets_live(void);
 VKD(X)
 #undef X
 static PFN_vkCmdSetVertexInputEXT vkCmdSetVertexInputEXT;
+#ifdef __APPLE__
+static PFN_vkCmdBindVertexBuffers2 vkCmdBindVertexBuffers2;  /* MAC2: the strides of the bindings without dynamic vertex input */
+#endif
 static PFN_vkCmdPushDescriptorSetKHR vkCmdPushDescriptorSetKHR;
 static PFN_vkGetPhysicalDeviceFeatures2 vkGetPhysicalDeviceFeatures2;
 static PFN_vkGetPhysicalDeviceFormatProperties vkGetPhysicalDeviceFormatProperties;
@@ -129,6 +132,9 @@ static void vkd_device_info(VkDeviceCreateInfo *di, const VkExtensionProperties 
                (int)D.port.imageView2DOn3DImage, (int)D.port.vertexAttributeAccessBeyondStride);
 #endif
     if (!D.f13.dynamicRendering || !D.f13.synchronization2) vkd_fail("the device lacks dynamicRendering / synchronization2");
+#ifdef __APPLE__
+    if (!D.has_vids) printf("nvn_vk: no VK_EXT_vertex_input_dynamic_state (MoltenVK): the vertex layout is part of the pipeline key, strides dynamic\n"); else
+#endif
     if (!D.has_vids) nvn_vk_missing("a GPU without VK_EXT_vertex_input_dynamic_state (the vertex layout is not yet part of the pipeline key)");
     if (!D.f2.features.textureCompressionBC) nvn_vk_missing("a GPU without BC texture compression");
     di->enabledExtensionCount = D.next; di->ppEnabledExtensionNames = D.exts; di->pNext = &D.f2;
@@ -2200,6 +2206,37 @@ static void compute_dispatch_run(Prog *p, Stage *st, VStage *v, uint32_t gx, uin
 }
 /* Everything of a draw up to the draw call. topo: NVN primitive. Returns 0 when the draw cannot be done (counted as skipped). */
 static uint64_t g_dt_voff[16]; static VkBuffer g_dt_vb[16]; int nvn_front_draw_tag(void);      /* round 17, test (SSBU_DRAWTAG): see dt_vk */
+#ifdef __APPLE__
+/* MAC2: the vertex layout of the draw into the pipeline key, without VK_EXT_vertex_input_dynamic_state. The same bindings,
+ * in the same order, as step 4 of draw_prepare gives vkCmdSetVertexInputEXT on other devices. */
+static void vi_key(PKey *k, const uint64_t *voff, uint32_t ints, uint32_t sints) {
+    uint32_t bmap[32], nb = 0, na = 0, need_const = 0;
+    memset(bmap, 0xff, sizeof bmap);
+    for (int i = 0; i < 16; i++) {
+        uint32_t a = i < R.nattr ? R.vattr[i] : 0;
+        int nf = (int)(a & 0xff), stream = (int)((a >> 8) & 31);
+        VkFormat f = nf ? vertex_vkfmt(nf) : VK_FORMAT_UNDEFINED;
+        k->vi_loc[na] = (uint32_t)i;
+        if (f && stream < 16 && voff[stream] != ~0ull) {
+            if (bmap[stream] == 0xffffffffu) {
+                bmap[stream] = nb;
+                if (R.vstream[stream].divisor) { k->vi_rate |= 1u << nb; k->vi_div[nb] = R.vstream[stream].divisor; }
+                nb++;
+            }
+            k->vi_bind[na] = bmap[stream]; k->vi_fmt[na] = (uint32_t)f; k->vi_off[na] = a >> 14; na++;
+        } else {                                   /* not supplied: the constant binding, as in step 4 */
+            k->vi_bind[na] = 16; k->vi_fmt[na] = (ints >> i & 1) ? ((sints >> i & 1) ? VK_FORMAT_R32G32B32A32_SINT : VK_FORMAT_R32G32B32A32_UINT) : VK_FORMAT_R32G32B32A32_SFLOAT;
+            k->vi_off[na] = (ints >> i & 1) ? 16 : 0;
+            need_const = 1; na++;
+        }
+    }
+    if (need_const) {
+        for (uint32_t i = 0; i < na; i++) if (k->vi_bind[i] == 16) k->vi_bind[i] = nb;
+        k->vi_rate |= 1u << nb; k->vi_div[nb] = 1; nb++;
+    }
+    k->vi_na = na; k->vi_nb = nb;
+}
+#endif
 static int draw_prepare(unsigned prim) {
     static const int8_t topo[7] = {VK_PRIMITIVE_TOPOLOGY_POINT_LIST, VK_PRIMITIVE_TOPOLOGY_LINE_LIST, -1, VK_PRIMITIVE_TOPOLOGY_LINE_STRIP, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN};
     static const uint8_t tclass[7] = {0, 1, 1, 1, 2, 2, 2};
@@ -2278,6 +2315,9 @@ static int draw_prepare(unsigned prim) {
         k.a2c = R.ms[1] != 0; k.dclamp = R.depth_clamp && D.f2.features.depthClamp; k.blend_on = R.blend_on;
         memcpy(k.blend, R.blend, sizeof k.blend);
     }
+#ifdef __APPLE__
+    if (!D.has_vids) vi_key(&k, voff, ints, sints);
+#endif
     pkey_targets(&k);
     Pipe *p = pipe_get(&k, vs, fs);
     if (!p) return 0;                              /* shader_wait = skip: the pipeline is being made by a worker, the draw is left out (counted in pipe_get) */
@@ -2322,8 +2362,18 @@ static int draw_prepare(unsigned prim) {
             for (uint32_t i = 0; i < na; i++) if (ad[i].binding == 16) ad[i].binding = nb;
             vb[nb] = R.zero; vo[nb] = 65536; nb++;
         }
+#ifdef __APPLE__
+        if (!D.has_vids) {                         /* the layout is the pipeline's (vi_key); only the strides are given here */
+            VkDeviceSize vst[17];
+            for (uint32_t i = 0; i < nb; i++) vst[i] = bd[i].stride;
+            if (nb) vkCmdBindVertexBuffers2(R.cmd, 0, nb, vb, vo, NULL, vst);
+        } else {
+#endif
         vkCmdSetVertexInputEXT(R.cmd, nb, bd, na, ad);
         if (nb) vkCmdBindVertexBuffers(R.cmd, 0, nb, vb, vo);
+#ifdef __APPLE__
+        }
+#endif
     }
     /* 5. descriptors */
     {
@@ -2457,6 +2507,9 @@ static void stencil_clear_masked(uint32_t mask, uint32_t value, int sx, int sy, 
     vkCmdSetDepthTestEnable(R.cmd, VK_FALSE); vkCmdSetDepthWriteEnable(R.cmd, VK_FALSE); vkCmdSetDepthCompareOp(R.cmd, VK_COMPARE_OP_ALWAYS); vkCmdSetStencilTestEnable(R.cmd, VK_TRUE);
     vkCmdSetStencilOp(R.cmd, VK_STENCIL_FACE_FRONT_AND_BACK, VK_STENCIL_OP_REPLACE, VK_STENCIL_OP_REPLACE, VK_STENCIL_OP_REPLACE, VK_COMPARE_OP_ALWAYS);
     vkCmdSetDepthBiasEnable(R.cmd, VK_FALSE); vkCmdSetPrimitiveRestartEnable(R.cmd, VK_FALSE); vkCmdSetRasterizerDiscardEnable(R.cmd, VK_FALSE);
+#ifdef __APPLE__
+    if (D.has_vids)                                /* without it the pipeline has no vertex input (an all-zero layout in the key) */
+#endif
     vkCmdSetVertexInputEXT(R.cmd, 0, NULL, 0, NULL);
     vkCmdDraw(R.cmd, 3, 1, 0, 0);
     R.pipe_bound = NULL; R.dyn_dirty = 1;
@@ -3741,6 +3794,10 @@ static void vkd_init(void) {
     VKD(X)
 #undef X
     vkCmdSetVertexInputEXT = (PFN_vkCmdSetVertexInputEXT)vkGetDeviceProcAddr(V.device, "vkCmdSetVertexInputEXT");
+#ifdef __APPLE__
+    vkCmdBindVertexBuffers2 = (PFN_vkCmdBindVertexBuffers2)vkGetDeviceProcAddr(V.device, "vkCmdBindVertexBuffers2");
+    if (!D.has_vids && !vkCmdBindVertexBuffers2) vkd_fail("the device has neither VK_EXT_vertex_input_dynamic_state nor vkCmdBindVertexBuffers2");
+#endif
     if (D.has_push) { vkCmdPushDescriptorSetKHR = (PFN_vkCmdPushDescriptorSetKHR)vkGetDeviceProcAddr(V.device, "vkCmdPushDescriptorSetKHR"); if (!vkCmdPushDescriptorSetKHR) D.has_push = 0; }
     if (D.has_fault) { vkGetDeviceFaultInfoEXT = (PFN_vkGetDeviceFaultInfoEXT)vkGetDeviceProcAddr(V.device, "vkGetDeviceFaultInfoEXT"); D.has_fault = vkGetDeviceFaultInfoEXT != NULL; }
     if (D.has_ckpt) {

@@ -11,6 +11,10 @@
 it is the default when build-linux exists and build (a Windows cross build) does not; --userdata then defaults to
 $XDG_DATA_HOME/ssbu-recomp/userdata (~/.local/share/ssbu-recomp/userdata).
 
+--mac runs the native macOS build (scripts/setup.py --target macos): build folder build-macos, exe ssbu_native. On a Mac it is
+the default when build-macos exists; --userdata then defaults to ~/Library/Application Support/ssbu-recomp/userdata, and
+--play writes the game log to build-macos/logs/game_<time>.log (the last 10 are kept).
+
 --userdata must be a folder you can lose: the game writes its save data there (use a copy when testing).
 Options go to the game as environment variables (listed in BUILDING.md); --env NAME=VALUE adds one.
 """
@@ -42,10 +46,32 @@ def main():
     ap.add_argument('--seed', help='SSBU_FIXED_SEED value (deterministic random numbers)')
     ap.add_argument('--log', help='write the game output to this file instead of the console')
     ap.add_argument('--env', action='append', default=[], help='NAME=VALUE, may be repeated')
+    ap.add_argument('--mac', action='store_true', help='the native macOS build (default build folder build-macos, exe ssbu_native, '
+                                                      'saves in ~/Library/Application Support/ssbu-recomp/userdata unless --userdata)')
     a = ap.parse_args()
     if sys.platform.startswith('linux') and not a.linux and not a.build and not os.path.exists(os.path.join(REPO, 'build', 'state.json')):
         a.linux = True
-    if a.linux:
+    if sys.platform == 'darwin' and not a.mac and not a.linux and not a.build and os.path.exists(os.path.join(REPO, 'build-macos', 'state.json')):
+        a.mac = True
+    if a.mac:
+        a.build = os.path.abspath(a.build or os.path.join(REPO, 'build-macos'))
+        if not a.userdata:
+            a.userdata = os.path.expanduser('~/Library/Application Support/ssbu-recomp/userdata')
+        if not os.path.exists(os.path.join(a.build, 'state.json')):
+            print('no build in %s: run scripts/setup.py --target macos first (BUILDING_MAC.md)' % a.build)
+            return 1
+        if a.play and not a.log:                      # the game's log to a file (as --play does on Windows), the last 10 kept
+            logs = os.path.join(a.build, 'logs')
+            os.makedirs(logs, exist_ok=True)
+            a.log = os.path.join(logs, time.strftime('game_%Y%m%d_%H%M%S.log'))
+            old = sorted(n for n in os.listdir(logs) if n.startswith('game_') and n.endswith('.log'))
+            for n in old[:-9]:
+                try:
+                    os.remove(os.path.join(logs, n))
+                except OSError:
+                    pass
+            print('Playing. The game log goes to %s. Close the game window to quit.' % a.log)
+    elif a.linux:
         a.build = os.path.abspath(a.build or os.path.join(REPO, 'build-linux'))
         if not a.userdata:
             a.userdata = os.path.join(os.environ.get('XDG_DATA_HOME') or os.path.expanduser('~/.local/share'), 'ssbu-recomp', 'userdata')
@@ -79,7 +105,7 @@ def main():
                 print('Playing. The game log goes to %s (F1 > Log shows it). This window can stay minimised.' % a.log)
         if not a.userdata:
             ap.error('--userdata is required (or --play)')
-    main_exe = 'ssbu_native' if a.linux else 'ssbu_native.exe'
+    main_exe = 'ssbu_native' if (a.linux or a.mac) else 'ssbu_native.exe'
     a.exe = a.exe or main_exe
     state_file = os.path.join(a.build, 'state.json')
     with open(state_file) as f:

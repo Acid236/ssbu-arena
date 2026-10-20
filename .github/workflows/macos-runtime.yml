@@ -4,12 +4,67 @@ name: macOS runtime
 
 on:
   push:
-    paths: ['runtime/**', 'tests/plat_selftest.c', 'tools/lifter/build.py', 'scripts/macos/**', 'scripts/setup.py', '.github/workflows/macos-runtime.yml']
+    paths: ['runtime/**', 'tests/plat_selftest.c', 'tools/lifter/build.py', 'scripts/macos/**', 'scripts/setup.py', 'scripts/run.py', 'BUILDING_MAC.md', 'play_mac.sh', '.github/workflows/macos-runtime.yml']
   pull_request:
-    paths: ['runtime/**', 'tests/plat_selftest.c', 'tools/lifter/build.py', 'scripts/macos/**', 'scripts/setup.py', '.github/workflows/macos-runtime.yml']
+    paths: ['runtime/**', 'tests/plat_selftest.c', 'tools/lifter/build.py', 'scripts/macos/**', 'scripts/setup.py', 'scripts/run.py', 'BUILDING_MAC.md', 'play_mac.sh', '.github/workflows/macos-runtime.yml']
   workflow_dispatch:
 
 jobs:
+  # What a tester's install does, as far as it can be proven without game files: the scripts parse, install_mac.sh (no
+  # --dump) installs the tools, setup.py --target macos --tools-only checks every library with a test program, the glslang
+  # shim is built as the link step builds it, and collect_logs_mac.sh makes a report that holds no game files.
+  setup-macos:
+    runs-on: macos-14
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Shell scripts parse
+        run: bash -n scripts/macos/install_mac.sh && bash -n scripts/macos/collect_logs_mac.sh && bash -n play_mac.sh
+
+      - name: install_mac.sh (Homebrew packages, venv, Khronos headers, Mii sources; no dump, no build)
+        run: bash scripts/macos/install_mac.sh
+
+      - name: setup.py --target macos --tools-only (the deps step without a dump)
+        run: |
+          deps/venv/bin/python scripts/setup.py --target macos --tools-only
+          # a fake dump must make the full run stop at the dump check, not at the tools
+          mkdir -p fake_dump/exefs fake_dump/romfs
+          if deps/venv/bin/python scripts/setup.py --target macos --only deps --dump fake_dump > fake.txt 2>&1; then
+            echo "the fake dump was accepted"; cat fake.txt; exit 1
+          fi
+          cat fake.txt
+          grep -q "not found: the ExeFS folder needs the files main and sdk" fake.txt
+
+      - name: The glslang shim, built as the link step builds it
+        run: |
+          cd runtime
+          ../deps/venv/bin/python - <<'EOF'
+          import json, subprocess, sys
+          sys.path.insert(0, '../scripts')
+          import setup
+          t = json.load(open('../build-macos/state.json'))['tools']
+          argv = setup.mac_shim_argv(t['clang'], t['brew_prefix'], t['glslang_libs'])
+          print(' '.join(argv), flush=True)
+          sys.exit(subprocess.call(argv))
+          EOF
+          otool -L ssbu_glslang.dylib
+          file ssbu_glslang.dylib
+          rm -f ssbu_glslang.dylib
+
+      - name: collect_logs_mac.sh makes a report without game files
+        run: |
+          mkdir -p build-macos/logs build-macos/binaries/13.0.4 build-macos/work
+          echo "stand-in" > build-macos/binaries/13.0.4/main.elf     # must NOT end up in the report
+          echo "stand-in" > build-macos/work/secret.c
+          echo "a game log" > build-macos/logs/game_20260101_000000.log
+          bash scripts/macos/collect_logs_mac.sh
+          zip="$(ls ~/Desktop/ssbu_mac_report_*.zip)"
+          unzip -l "$zip" | tee list.txt
+          grep -q "state.json" list.txt
+          grep -q "game_20260101_000000.log" list.txt
+          if grep -Eq "main\.elf|secret\.c|romfs|exefs|binaries|work/|\.keys|data\.arc" list.txt; then echo "the report holds files it must not"; exit 1; fi
+
   host:
     runs-on: macos-14            # Apple Silicon (arm64)
     timeout-minutes: 30

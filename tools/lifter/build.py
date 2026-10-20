@@ -286,7 +286,8 @@ def cmd_link(host_only=False):
         game = ['-Wl,-undefined,dynamic_lookup'] if host_only else [os.path.join(HERE, GAME_DLL)]
         r = subprocess.run([CLANG] + MACOS_MIN + objs + game + ['-Wl,-rpath,@executable_path'] + LIBS + ['-o', out], capture_output=True, text=True, errors='replace')
     elif TARGET_LINUX:
-        r = subprocess.run([CLANG] + objs + ['-L', HERE, '-l:' + GAME_DLL, '-Wl,-rpath,$ORIGIN'] + LIBS + ['-o', out], capture_output=True, text=True, errors='replace')
+        game = ['-Wl,--unresolved-symbols=ignore-in-object-files'] if host_only else ['-L', HERE, '-l:' + GAME_DLL]      # host alone: a compile + link check, not runnable
+        r = subprocess.run([CLANG] + objs + game + ['-Wl,-rpath,$ORIGIN'] + LIBS + ['-o', out], capture_output=True, text=True, errors='replace')
     else:
         r = subprocess.run([CLANG] + objs + [game_import_lib(objdir), os.path.join(SDL_DIR, 'SDL3.lib')] + LIBS + debug_link_flags(out) + ['-o', out], capture_output=True, text=True, errors='replace')
     if r.returncode == 0 and not TARGET_POSIX:
