@@ -39,7 +39,7 @@ static long long g_rbg_rb, g_rbg_k[RG_MAXSLOT + 2], g_rbg_rerun, g_rbg_miss, g_r
 static double g_rbg_stall_ms, g_rbg_load_ms, g_rbg_tick0, g_rbg_next, g_rbg_last_go;
 static volatile LONG g_rbg_last_k, g_rbg_max_k;
 #define RBG_NT 200000
-static float *g_rbg_work, *g_rbg_gap; static unsigned char *g_rbg_wk; static int g_rbg_nw, g_rbg_ng, g_rbg_pace = -1, g_rbg_tick_k;
+static float *g_rbg_work, *g_rbg_gap, *g_rbg_wcyc; static ULONG64 g_rbg_cyc_go; static unsigned char *g_rbg_wk; static int g_rbg_nw, g_rbg_ng, g_rbg_pace = -1, g_rbg_tick_k;
 static HANDLE g_rbg_timer;
 /* (hs10) the task workers at the safe point H2: r1_state.c holds them from the kick H1 to H2, so at H2 the kick's jobs are
  * queued and their (host-side) wake-up event is signaled and not consumed; a ring load relies on that, since the nn::os
@@ -52,7 +52,11 @@ static int g_rbg_detail = -1;
 static long long g_rbg_test_f = -2; static int g_rbg_test_ms, g_rbg_test_k;    /* SSBU_RB_NET_TEST=<frame>,<ms>[,<k>]: a stall of ms at frame's H2, then a rollback of k */
 /* (hs11) frame time of rollback ticks. SSBU_RB_NET_RECAP: which re-run passes capture their state: 0 = every one from the
  * newest frame with both pads known on (the old way), 1 = only that frame (the oldest any later rollback can need) and the
- * last one (default), 2 = every other one from that frame, and the last; 3 = the last one only. A later rollback whose state was not captured loads
+ * last one (default), 2 = every other one from that frame, and the last; 3 = the last one only; 4 = (hs16, option) that frame
+ * only, NOT the last one (unless it is that frame): the last state (frame i) is loaded only by a later wrong guess at exactly
+ * frame i + 1 with no other rollback in between; that one then loads frame cf and runs i - cf frames more (loop,4 bot 7: 18 of
+ * 161 rollbacks became k 5; one capture of the two saved per rollback; median a little lower, p90 / p99 higher: not default).
+ * A later rollback whose state was not captured loads
  * the newest older one and runs a frame or two more. SSBU_RB_NET_KEEP: before a load, 1 = a capture with the threads kept
  * held (the old way), 2 = the threads held without a capture (default; the capture was thrown away by the load), 0 = neither. */
 static int g_rbg_recap = -1, g_rbg_keep = -1; static long long g_rbg_recap_first;
@@ -134,7 +138,7 @@ static void rbg_step_body(Ctx *c) {
         { const char *e = getenv("SSBU_RB_NET_LASTLITE"); g_rgs_lastlite = !e || atoi(e) != 0; }      /* default on here: proven exact (rl4L, rl4K); =0 runs the last re-run pass fully */
         if (!g_rbg_timer) g_rbg_timer = CreateWaitableTimerExW(NULL, NULL, 0x2 /* CREATE_WAITABLE_TIMER_HIGH_RESOLUTION */, TIMER_ALL_ACCESS);
         if (!g_rbg_timer) g_rbg_timer = CreateWaitableTimerExW(NULL, NULL, 0, TIMER_ALL_ACCESS);
-        if (!g_rbg_work) { g_rbg_work = calloc(RBG_NT, sizeof *g_rbg_work); g_rbg_gap = calloc(RBG_NT, sizeof *g_rbg_gap); g_rbg_wk = calloc(RBG_NT, 1); }
+        if (!g_rbg_work) { g_rbg_work = calloc(RBG_NT, sizeof *g_rbg_work); g_rbg_gap = calloc(RBG_NT, sizeof *g_rbg_gap); g_rbg_wcyc = calloc(RBG_NT, sizeof *g_rbg_wcyc); g_rbg_wk = calloc(RBG_NT, 1); }
         LOG("r1: RB NET: match start, base state = frame %lld (fight frame %lld); pacing %s; re-run skip mask %d, lite mask %d%s\n", i, g_ff, g_rbg_pace ? "60 Hz" : "off", g_rgs_skip, g_rgs_lite, g_rgs_lastlite ? " (the last re-run pass too)" : "");
         {   /* start barrier: both games begin frame 1 together (the one that finished loading first waits here, at frame 0,
              * instead of stalling seconds at frame 8 with states it might have to roll back to: rnh2 / rnh3 hung after that) */
@@ -150,7 +154,7 @@ static void rbg_step_body(Ctx *c) {
         if (g_rbg_noring && rbn_loop()) {               /* (hs13) loop test: the bot's pads start at frame 1 (on a network frames 1..delay are empty on both sides) */
             double tw = now_ms(); while (rbn_confirmed() < 1 && now_ms() - tw < 5000) { rbn_drain(i); rbg_wait_until(now_ms() + 0.5); }
         }
-        g_rbg_tick0 = now_ms(); g_rbg_next = 0;
+        g_rbg_tick0 = now_ms(); g_rbg_next = 0; g_rbg_cyc_go = rgs_cyc_now();
         return;
     }
     rbn_pass_hash(i);
@@ -161,11 +165,12 @@ static void rbg_step_body(Ctx *c) {
         long long cf = rbn_confirmed(); int want;
         if (g_rbg_recap_first < 0 && i >= cf) g_rbg_recap_first = i;          /* the first re-run frame a later rollback may load */
         g_rbg_t_rerun += now_ms() - g_rbg_t_pass0; g_rbg_n_rerun++;
-        if (g_rgs_left <= 1) want = 1;
+        if (g_rgs_left <= 1) want = g_rbg_recap != 4 || g_rbg_recap_first < 0 || g_rbg_recap_first == i;     /* (4: not the last, see above) */
         else if (i < cf) want = 0;
         else if (g_rbg_recap == 0) want = 1;
         else if (g_rbg_recap == 2) want = ((i - g_rbg_recap_first) & 1) == 0;
         else if (g_rbg_recap == 3) want = 0;                                  /* (3: the last one only; a later rollback may load the state this one loaded) */
+        else if (g_rbg_recap == 4) want = i == g_rbg_recap_first;
         else want = i == g_rbg_recap_first;
         if (want) { double tc = now_ms(); if (!rbg_capture(i, c)) g_rbg_capfail++; g_rbg_t_recap += now_ms() - tc; g_rbg_n_recap++; } else g_rbg_capskip++;
         g_rgs_next = i + 1;
@@ -219,7 +224,7 @@ static void rbg_step_body(Ctx *c) {
     }
     /* the next pass is a real one (frame i + 1): pending wrong guesses first, then the other player, then the tick */
     double tw = now_ms();
-    if (g_rbg_tick0 > 0 && g_rbg_nw < RBG_NT) { g_rbg_work[g_rbg_nw] = (float)(tw - g_rbg_tick0); g_rbg_wk[g_rbg_nw] = (unsigned char)(g_rbg_tick_k > 255 ? 255 : g_rbg_tick_k); g_rbg_nw++; }
+    if (g_rbg_tick0 > 0 && g_rbg_nw < RBG_NT) { g_rbg_work[g_rbg_nw] = (float)(tw - g_rbg_tick0); g_rbg_wcyc[g_rbg_nw] = (float)((rgs_cyc_now() - g_rbg_cyc_go) / 1e6); g_rbg_wk[g_rbg_nw] = (unsigned char)(g_rbg_tick_k > 255 ? 255 : g_rbg_tick_k); g_rbg_nw++; }
     g_rbg_tick0 = 0;
     int stalled = 0; double ts = 0;
     for (;;) {
@@ -251,7 +256,7 @@ static void rbg_step_body(Ctx *c) {
     }
     double go = now_ms();
     if (g_rbg_last_go > 0 && g_rbg_ng < RBG_NT) g_rbg_gap[g_rbg_ng++] = (float)(go - g_rbg_last_go);
-    g_rbg_last_go = go; g_rbg_tick0 = go; g_rbg_tick_k = 0;
+    g_rbg_last_go = go; g_rbg_tick0 = go; g_rbg_tick_k = 0; g_rbg_cyc_go = rgs_cyc_now();
     if (g_rbg_real % 600 == 0) LOG("r1: RB NET: frame %lld: %lld rollbacks (%lld frames again), %lld stalls (%.0f ms), round trip %d ms, delay %d, remote pads up to %lld, clock ahead of the other game by %.1f ms\n",
                                    i, g_rbg_rb, g_rbg_rerun, g_rbg_stalls, g_rbg_stall_ms, rbn_rtt_ms(), rbn_delay(), rbn_confirmed(), rbn_offset_ms());
 }
@@ -356,9 +361,13 @@ static void rbg_report(void) {
     LOG("r1: RB NET report: host stack pages inside the guest windows left out of the state %lld (%lld ranges, %lld from fibers made later)\n", g_hs_pages, g_hs_ranges, g_hs_fibers_later);
     if (g_rbg_rb) LOG("r1: RB NET report: rollback parts (ms per rollback): before the load %.3f (keep mode %d), load %.3f, re-run passes %.3f (%.2f per rollback, %.3f each), re-run captures %.3f (%.2f per rollback, recap mode %d)\n",
         g_rbg_t_pre / g_rbg_rb, g_rbg_keep, g_rbg_t_load / g_rbg_rb, g_rbg_t_rerun / g_rbg_rb, (double)g_rbg_n_rerun / g_rbg_rb, g_rbg_n_rerun ? g_rbg_t_rerun / g_rbg_n_rerun : 0.0, g_rbg_t_recap / g_rbg_rb, (double)g_rbg_n_recap / g_rbg_rb, g_rbg_recap);
+    r1_hold_prof_report(); rg_meta_prof_report();
+    LOG("r1: RB NET report: live host stack check (hs16): thread contexts taken from the hold %lld, asked again %lld (SSBU_R1_LIVECACHE %s)\n", g_live_cached, g_live_asked, g_live_cache ? "on" : "OFF");
     rbg_dist("work per tick (real pass + its rollback, without waits)", g_rbg_work, g_rbg_nw, g_rbg_wk, -1);
     rbg_dist("work per tick without rollback", g_rbg_work, g_rbg_nw, g_rbg_wk, 0);
     rbg_dist("work per tick with rollback", g_rbg_work, g_rbg_nw, g_rbg_wk, 1);
     rbg_dist("time between real passes (tick to tick)", g_rbg_gap, g_rbg_ng, NULL, -1);
+    rbg_dist("main-thread CPU per tick with rollback (million cycles, shown as ms)", g_rbg_wcyc, g_rbg_nw, g_rbg_wk, 1);
+    rbg_dist("main-thread CPU per tick without rollback (million cycles, shown as ms)", g_rbg_wcyc, g_rbg_nw, g_rbg_wk, 0);
     rbn_report(g_log, g_rbg_real);
 }

@@ -279,7 +279,9 @@ static void threads_report(const char *when) {
 
 
 /* ---------------------------------------------------------------- the other guest threads: held at a wait while memory is copied */
-typedef struct { HANDLE h; Ctx *c; const char *name; uint64_t from; const char *imp; Ctx regs; int held, parked, same; double wait_ms; } Th;
+typedef struct { HANDLE h; Ctx *c; const char *name; uint64_t from; const char *imp; Ctx regs; int held, parked, same; double wait_ms; uint64_t rsp, rip; int cok; } Th;
+/* (R3 hs16) cok: rsp / rip read by th_blocked while this thread is held (suspended by us ever since): live_rsps uses them
+ * instead of asking Windows again (GetThreadContext of a thread blocked in the kernel costs ~20 us: 0.5 ms per capture) */
 static int g_audio_free;
 static void async_add(uint8_t *a);
 static long long g_th_audio_other;                   /* (R3 hs11) ring loads that took an audio thread at another wait (ra_hold_restore) */
@@ -312,7 +314,7 @@ static void park(int restore_mode) {
             if (SuspendThread(t->h) == (DWORD)-1) break;
             const char *imp = t->c->in_import;
             int ok = waiting_import(imp) && (!restore_mode || (t->c->import_from == t->from && imp == t->imp));
-            if (ok || now_ms() - t0 > g_park_ms) { t->held = 1; t->parked = ok; if (!ok && tm) (*tm)++; t->wait_ms = now_ms() - t0; break; }
+            if (ok || now_ms() - t0 > g_park_ms) { t->held = 1; t->cok = 0; t->parked = ok; if (!ok && tm) (*tm)++; t->wait_ms = now_ms() - t0; break; }
             ResumeThread(t->h);
             SwitchToThread();
         }
@@ -397,14 +399,19 @@ static long long g_fib_live_skip, g_fib_live_seen; static int g_fib_live_on = -1
 static uint64_t g_live_rsp[512], g_live_rip[512], g_live_fib[512]; static const char *g_live_nm[512]; static HANDLE g_live_h[512]; static int g_nlive;
 static uint8_t *live_teb_addr(HANDLE h);
 int guest_thread_info(int i, Ctx **c, const char **name, HANDLE *h);
+static int g_live_cache = -1; static long long g_live_cached, g_live_asked;
 static void live_rsps(void) {
+    if (g_live_cache < 0) { const char *e = getenv("SSBU_R1_LIVECACHE"); g_live_cache = !(e && e[0] == '0'); }      /* (hs16) =0: every thread asked again (the old way) */
     g_nlive = 0;
     { volatile uint64_t here = (uint64_t)(uintptr_t)&here; g_live_rsp[g_nlive] = here; g_live_rip[g_nlive] = 0; g_live_nm[g_nlive] = "this thread"; g_live_h[g_nlive] = NULL; g_live_fib[g_nlive] = (uint64_t)(uintptr_t)GetCurrentFiber(); g_nlive++; }
     Ctx *tc; const char *nm; HANDLE h;
     for (int i = 0; guest_thread_info(i, &tc, &nm, &h) && g_nlive < 512; i++) {
         if (!h || GetThreadId(h) == GetCurrentThreadId()) continue;
         CONTEXT x; memset(&x, 0, sizeof x); x.ContextFlags = CONTEXT_CONTROL;
-        if (GetThreadContext(h, &x)) { uint8_t *t = live_teb_addr(h); g_live_rsp[g_nlive] = x.Rsp; g_live_rip[g_nlive] = x.Rip; g_live_nm[g_nlive] = nm ? nm : "?"; g_live_h[g_nlive] = h; g_live_fib[g_nlive] = t ? *(volatile uint64_t *)(t + 0x20) : 0; g_nlive++; }
+        int got = 0;
+        if (g_live_cache) for (int j = 0; j < g_nth; j++) if (g_th[j].h == h) { if (g_th[j].held && g_th[j].cok) { x.Rsp = g_th[j].rsp; x.Rip = g_th[j].rip; got = 1; g_live_cached++; } break; }
+        if (!got) { got = GetThreadContext(h, &x) != 0; g_live_asked++; }
+        if (got) { uint8_t *t = live_teb_addr(h); g_live_rsp[g_nlive] = x.Rsp; g_live_rip[g_nlive] = x.Rip; g_live_nm[g_nlive] = nm ? nm : "?"; g_live_h[g_nlive] = h; g_live_fib[g_nlive] = t ? *(volatile uint64_t *)(t + 0x20) : 0; g_nlive++; }
     }
 }
 static void live_teb(HANDLE h, uint64_t *fd, uint64_t *sb, uint64_t *sl) {     /* (diagnosis) that thread's TEB: FiberData, StackBase, StackLimit */
@@ -1414,9 +1421,12 @@ static int ra_fight_on(void) {
 /* a suspended thread is safe to keep held only if it is BLOCKED in a system call (its RIP right after a `syscall`
  * instruction): one that is suspended while it runs our import code may hold the os object table lock or an object's
  * critical section (seen: nus3::audio update held inside obj() -> the game's thread blocked on that lock for good) */
+static uint64_t g_tb_rsp, g_tb_rip;                     /* (hs16) the context th_blocked read last */
 static int th_blocked(HANDLE h) {
     CONTEXT x; memset(&x, 0, sizeof x); x.ContextFlags = CONTEXT_CONTROL;
+    g_tb_rsp = g_tb_rip = 0;
     if (!GetThreadContext(h, &x)) return 0;
+    g_tb_rsp = x.Rsp; g_tb_rip = x.Rip;
     const uint8_t *r = (const uint8_t *)(uintptr_t)x.Rip;
     static uintptr_t lo[8], hi[8]; static int nc;           /* (R2) executable regions already queried: system-call stubs stay put */
     uintptr_t a = (uintptr_t)(r - 2); int known = 0;
@@ -1431,8 +1441,24 @@ static int th_blocked(HANDLE h) {
 static int ra_audio(const char *n) { return strstr(n, "nus3::audio") || strstr(n, "sindou") || strstr(n, "AudioDevice"); }
 static int ra_free(const char *n) { return strstr(n, "nopus") != NULL; }      /* never in a waiting import; its pages (decoder state, output) are not simulation */
 /* save: every other guest thread held inside a waiting import (its place and registers noted); 0 = one was not there in time */
+/* (R3 hs16, TEST ONLY) SSBU_RB_HOLD_PROF=1: where a hold's time goes, per thread (suspend + context + retries), and the
+ * fiber check; printed in the rollback report */
+static int g_hp_on = -1; static struct { const char *n; double ms, mx; long long cnt, spins; } g_hp[64]; static int g_hp_n; static double g_hp_fib_ms; static long long g_hp_fib_n, g_hp_holds;
+static void hp_add(const char *n, double ms, int spins) {
+    if (g_ra_phase == 2 && ra_audio(n)) n = !strcmp(n, "nus3::audio update") ? "(re-run passes) nus3::audio update" : "(re-run passes) other sound thread";
+    int i; for (i = 0; i < g_hp_n; i++) if (g_hp[i].n == n || !strcmp(g_hp[i].n, n)) break;
+    if (i == g_hp_n) { if (g_hp_n >= 64) return; g_hp[g_hp_n++].n = n; }
+    g_hp[i].ms += ms; g_hp[i].cnt++; g_hp[i].spins += spins; if (ms > g_hp[i].mx) g_hp[i].mx = ms;
+}
+static void r1_hold_prof_report(void) {
+    if (g_hp_on <= 0) return;
+    LOG("r1: HOLD PROF: %lld holds; fiber checks %lld, %.4f ms each\n", g_hp_holds, g_hp_fib_n, g_hp_fib_n ? g_hp_fib_ms / g_hp_fib_n : 0.0);
+    for (int i = 0; i < g_hp_n; i++) LOG("r1: HOLD PROF thread %s: %lld times, mean %.4f ms, max %.3f ms, retries %lld\n", g_hp[i].n, g_hp[i].cnt, g_hp[i].ms / (g_hp[i].cnt ? g_hp[i].cnt : 1), g_hp[i].mx, g_hp[i].spins);
+}
 static int ra_hold_save(void) {
     DWORD me = GetCurrentThreadId(); Ctx *tc; const char *nm; HANDLE h;
+    if (g_hp_on < 0) g_hp_on = getenv("SSBU_RB_HOLD_PROF") && atoi(getenv("SSBU_RB_HOLD_PROF")) > 0;
+    if (g_hp_on) g_hp_holds++;
     g_nth = 0;
     for (int i = 0; guest_thread_info(i, &tc, &nm, &h) && g_nth < 256; i++) {
         if (!h || GetThreadId(h) == me) continue;
@@ -1448,15 +1474,17 @@ static int ra_hold_save(void) {
         double t0 = now_ms();
         if (all_first && pre[i]) {
             pre[i] = 0;
-            if (waiting_import(t->c->in_import) && th_blocked(t->h)) { t->held = 1; t->parked = 1; t->from = t->c->import_from; t->imp = t->c->in_import; t->regs = *t->c; continue; }
+            if (waiting_import(t->c->in_import) && th_blocked(t->h)) { t->held = 1; t->parked = 1; t->rsp = g_tb_rsp; t->rip = g_tb_rip; t->cok = 1; t->from = t->c->import_from; t->imp = t->c->in_import; t->regs = *t->c; continue; }
             ResumeThread(t->h);
             for (int j = i + 1; j < g_nth; j++) if (pre[j]) { ResumeThread(g_th[j].h); pre[j] = 0; }      /* a thread not at a wait: the others go too (it may wait for one of them) */
         }
+        int spins = 0;
         for (;;) {
             if (SuspendThread(t->h) == (DWORD)-1) break;
-            if (waiting_import(t->c->in_import) && th_blocked(t->h)) { t->held = 1; t->parked = 1; break; }
-            ResumeThread(t->h);
+            if (waiting_import(t->c->in_import) && th_blocked(t->h)) { t->held = 1; t->parked = 1; t->rsp = g_tb_rsp; t->rip = g_tb_rip; t->cok = 1; break; }
+            ResumeThread(t->h); spins++;
             if (now_ms() - t0 > g_ra_park_ms) {
+                if (g_hp_on) hp_add(t->name, now_ms() - t0, spins);
                 for (int j = 0; j < i; j++) if (g_th[j].held) { ResumeThread(g_th[j].h); g_th[j].held = 0; }
                 if (all_first) for (int j = i + 1; j < g_nth; j++) if (pre[j]) { ResumeThread(g_th[j].h); pre[j] = 0; }
                 g_ra_busy = t->name;
@@ -1465,6 +1493,7 @@ static int ra_hold_save(void) {
             }
             SwitchToThread();
         }
+        if (g_hp_on) hp_add(t->name, now_ms() - t0, spins);
         t->from = t->c->import_from; t->imp = t->c->in_import; t->regs = *t->c;
     }
     return 1;
@@ -1477,17 +1506,18 @@ static void ra_hold_restore(void) {
         Th *t = &g_th[i];
         t->same = 0;
         if (t->held) { t->same = 1; continue; }
+        t->cok = 0;
         if (!t->parked) continue;
         double t0 = now_ms();
         for (;;) {
             if (SuspendThread(t->h) == (DWORD)-1) break;
-            if (t->c->import_from == t->from && t->c->in_import == t->imp && th_blocked(t->h)) { t->held = 1; t->same = 1; break; }
+            if (t->c->import_from == t->from && t->c->in_import == t->imp && th_blocked(t->h)) { t->held = 1; t->same = 1; t->rsp = g_tb_rsp; t->rip = g_tb_rip; t->cok = 1; break; }
             /* (R3 hs11) the sound thread sindou::update alternates SleepThread / WaitEvent; at a ring load it sometimes waits for an
              * event no held thread signals, and this loop waited the whole 500 ms (a half-second freeze, 2 in 10 normal-speed runs).
              * An audio thread blocked at another waiting import after 5 ms is taken as it is (what the 500 ms limit did anyway).
              * SSBU_RB_AUDIO_WAIT=0: the old way. */
             {   static int aw = -1; if (aw < 0) { const char *e = getenv("SSBU_RB_AUDIO_WAIT"); aw = !(e && e[0] == '0'); }
-                if (aw && rgs_wanted() && ra_audio(t->name) && now_ms() - t0 > 5 && waiting_import(t->c->in_import) && th_blocked(t->h)) { t->held = 1; g_th_audio_other++; break; } }
+                if (aw && rgs_wanted() && ra_audio(t->name) && now_ms() - t0 > 5 && waiting_import(t->c->in_import) && th_blocked(t->h)) { t->held = 1; t->rsp = g_tb_rsp; t->rip = g_tb_rip; t->cok = 1; g_th_audio_other++; break; } }
             if (now_ms() - t0 > 500) { t->held = 1; g_th_mismatch++;
                 static int said; if (said++ < 20) LOG("r1: hold for a load: thread %s not back at its wait after 500 ms: held at %s @%llx then, now %s @%llx, blocked %d\n", t->name ? t->name : "?",
                     t->imp ? t->imp : "guest code", (unsigned long long)t->from, t->c->in_import ? t->c->in_import : "guest code", (unsigned long long)t->c->import_from, th_blocked(t->h));
@@ -1514,7 +1544,8 @@ static int ra_hold_quiet(double limit) {
     double t0 = now_ms(); int tries = 0;
     for (;;) {
         if (ra_hold_save()) {
-            if (ra_fibers_quiet()) { if (tries) { g_ra_fiber_waits++; g_ra_fiber_wait_ms += now_ms() - t0; } return 1; }
+            double tf = g_hp_on > 0 ? now_ms() : 0; int fq = ra_fibers_quiet(); if (g_hp_on > 0) { g_hp_fib_ms += now_ms() - tf; g_hp_fib_n++; }
+            if (fq) { if (tries) { g_ra_fiber_waits++; g_ra_fiber_wait_ms += now_ms() - t0; } return 1; }
             for (int i = 0; i < g_nth; i++) if (g_th[i].held) { ResumeThread(g_th[i].h); g_th[i].held = 0; }
             g_ra_busy = "a job fiber (task worker)"; g_ra_skip_why[3]++;
         }
