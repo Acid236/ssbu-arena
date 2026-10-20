@@ -282,9 +282,13 @@ static int oe_observe_foreground(void) {
     DWORD pid = 0;
     HWND fg = GetForegroundWindow();
     if (!fg || !GetWindowThreadProcessId(fg, &pid) || pid != GetCurrentProcessId()) return 0;
+#ifdef _WIN32
     if (!g_oe_was_foreground && (!IsWindowVisible(fg) || IsIconic(fg)
             || (GetWindowLongPtrA(fg, GWL_EXSTYLE) & WS_EX_NOACTIVATE)
             || !MonitorFromWindow(fg, MONITOR_DEFAULTTONULL))) return 0;
+#else   /* Linux / macOS (plat/windows.h): the SDL window is the foreground window only while it has the keyboard focus */
+    if (!g_oe_was_foreground && (!IsWindowVisible(fg) || IsIconic(fg))) return 0;
+#endif
     g_oe_was_foreground = 1;
     g_oe_window = fg;
     return 1;
