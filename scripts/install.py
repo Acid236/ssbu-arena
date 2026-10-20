@@ -91,8 +91,11 @@ TOOLS = {   # checked 2026-10-19: SDL3 and glslang equal GitHub's own asset dige
     'glslang': ('https://github.com/KhronosGroup/glslang/releases/download/16.6.0/glslang-16.6.0-windows-x86_64-release.zip',
                 '82bf434e69b9bb4829de7e2b4bc2c5e7a7861e53d66cf75e5cc70f5f694a8d9b', 'glslang',
                 os.path.join('include', 'glslang', 'Include', 'glslang_c_interface.h')),
-    'llvm': ('https://releases.llvm.org/9.0.0/LLVM-9.0.0-win64.exe',
-             '71ed99a6720945d76b6772584735f2ed472f12719dff184a0b1a6a35047b8863', 'llvm', os.path.join('bin', 'clang.exe')),
+    # LLVM 9 as a plain zip (no installer: no administrator prompt, and nothing to uninstall when another LLVM is on the
+    # PC, which made the official installer fail with "uninstall failed"): the files of the official LLVM-9.0.0-win64.exe
+    # (SHA-256 71ed99a6...8863, signed) extracted with 7-Zip, unchanged, only what the build uses (README.txt inside)
+    'llvm': ('https://github.com/Denkishi/ssbu-recomp/releases/download/llvm-9.0.0-portable/llvm-9.0.0-win64-portable.zip',
+             '0e0c34046589a73efef3e2a4c06335815681afbc7c883b665cdbed98669a22e3', 'llvm', os.path.join('bin', 'clang.exe')),
     # Dear ImGui (MIT), optional: GitHub publishes no digest for tag archives, so this hash is the archive checked on
     # 2026-10-19 (2,021,831 bytes)
     'imgui': ('https://github.com/ocornut/imgui/archive/refs/tags/v1.91.9b.zip',
@@ -631,6 +634,8 @@ def fetch(name):
         os.remove(arc)
         raise Stop('%s: the download does not match its SHA-256 (got %s): refused' % (name, h))
     if arc.endswith('.zip'):
+        if os.path.isdir(dst):                  # an unfinished folder of an earlier try (no probe file in it): replaced
+            shutil.rmtree(dst, ignore_errors=True)
         tmp = dst + '.tmp'
         with zipfile.ZipFile(arc) as z:
             z.extractall(tmp)

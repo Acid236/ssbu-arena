@@ -408,8 +408,17 @@ def step_deps(cx):
     say('  python packages: numpy lz4 zstandard%s: ok' % ('' if a.runtime else ' Pillow unicorn'))
 
     deps = os.path.join(REPO, 'deps')
-    llvm = find_first([a.llvm, os.environ.get('LLVM_ROOT'), r'C:\llvm-9.0.0', r'C:\Program Files\LLVM', os.path.join(deps, 'llvm')],
-                      lambda d: os.path.exists(os.path.join(d, 'bin', 'clang.exe')))
+    def is_9(d):                                   # another LLVM version installed on the PC is not used unless asked for
+        if not os.path.exists(os.path.join(d, 'bin', 'clang.exe')):
+            return False
+        if d in (a.llvm, os.environ.get('LLVM_ROOT')):
+            return True
+        try:
+            v = subprocess.run([os.path.join(d, 'bin', 'clang.exe'), '--version'], capture_output=True, text=True).stdout
+        except OSError:
+            return False
+        return 'version 9.' in v or 'version 8.' in v
+    llvm = find_first([a.llvm, os.environ.get('LLVM_ROOT'), os.path.join(deps, 'llvm'), r'C:\llvm-9.0.0', r'C:\Program Files\LLVM'], is_9)
     if not llvm:
         raise Fail('LLVM/clang 9.0.0 not found (--llvm <folder with bin\\clang.exe>)')
     clang = os.path.join(llvm, 'bin', 'clang.exe')
