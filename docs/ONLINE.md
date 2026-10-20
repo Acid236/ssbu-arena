@@ -100,7 +100,9 @@ python tools/net/ssbu_lobby.py --bind 0.0.0.0 --port 39500 [--verbose]
 - Tested with two game instances on one PC: lobby, LAN and host/join modes. Full matches ran with both players' inputs, and the fighters' states were identical frame by frame on both sides.
 - NOT yet tested between two PCs, over the internet, against a real UPnP router, or with STUN.
 - No encryption and no authentication. Play only with people you know.
-- It uses the game's own delay-based netcode. There is no rollback yet.
+- By default it uses the game's own delay-based netcode. Rollback netcode is in the code and in testing (off by default,
+  test switch `SSBU_RB_NET`): two games with a 150 ms round trip finish whole matches in the same state with 0 desyncs.
+  It is not a menu option yet; frames that roll back 3 or more frames still take longer than 16.7 ms.
 - For now the room code is shown only in the log, on lines starting with `[online]`.
 - On first start, Windows may ask to allow the game through the firewall. LAN and host modes need it.
 
