@@ -244,6 +244,13 @@ static int rg_init(void) {
 }
 static RgSlot *rg_slot(int i) { return &g_rg[(g_rg_head + i) % g_rg_cap]; }     /* i = 0 oldest */
 void r1_ring_let_go(void) { if (g_rg_kept) { unpark(); g_rg_kept = 0; } }      /* after a capture made with g_rg_keep and no load */
+/* (R3 hs11) the threads held for a load that follows at once, WITHOUT a capture of the state that is about to be thrown away
+ * (the load finds what was written since the newest capture by its own sweep); r1_ring_load / r1_ring_let_go lets them go */
+int r1_ring_hold(void) {
+    if (!g_rg_ready || g_rg_kept) return g_rg_kept;
+    if (!ra_hold_quiet(g_rg_park_ms)) return 0;
+    g_rg_kept = 1; return 1;
+}
 long long r1_ring_oldest(void) { return g_rg_count ? rg_slot(0)->frame : -1; }
 long long r1_ring_newest(void) { return g_rg_count ? rg_slot(g_rg_count - 1)->frame : -1; }
 double r1_ring_last_ms(int load) { return g_rg_last[load ? 1 : 0]; }

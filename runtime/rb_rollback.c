@@ -37,6 +37,13 @@ static HANDLE g_rbg_timer;
 static int g_rbg_wdfix = -1; static long long g_rbg_wd_before, g_rbg_rb_unheld;
 static int g_rbg_detail = -1;
 static long long g_rbg_test_f = -2; static int g_rbg_test_ms, g_rbg_test_k;    /* SSBU_RB_NET_TEST=<frame>,<ms>[,<k>]: a stall of ms at frame's H2, then a rollback of k */
+/* (hs11) frame time of rollback ticks. SSBU_RB_NET_RECAP: which re-run passes capture their state: 0 = every one from the
+ * newest frame with both pads known on (the old way), 1 = only that frame (the oldest any later rollback can need) and the
+ * last one (default), 2 = every other one from that frame, and the last; 3 = the last one only. A later rollback whose state was not captured loads
+ * the newest older one and runs a frame or two more. SSBU_RB_NET_KEEP: before a load, 1 = a capture with the threads kept
+ * held (the old way), 2 = the threads held without a capture (default; the capture was thrown away by the load), 0 = neither. */
+static int g_rbg_recap = -1, g_rbg_keep = -1; static long long g_rbg_recap_first;
+static double g_rbg_t_pre, g_rbg_t_load, g_rbg_t_rerun, g_rbg_t_recap, g_rbg_t_pass0; static long long g_rbg_n_rerun, g_rbg_n_recap;
 
 void rbn_stats(int *delay, int *last, int *maxk) { *delay = rbn_delay(); *last = (int)g_rbg_last_k; *maxk = (int)g_rbg_max_k; }   /* net_relay.c net_stats_get (F2) */
 
@@ -60,7 +67,7 @@ static int rbg_rollback(Ctx *c, long long i, int m) {
     double t0 = now_ms();
     if (!g_ra_wh_on) { g_rbg_rb_unheld++; if (g_rbg_rb_unheld <= 10) LOG("r1: RB NET: rollback at frame %lld while the task workers are NOT held (watchdog releases so far %lld): the load may leave the job system waiting\n", i, g_ra_wd_fired); }
     if (!r1_ring_load(best, c)) { g_rbg_miss++; return 0; }
-    g_rbg_load_ms += now_ms() - t0;
+    g_rbg_load_ms += now_ms() - t0; g_rbg_t_load += now_ms() - t0; g_rbg_recap_first = -1; g_rbg_t_pass0 = now_ms();
     int k = (int)(i - best);
     g_rgs_left = k; g_rgs_next = best + 1; g_ra_phase = 2;
     g_rbg_rb++; g_rbg_k[k < RG_MAXSLOT + 1 ? k : RG_MAXSLOT + 1]++; g_rbg_rerun += k; g_rbg_tick_k += k;
@@ -69,9 +76,10 @@ static int rbg_rollback(Ctx *c, long long i, int m) {
     return 1;
 }
 /* at the safe point (H2) of every pass while the fight runs (r1_ring.c rgs_step) */
-static void rbg_step(Ctx *c) {
+static void rbg_step_body(Ctx *c) {
     long long i = g_rgs_next;
-    if (g_rbg_wdfix < 0) { const char *e = getenv("SSBU_RB_NET_WDFIX"); g_rbg_wdfix = !e || atoi(e) != 0; e = getenv("SSBU_RB_NET_DETAIL"); g_rbg_detail = e && atoi(e) > 0; }
+    if (g_rbg_wdfix < 0) { const char *e = getenv("SSBU_RB_NET_WDFIX"); g_rbg_wdfix = !e || atoi(e) != 0; e = getenv("SSBU_RB_NET_DETAIL"); g_rbg_detail = e && atoi(e) > 0;
+        e = getenv("SSBU_RB_NET_RECAP"); g_rbg_recap = e ? atoi(e) : 1; e = getenv("SSBU_RB_NET_KEEP"); g_rbg_keep = e ? atoi(e) : 2; }
     if (g_rbg_wdfix) g_ra_wd_pause = 1;                 /* (until H2 lets the workers go: r1_state.c ra_kick2) */
     if (g_rbg_wd_before != g_ra_wd_fired) { if (g_rg_ready) LOG("r1: RB NET: the task-worker watchdog let them go before the safe point of frame %lld (%lld times so far)\n", i, g_ra_wd_fired); g_rbg_wd_before = g_ra_wd_fired; }
     if (!g_rg_ready) {                                  /* the base state: r1's full save (one hitch) */
@@ -106,9 +114,18 @@ static void rbg_step(Ctx *c) {
     { static int tr = -1; if (tr < 0) tr = getenv("SSBU_RB_NET_TRACE") ? atoi(getenv("SSBU_RB_NET_TRACE")) : 0;
       if (tr > 0 && i <= tr) LOG("r1: RB NET trace: safe point after pass %lld, phase %d, left %d, remote pads up to %lld, %.3f ms\n", i, g_ra_phase, g_rgs_left, rbn_confirmed(), now_ms()); }
     if (g_ra_phase == 2) {                              /* a re-run pass ended: its state is needed only from the newest frame with every pad known on */
-        if (g_rgs_left <= 1 || i >= rbn_confirmed()) { if (!r1_ring_capture(i, c)) g_rbg_capfail++; } else g_rbg_capskip++;
+        long long cf = rbn_confirmed(); int want;
+        if (g_rbg_recap_first < 0 && i >= cf) g_rbg_recap_first = i;          /* the first re-run frame a later rollback may load */
+        g_rbg_t_rerun += now_ms() - g_rbg_t_pass0; g_rbg_n_rerun++;
+        if (g_rgs_left <= 1) want = 1;
+        else if (i < cf) want = 0;
+        else if (g_rbg_recap == 0) want = 1;
+        else if (g_rbg_recap == 2) want = ((i - g_rbg_recap_first) & 1) == 0;
+        else if (g_rbg_recap == 3) want = 0;                                  /* (3: the last one only; a later rollback may load the state this one loaded) */
+        else want = i == g_rbg_recap_first;
+        if (want) { double tc = now_ms(); if (!r1_ring_capture(i, c)) g_rbg_capfail++; g_rbg_t_recap += now_ms() - tc; g_rbg_n_recap++; } else g_rbg_capskip++;
         g_rgs_next = i + 1;
-        if (--g_rgs_left > 0) return;
+        if (--g_rgs_left > 0) { g_rbg_t_pass0 = now_ms(); return; }
         g_ra_phase = 0; g_ra_after_quiet = 1; g_rgs_left = 0;
     } else {                                            /* a real pass ended */
         g_rgs_next = i + 1; g_rbg_real++;
@@ -117,10 +134,13 @@ static void rbg_step(Ctx *c) {
         if (m > 0 && m <= i) {
             /* captured anyway, with the threads kept held for the load that follows (R2 round 2: load hold 3.5 -> 0.2 ms);
              * SSBU_RB_NET_KEEP=0: no capture, the load holds the threads itself */
-            static int keep = -1; if (keep < 0) { const char *e = getenv("SSBU_RB_NET_KEEP"); keep = !e || atoi(e) != 0; }
-            if (keep) { g_rg_keep = 1; if (!r1_ring_capture(i, c)) g_rbg_capfail++; g_rg_keep = 0; }
+            double tp = now_ms();
+            if (g_rbg_keep == 1) { g_rg_keep = 1; if (!r1_ring_capture(i, c)) g_rbg_capfail++; g_rg_keep = 0; }
+            else if (g_rbg_keep == 2) r1_ring_hold();
+            g_rbg_t_pre += now_ms() - tp;
             if (rbg_rollback(c, i, m)) return;
-            if (keep) r1_ring_let_go(); else if (!r1_ring_capture(i, c)) g_rbg_capfail++;
+            r1_ring_let_go();
+            if (g_rbg_keep != 1 && !r1_ring_capture(i, c)) g_rbg_capfail++;
         } else if (!r1_ring_capture(i, c)) g_rbg_capfail++;
         if (g_rbg_test_f == -2) { const char *e = getenv("SSBU_RB_NET_TEST"); g_rbg_test_f = -1; if (e && *e) { long long tf = -1; int ms = 0, k = 0; sscanf(e, "%lld,%d,%d", &tf, &ms, &k); g_rbg_test_f = tf; g_rbg_test_ms = ms; g_rbg_test_k = k; } }
         if (g_rbg_test_f > 0 && i >= g_rbg_test_f) {    /* (the first real pass from that frame on without a rollback of its own) */
@@ -165,6 +185,42 @@ static void rbg_step(Ctx *c) {
     if (g_rbg_real % 600 == 0) LOG("r1: RB NET: frame %lld: %lld rollbacks (%lld frames again), %lld stalls (%.0f ms), round trip %d ms, delay %d, remote pads up to %lld, clock ahead of the other game by %.1f ms\n",
                                    i, g_rbg_rb, g_rbg_rerun, g_rbg_stalls, g_rbg_stall_ms, rbn_rtt_ms(), rbn_delay(), rbn_confirmed(), rbn_offset_ms());
 }
+/* (hs11, TEST ONLY) SSBU_RB_NET_TEST_STK=1: the hs13 crash on purpose. Everything this file does at H2 runs on a host stack
+ * of 1 MB placed at a fixed free address inside window 2 (0x7180000000 or above; in hs13 it was main's own Windows stack at
+ * 0x72659f4000), set up before the first save (TEB stack limits switched with it); at every H2 the page under the stack
+ * pointer is marked as written (what an instrumented write through a pointer to a host local did in hs13). Normally that
+ * stack is left out of the state (r1_host_stack_note); with SSBU_R1_HOST_STACKS=0 a load copies an old page of it back
+ * while H2 waits for the copy threads (hs13: c0000005 at rip 0). */
+static int g_rbt = -1; static uint8_t *g_rbt_stk; static Ctx *g_rbt_c; static long long g_rbt_marks;
+static void rbt_body(void) {
+    volatile uint8_t probe[64]; probe[0] = 1;
+    void r1_wrote(uint64_t a, uint64_t n);
+    r1_wrote((uint64_t)(uintptr_t)probe & ~0xfffull, 0x1000); g_rbt_marks++;
+    rbg_step_body(g_rbt_c);
+}
+static void rbg_step(Ctx *c) {
+    if (g_rbt < 0) {
+        const char *e = getenv("SSBU_RB_NET_TEST_STK"); g_rbt = e && atoi(e) > 0;
+        for (uint64_t a = 0x7180000000ull; g_rbt && !g_rbt_stk && a < 0x7300000000ull; a += 0x10000000ull)
+            g_rbt_stk = VirtualAlloc((void *)(uintptr_t)a, 1u << 20, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+        if (g_rbt && !g_rbt_stk) g_rbt = 0;
+        if (g_rbt) { r1_host_stack_note((uint64_t)(uintptr_t)g_rbt_stk, (uint64_t)(uintptr_t)g_rbt_stk + (1u << 20));
+            LOG("r1: RB NET TEST_STK: H2 runs on a host stack at %p..%p (inside window 2)\n", (void *)g_rbt_stk, (void *)(g_rbt_stk + (1u << 20))); }
+    }
+    if (!g_rbt) { rbg_step_body(c); return; }
+    g_rbt_c = c;
+    NT_TIB *tib = (NT_TIB *)NtCurrentTeb(); void *ob = tib->StackBase, *ol = tib->StackLimit;
+    uint8_t *top = g_rbt_stk + (1u << 20) - 256;
+    tib->StackBase = g_rbt_stk + (1u << 20); tib->StackLimit = g_rbt_stk;
+    __asm__ volatile("movq %%rsp, %%rbx\n\t"
+                     "movq %0, %%rsp\n\t"
+                     "subq $32, %%rsp\n\t"
+                     "callq *%1\n\t"
+                     "movq %%rbx, %%rsp\n\t"
+                     : : "r"(top), "r"(rbt_body)
+                     : "rbx", "rax", "rcx", "rdx", "r8", "r9", "r10", "r11", "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "cc", "memory");
+    tib->StackBase = ob; tib->StackLimit = ol;
+}
 /* nnhid.c (through r1_pad / r1_pad_id): the pad of port id (0 / 1) in the pass now running */
 static void rbg_pad(int id, uint64_t *b, int *lx, int *ly, int *rx, int *ry) {
     if (!g_rg_ready || g_ra_off || !rbn_started() || id < 0 || id > 1) return;
@@ -192,6 +248,10 @@ static void rbg_report(void) {
     LOG("r1: RB NET report: stalls for the other player %lld (%.1f ms in all); captures failed %lld, re-run captures not needed %lld; load mean %.3f ms; peer silent %lld\n",
         g_rbg_stalls, g_rbg_stall_ms, g_rbg_capfail, g_rbg_capskip, g_rbg_rb ? g_rbg_load_ms / g_rbg_rb : 0.0, g_rbg_gone);
     LOG("r1: RB NET report: task-worker watchdog releases %lld (since the process start), rollbacks with the workers not held %lld (watchdog paused at H2: %s)\n", g_ra_wd_fired, g_rbg_rb_unheld, g_rbg_wdfix ? "yes" : "NO");
+    LOG("r1: RB NET report: loads that took the sound thread at another wait after 5 ms %lld; threads not at their wait after 500 ms %d (last load)\n", g_th_audio_other, g_th_mismatch);
+    LOG("r1: RB NET report: host stack pages inside the guest windows left out of the state %lld (%lld ranges, %lld from fibers made later)\n", g_hs_pages, g_hs_ranges, g_hs_fibers_later);
+    if (g_rbg_rb) LOG("r1: RB NET report: rollback parts (ms per rollback): before the load %.3f (keep mode %d), load %.3f, re-run passes %.3f (%.2f per rollback, %.3f each), re-run captures %.3f (%.2f per rollback, recap mode %d)\n",
+        g_rbg_t_pre / g_rbg_rb, g_rbg_keep, g_rbg_t_load / g_rbg_rb, g_rbg_t_rerun / g_rbg_rb, (double)g_rbg_n_rerun / g_rbg_rb, g_rbg_n_rerun ? g_rbg_t_rerun / g_rbg_n_rerun : 0.0, g_rbg_t_recap / g_rbg_rb, (double)g_rbg_n_recap / g_rbg_rb, g_rbg_recap);
     rbg_dist("work per tick (real pass + its rollback, without waits)", g_rbg_work, g_rbg_nw, g_rbg_wk, -1);
     rbg_dist("work per tick without rollback", g_rbg_work, g_rbg_nw, g_rbg_wk, 0);
     rbg_dist("work per tick with rollback", g_rbg_work, g_rbg_nw, g_rbg_wk, 1);

@@ -629,6 +629,7 @@ static void mw_waitany(Ctx *c) { Obj *m = obj(A0); uint64_t r; while (!(r = mw_p
 static void mw_trywaitany(Ctx *c) { RET(mw_poll(obj(A0))); }
 
 /* ---------------------------------------------------------------- fibers */
+void (*g_r1_fiber_born)(void *fiber);                 /* r1_state.c (R3 hs13): a new host fiber's stack is left out of the guest windows' state */
 static void CALLBACK fiber_main(void *arg) {
     Obj *o = arg;
     Ctx *c = new_ctx(o->stack + o->stack_size);
@@ -651,6 +652,7 @@ static void fib_init(Ctx *c) {                        /* (FiberType*, fn, arg, s
     o->fn = A1; o->arg = A2; o->stack = A3; o->stack_size = A4;
     o->fiber = CreateFiberEx(1 << 20, (SIZE_T)256 << 20, 0, fiber_main, o);
     InterlockedIncrement(&g_fib_gen);
+    if (g_r1_fiber_born) g_r1_fiber_born(o->fiber);
     if (g_r1_keep_fibers) { o->fctx = NULL; o->fls = NULL; o->fls_fiber = NULL; o->run_tid = 0; }      /* (R2) a new host fiber: no context, no block yet */
     RET(0);
 }
@@ -686,7 +688,7 @@ void os_r1_fiber_put(uint64_t key, const uint64_t v[6]) { Obj *o = obj_peek(key)
 /* R1 restore: give a guest fiber back the host fiber it had at the save (kept alive by g_r1_keep_fibers), or a fresh one */
 void os_r1_fiber_set(uint64_t key, void *fiber, Ctx *fctx, int fresh) {
     Obj *o = obj_peek(key); if (!o) return;
-    if (fresh) { o->fiber = CreateFiberEx(1 << 20, (SIZE_T)256 << 20, 0, fiber_main, o); o->fctx = NULL; }
+    if (fresh) { o->fiber = CreateFiberEx(1 << 20, (SIZE_T)256 << 20, 0, fiber_main, o); o->fctx = NULL; if (g_r1_fiber_born) g_r1_fiber_born(o->fiber); }
     else { o->fiber = fiber; o->fctx = fctx; }
     InterlockedIncrement(&g_fib_gen);
 }

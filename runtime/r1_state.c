@@ -232,6 +232,7 @@ static void threads_report(const char *when) {
 typedef struct { HANDLE h; Ctx *c; const char *name; uint64_t from; const char *imp; Ctx regs; int held, parked, same; double wait_ms; } Th;
 static int g_audio_free;
 static void async_add(uint8_t *a);
+static long long g_th_audio_other;                   /* (R3 hs11) ring loads that took an audio thread at another wait (ra_hold_restore) */
 static Th g_th[256]; static int g_nth, g_th_mismatch, g_ninfo, g_park_ms = 500;
 static int waiting_import(const char *s) { return s && (strstr(s, "Wait") || strstr(s, "wait") || strstr(s, "Sleep") || strstr(s, "Receive") || strstr(s, "Fiber") || strstr(s, "Timed")); }
 /* restore_mode 0: hold every guest thread (except this one) once it is inside a waiting import, note where;
@@ -784,6 +785,67 @@ static void sh_commit(uint8_t *sh, uint8_t *cmap, size_t pi) {
     VirtualAlloc(sh - (pi - c0) * PG, 16 * PG, MEM_COMMIT, PAGE_READWRITE);
     memset(cmap + c0, 1, 16);
 }
+/* R3 (hs13 crash, 2026-10-20): window 2 (0x7100000000 + 8 GB) is the guest image + the script modules, but the OS may put HOST
+ * memory in its free parts: in hs13 the main thread's own Windows stack was at 0x72659f4000. Marked by instrumented code (a host
+ * local written through a pointer), its page went into the ring and a load copied the old page back over the live stack while
+ * main waited for the copy threads (cp_run): the return address read 0 -> c0000005 at rip 0 on main. Every host thread stack and
+ * every host fiber stack inside a window is "not simulation" (g_ns1 / g_ns2): never captured, loaded, restored or checked.
+ * SSBU_R1_HOST_STACKS=0: the old way (test only). */
+static long long g_hs_pages, g_hs_ranges, g_hs_fibers_later;
+static int g_hs_on = -1;
+static void hs_exclude(uint64_t lo, uint64_t hi, const char *what) {
+    if (!g_ns1 || !g_ns2 || hi <= lo || hi - lo > (1ull << 32)) return;
+    long long n = 0;
+    for (uint64_t p = lo & ~(uint64_t)(PG - 1); p < hi; p += PG) {
+        if (g_win1 && p >= (uint64_t)(uintptr_t)g_win1 && p < (uint64_t)(uintptr_t)g_win1 + g_wn1) { size_t i = (size_t)(p - (uint64_t)(uintptr_t)g_win1) >> 12; if (!g_ns1[i]) { g_ns1[i] = 1; n++; } }
+        else if (p >= WIN2 && p < WIN2 + WN2) { size_t i = (size_t)(p - WIN2) >> 12; if (!g_ns2[i]) { g_ns2[i] = 1; n++; } }
+    }
+    if (n) { g_hs_pages += n; g_hs_ranges++; LOG("r1: host stack inside a guest window left out of the state: %s %llx..%llx (%lld pages)\n", what, (unsigned long long)lo, (unsigned long long)hi, n); }
+}
+static void hs_fiber_cb(uint64_t key, Ctx *c, uint64_t stack, uint64_t size, void *fiber) {
+    (void)key; (void)c; (void)stack; (void)size;
+    if (fiber) hs_exclude(*(uint64_t *)((uint8_t *)fiber + 0x20), *(uint64_t *)((uint8_t *)fiber + 0x10), "fiber stack");
+}
+extern void (*g_r1_fiber_born)(void *fiber);           /* os_threads.c: a host fiber made later (fib_init, a fresh one at a restore) */
+static void hs_fiber_born(void *fiber) { if (fiber) { long long b = g_hs_pages; hs_fiber_cb(0, NULL, 0, 0, fiber); if (g_hs_pages != b) g_hs_fibers_later++; } }
+static uint64_t g_hs_note[16][2]; static int g_hs_nnote;     /* host stacks this exe makes itself (not threads, not guest fibers): noted, left out at the setup */
+static void r1_host_stack_note(uint64_t lo, uint64_t hi) { if (g_hs_nnote < 16) { g_hs_note[g_hs_nnote][0] = lo; g_hs_note[g_hs_nnote][1] = hi; g_hs_nnote++; } if (g_ns2 && (g_hs_on < 0 || g_hs_on)) hs_exclude(lo, hi, "host stack (noted)"); }
+typedef struct { LONG st; void *teb; void *pid, *tid; ULONG_PTR mask; LONG pri, bpri; } HsTbi;
+static void hs_exclude_all(void) {
+    if (g_hs_on < 0) { const char *e = getenv("SSBU_R1_HOST_STACKS"); g_hs_on = !(e && e[0] == '0'); }
+    if (!g_hs_on) return;
+    typedef LONG (WINAPI *QitFn)(HANDLE, int, void *, ULONG, ULONG *);
+    QitFn qit = (QitFn)(void *)GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtQueryInformationThread");
+    HANDLE sn = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    THREADENTRY32 te; te.dwSize = sizeof te; DWORD pid = GetCurrentProcessId(); int nth = 0;
+    for (BOOL ok = qit && sn != INVALID_HANDLE_VALUE && Thread32First(sn, &te); ok; ok = Thread32Next(sn, &te)) {
+        if (te.th32OwnerProcessID != pid) continue;
+        HANDLE h = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, te.th32ThreadID); if (!h) continue;
+        HsTbi tb; memset(&tb, 0, sizeof tb);
+        if (qit(h, 0, &tb, sizeof tb, NULL) >= 0 && tb.teb) {
+            uint8_t *teb = tb.teb; char nm[48]; snprintf(nm, sizeof nm, "thread %lu stack", (unsigned long)te.th32ThreadID);
+            hs_exclude(*(uint64_t *)(teb + 0x1478), *(uint64_t *)(teb + 0x08), nm);    /* DeallocationStack .. StackBase (the whole reservation) */
+            nth++;
+        }
+        CloseHandle(h);
+    }
+    if (sn != INVALID_HANDLE_VALUE) CloseHandle(sn);
+    os_r1_fibers(hs_fiber_cb);
+    for (int i = 0; i < g_hs_nnote; i++) hs_exclude(g_hs_note[i][0], g_hs_note[i][1], "host stack (noted)");
+    g_r1_fiber_born = hs_fiber_born;
+    {   /* what else lives in window 2 (a line per allocation that has committed read-write pages; diagnosis) */
+        MEMORY_BASIC_INFORMATION m; uint8_t *cur = NULL; size_t com = 0; int shown = 0;
+        for (uint8_t *p = (uint8_t *)(uintptr_t)WIN2; (uintptr_t)p < WIN2 + WN2 && VirtualQuery(p, &m, sizeof m); p = (uint8_t *)m.BaseAddress + m.RegionSize) {
+            if (m.AllocationBase != cur) {
+                if (cur && com && shown++ < 40) LOG("r1:   window 2 allocation %s: %.1f MB committed read-write\n", where(cur), com / 1048576.0);
+                cur = m.AllocationBase; com = 0;
+            }
+            if (m.State == MEM_COMMIT && rw(m.Protect)) com += m.RegionSize;
+        }
+        if (cur && com && shown++ < 40) LOG("r1:   window 2 allocation %s: %.1f MB committed read-write\n", where(cur), com / 1048576.0);
+    }
+    LOG("r1: host stacks: %d threads and the host fibers looked at; %lld pages in %lld ranges inside the guest windows left out\n", nth, g_hs_pages, g_hs_ranges);
+}
 /* after the first (full) save: shadows, extras, maps on */
 static void mark_setup(void) {
     size_t big = 0; uint8_t *base = NULL;
@@ -798,6 +860,7 @@ static void mark_setup(void) {
     g_sh1 = VirtualAlloc(NULL, g_wn1, MEM_RESERVE, PAGE_NOACCESS); g_sh1c = calloc(g_wn1 >> 12, 1);
     g_dc = calloc(g_wn1 >> 12, 1); g_ns1 = calloc(g_wn1 >> 12, 1); g_ns2 = calloc(WN2 >> 12, 1);
     g_sh2 = VirtualAlloc(NULL, WN2, MEM_RESERVE, PAGE_NOACCESS); g_sh2c = calloc(WN2 >> 12, 1);
+    hs_exclude_all();
     g_nx = 0; g_xbytes = 0;
     size_t shb = 0;
     for (int i = 0; i < g_nr; i++) {
@@ -1228,7 +1291,16 @@ static void ra_hold_restore(void) {
         for (;;) {
             if (SuspendThread(t->h) == (DWORD)-1) break;
             if (t->c->import_from == t->from && t->c->in_import == t->imp && th_blocked(t->h)) { t->held = 1; t->same = 1; break; }
-            if (now_ms() - t0 > 500) { t->held = 1; g_th_mismatch++; break; }
+            /* (R3 hs11) the sound thread sindou::update alternates SleepThread / WaitEvent; at a ring load it sometimes waits for an
+             * event no held thread signals, and this loop waited the whole 500 ms (a half-second freeze, 2 in 10 normal-speed runs).
+             * An audio thread blocked at another waiting import after 5 ms is taken as it is (what the 500 ms limit did anyway).
+             * SSBU_RB_AUDIO_WAIT=0: the old way. */
+            {   static int aw = -1; if (aw < 0) { const char *e = getenv("SSBU_RB_AUDIO_WAIT"); aw = !(e && e[0] == '0'); }
+                if (aw && rgs_wanted() && ra_audio(t->name) && now_ms() - t0 > 5 && waiting_import(t->c->in_import) && th_blocked(t->h)) { t->held = 1; g_th_audio_other++; break; } }
+            if (now_ms() - t0 > 500) { t->held = 1; g_th_mismatch++;
+                static int said; if (said++ < 20) LOG("r1: hold for a load: thread %s not back at its wait after 500 ms: held at %s @%llx then, now %s @%llx, blocked %d\n", t->name ? t->name : "?",
+                    t->imp ? t->imp : "guest code", (unsigned long long)t->from, t->c->in_import ? t->c->in_import : "guest code", (unsigned long long)t->c->import_from, th_blocked(t->h));
+                break; }
             ResumeThread(t->h);
             SwitchToThread();
         }
