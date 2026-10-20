@@ -978,7 +978,51 @@ static VkSampler sampler_get(const SamplerParams *p) {
     return s;
 }
 
+#ifdef __APPLE__
+/* MAC2: MoltenVK has no VK_EXT_vertex_input_dynamic_state. There the vertex layout of a draw (per location: format,
+ * binding, offset; per binding: instance rate, divisor) is part of the pipeline key (PKEY_VI, set by vi_key), the strides
+ * stay dynamic (VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE, Vulkan 1.3). All zero on a device that has the extension.
+ * nvn_vk_m4.c only names PKEY_VI and NVK_VI_PIPE on lines it already had: its WD_SLEEP uses __LINE__, and the Windows
+ * build must stay the same to the byte. */
+#define PKEY_VI uint32_t vi_na, vi_nb, vi_rate; uint32_t vi_loc[16], vi_fmt[16], vi_bind[16], vi_off[16], vi_div[17];
+typedef struct {
+    VkVertexInputBindingDescription b[17];
+    VkVertexInputAttributeDescription a[16];
+    VkVertexInputBindingDivisorDescriptionEXT dd[17];
+    VkPipelineVertexInputDivisorStateCreateInfoEXT di;
+    VkPipelineVertexInputStateCreateInfo vi;
+} NvkVi;
+static void nvk_vi_pipe(const void *key, VkDynamicState *dyn, VkGraphicsPipelineCreateInfo *gi, NvkVi *s);
+#define NVK_VI_PIPE(k, dyn, gi) NvkVi nvk_vi_; nvk_vi_pipe(k, dyn, gi, &nvk_vi_);
+#else
+#define PKEY_VI
+#define NVK_VI_PIPE(k, dyn, gi)
+#endif
 #include "nvn_vk_m4.c"                             /* session 4: stages, pipelines, workers (M4) */
+#ifdef __APPLE__
+/* pipe_make without dynamic vertex input: the key's layout becomes the pipeline's; the strides come with the buffers */
+static void nvk_vi_pipe(const void *key, VkDynamicState *dyn, VkGraphicsPipelineCreateInfo *gi, NvkVi *s) {
+    const PKey *k = key;
+    uint32_t nvdd = 0;
+    if (D.has_vids) return;
+    memset(s, 0, sizeof *s);
+    s->di.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_DIVISOR_STATE_CREATE_INFO_EXT;
+    s->vi.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    dyn[19] = VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE;         /* in place of VK_DYNAMIC_STATE_VERTEX_INPUT_EXT */
+    for (uint32_t b = 0; b < k->vi_nb && b < 17; b++) {
+        int inst = k->vi_rate >> b & 1;
+        s->b[b].binding = b; s->b[b].stride = 0; s->b[b].inputRate = inst ? VK_VERTEX_INPUT_RATE_INSTANCE : VK_VERTEX_INPUT_RATE_VERTEX;
+        if (inst && k->vi_div[b] > 1) {
+            if (D.has_vad && D.vad.vertexAttributeInstanceRateDivisor) { s->dd[nvdd].binding = b; s->dd[nvdd].divisor = k->vi_div[b]; nvdd++; }
+            else nvn_vk_missing("an instance divisor above 1 without VK_EXT_vertex_attribute_divisor");
+        }
+    }
+    for (uint32_t a = 0; a < k->vi_na && a < 16; a++) { s->a[a].location = k->vi_loc[a]; s->a[a].binding = k->vi_bind[a]; s->a[a].format = (VkFormat)k->vi_fmt[a]; s->a[a].offset = k->vi_off[a]; }
+    s->vi.vertexBindingDescriptionCount = k->vi_nb; s->vi.pVertexBindingDescriptions = s->b; s->vi.vertexAttributeDescriptionCount = k->vi_na; s->vi.pVertexAttributeDescriptions = s->a;
+    if (nvdd) { s->di.vertexBindingDivisorCount = nvdd; s->di.pVertexBindingDivisors = s->dd; s->vi.pNext = &s->di; }
+    gi->pVertexInputState = &s->vi;
+}
+#endif
 #if 0   /* SUPERSEDED by nvn_vk_m4.c (session 3's stages and pipelines made at the draw); kept only until someone deletes the block */
 /* ---------------------------------------------------------------- stages: machine code -> Vulkan GLSL -> SPIR-V -> module */
 typedef struct { uint8_t unit, dim, shadow; uint16_t binding; } VSmp;

@@ -336,14 +336,6 @@ static VStage *vstage_get(Prog *p, int s, const uint32_t *key, uint32_t fo) {
 }
 
 /* ---------------------------------------------------------------- pipelines */
-#ifdef __APPLE__
-/* MAC2: MoltenVK has no VK_EXT_vertex_input_dynamic_state. There the vertex layout of a draw (per location: format,
- * binding, offset; per binding: instance rate, divisor) is part of the pipeline key, the strides stay dynamic
- * (VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE, Vulkan 1.3). All zero on a device that has the extension. */
-#define PKEY_VI uint32_t vi_na, vi_nb, vi_rate; uint32_t vi_loc[16], vi_fmt[16], vi_bind[16], vi_off[16], vi_div[17];
-#else
-#define PKEY_VI
-#endif
 typedef struct { uint32_t vs, fs, chanmask, sample_mask; int32_t cfmt[8], dfmt; uint8_t topo_class, ncolor, samples, poly, a2c, dclamp, logic, sshade, blend_on, pad[3]; uint8_t blend[8][8]; PKEY_VI } PKey;
 typedef struct Pipe { PKey k; VkPipeline p, p_fast; /* p_fast: the pipeline linked at once, after the optimised one took its place */ VkPipelineLayout layout; VkDescriptorSetLayout dl[2]; int nb[2], push0; VStage *vs, *fs; volatile LONG state; uint8_t recorded, predicted, used, libbed, lib_how; struct Pipe *next; } Pipe;      /* libbed: linked from libraries (layout and set layouts belong to the pair library); lib_how: 0 the pair library was there, 1 compiled by this build, 2 waited for */      /* state: 0 queued for a worker, 1 being made, 2 made */
 static Pipe *g_pipes[1024];
@@ -802,29 +794,6 @@ static double pipe_build(Pipe *p) {
         dyn[ndyn++] = VK_DYNAMIC_STATE_ALPHA_TO_COVERAGE_ENABLE_EXT; dyn[ndyn++] = VK_DYNAMIC_STATE_SAMPLE_MASK_EXT;
         if (D.f2.features.depthClamp) dyn[ndyn++] = VK_DYNAMIC_STATE_DEPTH_CLAMP_ENABLE_EXT;
     }
-#ifdef __APPLE__
-    /* MAC2: without dynamic vertex input the key's layout is the pipeline's (see PKEY_VI); strides come with the buffers */
-    VkVertexInputBindingDescription vib[17];
-    VkVertexInputAttributeDescription via[16];
-    VkVertexInputBindingDivisorDescriptionEXT vdd[17];
-    VkPipelineVertexInputDivisorStateCreateInfoEXT vdi = {VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_DIVISOR_STATE_CREATE_INFO_EXT};
-    VkPipelineVertexInputStateCreateInfo vis = {VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
-    if (!D.has_vids) {
-        uint32_t nvdd = 0;
-        dyn[19] = VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE;
-        for (uint32_t b = 0; b < k->vi_nb && b < 17; b++) {
-            int inst = k->vi_rate >> b & 1;
-            vib[b].binding = b; vib[b].stride = 0; vib[b].inputRate = inst ? VK_VERTEX_INPUT_RATE_INSTANCE : VK_VERTEX_INPUT_RATE_VERTEX;
-            if (inst && k->vi_div[b] > 1) {
-                if (D.has_vad && D.vad.vertexAttributeInstanceRateDivisor) { vdd[nvdd].binding = b; vdd[nvdd].divisor = k->vi_div[b]; nvdd++; }
-                else nvn_vk_missing("an instance divisor above 1 without VK_EXT_vertex_attribute_divisor");
-            }
-        }
-        for (uint32_t a = 0; a < k->vi_na && a < 16; a++) { via[a].location = k->vi_loc[a]; via[a].binding = k->vi_bind[a]; via[a].format = (VkFormat)k->vi_fmt[a]; via[a].offset = k->vi_off[a]; }
-        vis.vertexBindingDescriptionCount = k->vi_nb; vis.pVertexBindingDescriptions = vib; vis.vertexAttributeDescriptionCount = k->vi_na; vis.pVertexAttributeDescriptions = via;
-        if (nvdd) { vdi.vertexBindingDivisorCount = nvdd; vdi.pVertexBindingDivisors = vdd; vis.pNext = &vdi; }
-    }
-#endif
     VkPipelineDynamicStateCreateInfo dy = {VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
     dy.dynamicStateCount = ndyn; dy.pDynamicStates = dyn;
     VkPipelineRenderingCreateInfo ri = {VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
@@ -835,10 +804,7 @@ static double pipe_build(Pipe *p) {
     if (k->dfmt && (fmt_aspect((VkFormat)k->dfmt) & VK_IMAGE_ASPECT_STENCIL_BIT)) ri.stencilAttachmentFormat = (VkFormat)k->dfmt;
     VkGraphicsPipelineCreateInfo gi = {VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
     gi.pNext = &ri; gi.stageCount = fs ? 2 : 1; gi.pStages = st; gi.pInputAssemblyState = &ia; gi.pViewportState = &vp; gi.pRasterizationState = &rs; gi.pMultisampleState = &ms;
-    gi.pDepthStencilState = &ds; gi.pColorBlendState = &cb; gi.pDynamicState = &dy; gi.layout = p->layout;
-#ifdef __APPLE__
-    if (!D.has_vids) gi.pVertexInputState = &vis;
-#endif
+    gi.pDepthStencilState = &ds; gi.pColorBlendState = &cb; gi.pDynamicState = &dy; gi.layout = p->layout; NVK_VI_PIPE(k, dyn, &gi)
     VkResult r = pw_graphics(g_pcache, &gi, &p->p);
     if (r != VK_SUCCESS) vkd_fail("vkCreateGraphicsPipelines (vertex stage %u, fragment stage %u, %d colour targets, depth format %d): %s", k->vs, k->fs, k->ncolor, k->dfmt, vk_result_name(r));
     InterlockedIncrement64(&R.pipelines);
