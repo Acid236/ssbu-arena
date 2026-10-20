@@ -88,6 +88,18 @@ def cmd_compile(jobs, force):
                 print('FAILED %s\n%s' % (name, err), flush=True)
             if done % 50 == 0 or done == len(todo):
                 print('  %d/%d   %.0fs elapsed   %.0fs compiler time' % (done, len(todo), time.time() - t0, cpu), flush=True)
+    # a file that failed while many compilers ran at once usually ran out of memory (clang crashes "due to signal" on the
+    # biggest files): those are compiled again with far fewer at a time, then one by one, before the step gives up
+    for retry_jobs in (max(1, jobs // 4), 1):
+        if not failed or retry_jobs >= jobs:
+            continue
+        again, failed = failed, []
+        print('compiling again with %d job(s): %d file(s) that failed (usually out of memory with %d at once)' % (retry_jobs, len(again), jobs), flush=True)
+        with concurrent.futures.ThreadPoolExecutor(retry_jobs) as pool:
+            for name, code, err, secs in pool.map(compile_one, again):
+                if code:
+                    failed.append(name)
+                    print('FAILED again %s\n%s' % (name, err), flush=True)
     print('compiled: %d   failed: %d   elapsed: %.0fs' % (len(todo) - len(failed), len(failed), time.time() - t0), flush=True)
     return 1 if failed else 0
 

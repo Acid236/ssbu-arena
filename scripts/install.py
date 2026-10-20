@@ -984,7 +984,17 @@ class Ctx:
         self.dlc, self.setup_args, self.blockers = [], [], []
         self.restart_from = None
         self.rebuild_from = a.reexec if a.reexec and a.reexec != '-' else None
-        self.jobs = a.jobs or min(24, os.cpu_count() or 4)
+        self.jobs = a.jobs or default_jobs()
+
+
+def default_jobs():
+    """Compiler jobs when none was given: precheck's rule (about 1.5 GB of RAM per job, at most the logical CPUs), at most
+    24. Only the CPU count made a 32-thread PC run 24 clang processes at once, and big files then failed for lack of memory."""
+    try:
+        import precheck
+        return max(1, min(24, precheck.suggested_jobs(precheck._ram_gb())))
+    except Exception:                            # noqa: BLE001
+        return min(8, os.cpu_count() or 4)
 
 
 def make_plan(cx):
