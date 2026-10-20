@@ -353,8 +353,25 @@ def step_packages(cx):
 
 
 # ------------------------------------------------------------------------------------------------------ 4. inputs
+def arc_complete(path):
+    """data.arc is whole: its header's tables lie inside the file and the file-system table is all there. A dump cut short
+    (a full disk, the window closed) leaves a data.arc with a good header and a missing end (testers, 2026-10-20)."""
+    import struct
+    try:
+        size = os.path.getsize(path)
+        with open(path, 'rb') as f:
+            magic, stream, files, shared, fs, search, _ = struct.unpack('<7Q', f.read(0x38))
+            if magic != 0xABCDEF9876543210 or max(stream, files, shared, fs, search) + 16 > size:
+                return False
+            f.seek(fs)
+            m, _, comp, _ = struct.unpack('<4I', f.read(16))
+            return m == 0x10 and fs + 16 + comp <= size
+    except (OSError, struct.error):
+        return False
+
+
 def dump_ok(d):
-    return all(os.path.isdir(os.path.join(d, s)) for s in ('exefs', 'romfs')) and os.path.isfile(os.path.join(d, 'romfs', 'data.arc'))
+    return all(os.path.isdir(os.path.join(d, s)) for s in ('exefs', 'romfs')) and arc_complete(os.path.join(d, 'romfs', 'data.arc'))
 
 
 def has_fonts(folder):

@@ -38,6 +38,7 @@ import argparse
 import json
 import os
 import shutil
+import struct
 import subprocess
 import sys
 import time
@@ -519,6 +520,20 @@ def dump_checks(cx, a):
             raise Fail('%s not found: the ExeFS folder needs the files main and sdk' % os.path.join(exefs, f))
     if not os.path.isfile(os.path.join(romfs, 'data.arc')):
         raise Fail('%s not found: the RomFS folder needs data.arc' % os.path.join(romfs, 'data.arc'))
+    arc, size = os.path.join(romfs, 'data.arc'), 0
+    try:                                          # a dump cut short: good header, missing end (testers, 2026-10-20)
+        size = os.path.getsize(arc)
+        with open(arc, 'rb') as f:
+            hdr = struct.unpack('<7Q', f.read(0x38))
+            f.seek(hdr[4])
+            m, _, comp, _ = struct.unpack('<4I', f.read(16))
+        whole = hdr[0] == 0xABCDEF9876543210 and max(hdr[1:6]) + 16 <= size and m == 0x10 and hdr[4] + 16 + comp <= size
+    except (OSError, struct.error):
+        whole = False
+    if not whole:
+        raise Fail('%s is incomplete (%.1f GB): the game files were not unpacked to the end (a full disk, or the window '
+                   'closed while unpacking). Delete the dump folder and run the installer again, with about 17 GB free.'
+                   % (arc, size / 2 ** 30))
     cx.state['dump'] = {'exefs': os.path.abspath(exefs), 'romfs': os.path.abspath(romfs)}
     sysdata = a.sysdata or (os.path.join(dump, 'sysdata') if dump else None)
     if sysdata and os.path.isdir(os.path.join(sysdata, 'fonts')):
