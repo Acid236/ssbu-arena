@@ -906,7 +906,8 @@ static long long g_miss_total, g_miss_remarked, g_miss_remarked_last; static int
 static int win_index(uint8_t *a, uint8_t **map, size_t *pi);
 static int mark_bind(void) {
     const char *dn = getenv("SSBU_R1_GAMEDLL");
-    HMODULE m = GetModuleHandleA(dn && dn[0] ? dn : "ssbu_game_p15r1.dll");
+    HMODULE m = GetModuleHandleA(dn && dn[0] ? dn : "ssbu_game_r1.dll");          /* the players' rollback pair (scripts/setup.py --rollback) */
+    if (!m && !(dn && dn[0])) m = GetModuleHandleA("ssbu_game_p15r1.dll");      /* the study builds' name */
     if (!m) { LOG("r1: MARK: the game DLL with marks is not loaded: off\n"); return 0; }
     pm1 = (uint8_t **)GetProcAddress(m, "r1_m1"); pm2 = (uint8_t **)GetProcAddress(m, "r1_m2");
     plo1 = (uint64_t *)GetProcAddress(m, "r1_lo1"); pn1 = (uint64_t *)GetProcAddress(m, "r1_n1"); pn2 = (uint64_t *)GetProcAddress(m, "r1_n2");
