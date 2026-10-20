@@ -28,6 +28,9 @@
 #define VK_USE_PLATFORM_WIN32_KHR
 #endif
 #define VK_NO_PROTOTYPES
+#ifdef __APPLE__
+#define VK_ENABLE_BETA_EXTENSIONS                       /* VK_KHR_portability_subset (MoltenVK) is declared in vulkan_beta.h */
+#endif
 #include <vulkan/vulkan.h>
 #ifndef _WIN32
 #include <SDL3/SDL.h>
@@ -274,7 +277,7 @@ int nvn_vk_init(void *hwnd) {
 #ifdef _WIN32
     const char *exts[4], *layers[1];
 #else
-    const char *exts[12], *layers[1];                 /* Linux build: SDL may name several surface extensions */
+    const char *exts[14], *layers[1];                 /* Linux build: SDL may name several surface extensions */
 #endif
     uint32_t next = 0, nlayers = 0;
 #ifdef _WIN32
@@ -290,6 +293,10 @@ int nvn_vk_init(void *hwnd) {
             exts[next++] = se[i];
         }
     }
+    /* macOS: MoltenVK is a portability driver; the loader lists it only for an instance that asks for portability
+     * devices (VK_KHR_portability_enumeration + the enumerate-portability flag). Harmless where the loader lacks it. */
+    VkInstanceCreateFlags iflags = 0;
+    if (has_name(iext, niext, "VK_KHR_portability_enumeration")) { exts[next++] = "VK_KHR_portability_enumeration"; iflags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR; }
 #endif
     { const char *e = getenv("SSBU_VK_VALIDATE"); V.validate = e && atoi(e) != 0; }
     if (V.validate) {
@@ -308,6 +315,9 @@ int nvn_vk_init(void *hwnd) {
     memset(&ici, 0, sizeof ici);
     ici.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO; ici.pApplicationInfo = &app;
     ici.enabledLayerCount = nlayers; ici.ppEnabledLayerNames = layers; ici.enabledExtensionCount = next; ici.ppEnabledExtensionNames = exts;
+#ifndef _WIN32
+    ici.flags = iflags;
+#endif
     r = vkCreateInstance(&ici, NULL, &V.instance);
     if (r != VK_SUCCESS) vk_fatal("vkCreateInstance", r);
     if (V.validate) {

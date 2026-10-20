@@ -44,6 +44,9 @@ static struct {
     VkPhysicalDeviceExtendedDynamicState3FeaturesEXT eds3;
     VkPhysicalDeviceGraphicsPipelineLibraryFeaturesEXT gpl;
     VkPhysicalDeviceFaultFeaturesEXT fault;
+#ifdef VK_KHR_portability_subset
+    VkPhysicalDevicePortabilitySubsetFeaturesKHR port; int has_port;
+#endif
     const char *exts[16]; uint32_t next;
     int has_vids, has_cbc, has_pv, has_iu8, has_plr, has_vad, has_push, has_eds3, debug;
     int has_gpl, ext_gpl, ext_so, has_fault, has_ckpt;
@@ -90,6 +93,11 @@ static void vkd_device_info(VkDeviceCreateInfo *di, const VkExtensionProperties 
     /* PR #32: a lost device says what it knows (vkd_lost_report): the fault (costs nothing until a loss) and, with
      * SSBU_VK_CHECKPOINTS=1, the last commands the GPU started and finished (a marker before most commands) */
     EXT(has_fault, "VK_EXT_device_fault", fault, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT)
+#ifdef VK_KHR_portability_subset
+    /* macOS (MoltenVK): a device that lists VK_KHR_portability_subset must have it enabled; its features (all the
+     * supported ones enabled, as for the others) say what Metal cannot do. MAC4: the drawing code respects them. */
+    EXT(has_port, "VK_KHR_portability_subset", port, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PORTABILITY_SUBSET_FEATURES_KHR)
+#endif
 #undef EXT
     if (getenv("SSBU_VK_CHECKPOINTS") && atoi(getenv("SSBU_VK_CHECKPOINTS")) && has_name(dext, ndext, "VK_NV_device_diagnostic_checkpoints")) { D.has_ckpt = 1; D.exts[D.next++] = "VK_NV_device_diagnostic_checkpoints"; }
     if (has_name(dext, ndext, "VK_KHR_push_descriptor") && !(getenv("SSBU_VK_PUSH") && !atoi(getenv("SSBU_VK_PUSH")))) { D.has_push = 1; D.exts[D.next++] = "VK_KHR_push_descriptor"; }
@@ -112,6 +120,15 @@ static void vkd_device_info(VkDeviceCreateInfo *di, const VkExtensionProperties 
                !m ? (e ? "turned off by SSBU_VK_GPL=0" : "off by default in this build") : D.has_gpl ? (e ? "asked for by SSBU_VK_GPL" : "the default: the driver has VK_EXT_graphics_pipeline_library, extended dynamic state 3 and dynamic vertex input") :
                !D.ext_gpl ? "the driver has NO VK_EXT_graphics_pipeline_library: fallen back" : "the driver lacks extended dynamic state 3 or dynamic vertex input: fallen back", e ? e : "not set", VK_GPL_DEFAULT);
     }
+#ifdef VK_KHR_portability_subset
+    if (D.has_port)
+        printf("nvn_vk: portability subset (MoltenVK): triangle fans %d, image view swizzle %d, format reinterpretation %d, events %d, point polygons %d, separate stencil ref %d, "
+               "constant alpha blend %d, sampler LOD bias %d, mutable comparison samplers %d, 2D views of 3D images %d, vertex access beyond stride %d
+",
+               (int)D.port.triangleFans, (int)D.port.imageViewFormatSwizzle, (int)D.port.imageViewFormatReinterpretation, (int)D.port.events, (int)D.port.pointPolygons,
+               (int)D.port.separateStencilMaskRef, (int)D.port.constantAlphaColorBlendFactors, (int)D.port.samplerMipLodBias, (int)D.port.mutableComparisonSamplers,
+               (int)D.port.imageView2DOn3DImage, (int)D.port.vertexAttributeAccessBeyondStride);
+#endif
     if (!D.f13.dynamicRendering || !D.f13.synchronization2) vkd_fail("the device lacks dynamicRendering / synchronization2");
     if (!D.has_vids) nvn_vk_missing("a GPU without VK_EXT_vertex_input_dynamic_state (the vertex layout is not yet part of the pipeline key)");
     if (!D.f2.features.textureCompressionBC) nvn_vk_missing("a GPU without BC texture compression");

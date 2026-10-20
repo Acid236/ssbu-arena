@@ -60,8 +60,12 @@ jobs:
         run: brew install --quiet vulkan-loader molten-vk vulkan-tools
       - name: vulkaninfo
         run: |
-          vulkaninfo --summary 2>&1 | tee summary.txt
-          vulkaninfo 2>/dev/null > full.txt || true
+          # The runner's GPU is Apple's paravirtual device: MoltenVK's feature probe of Metal argument encoders aborts on it
+          # (seen in run 39426136241). Try the default first, then without argument buffers.
+          brew info --quiet molten-vk | head -1 | tee -a "$GITHUB_STEP_SUMMARY"
+          vulkaninfo --summary > summary.txt 2>&1 || MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=0 vulkaninfo --summary > summary.txt 2>&1 || true
+          cat summary.txt
+          vulkaninfo > full.txt 2>/dev/null || MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=0 vulkaninfo > full.txt 2>/dev/null || true
           echo "### Vulkan on macos-14 (MoltenVK)" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           grep -E "apiVersion|driverName|driverInfo|deviceName|conformanceVersion" summary.txt | sort -u >> "$GITHUB_STEP_SUMMARY" || true
