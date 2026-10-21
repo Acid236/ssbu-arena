@@ -21,7 +21,7 @@ void os_signal_event(uint64_t key);
 
 static HWND g_hwnd;
 #ifdef _WIN32
-static HICON g_icon_small;                /* the title bar's small icon (opensmash.ico), set after the window is made */
+static HICON g_icon_small, g_icon_big;                /* the title bar's small icon (opensmash.ico), set after the window is made */
 #endif
 static volatile LONG g_ready;
 static volatile LONG64 g_frames;
@@ -402,6 +402,7 @@ static DWORD WINAPI window_thread(LPVOID arg) {
             strcpy(ico + n, "opensmash.ico");
             wc.hIcon = (HICON)LoadImageA(NULL, ico, IMAGE_ICON, 0, 0, LR_LOADFROMFILE | LR_DEFAULTSIZE);
             g_icon_small = (HICON)LoadImageA(NULL, ico, IMAGE_ICON, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_LOADFROMFILE);
+            g_icon_big = (HICON)LoadImageA(NULL, ico, IMAGE_ICON, 256, 256, LR_LOADFROMFILE);
         }
     }
     RegisterClassA(&wc);
@@ -432,6 +433,7 @@ static DWORD WINAPI window_thread(LPVOID arg) {
         g_hwnd = CreateWindowExA(go->window_mode == 2 ? WS_EX_TOPMOST : 0, wc.lpszClassName, g_title, style | WS_VISIBLE, px, py, r.right - r.left,
                                  r.bottom - r.top, NULL, NULL, wc.hInstance, NULL);
         if (g_hwnd && g_icon_small) SendMessageA(g_hwnd, WM_SETICON, ICON_SMALL, (LPARAM)g_icon_small);
+        if (g_hwnd && g_icon_big) SendMessageA(g_hwnd, WM_SETICON, ICON_BIG, (LPARAM)g_icon_big);      /* the 256 px image: the taskbar / Alt+Tab scale it down sharp (the class icon is only 32 px: blurry on a high-DPI screen) */
     } else {
         g_hwnd = CreateWindowExA(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, wc.lpszClassName, g_title, style, -32000, -32000,
                                  r.right - r.left, r.bottom - r.top, NULL, NULL, wc.hInstance, NULL);
