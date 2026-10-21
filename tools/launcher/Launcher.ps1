@@ -38,7 +38,7 @@ $O = Read-Ini $OnlineIni
 $DefaultSaves = if ($Portable) { Join-Path (Split-Path $Build -Parent) 'saves' } else { Join-Path $Build 'saves' }
 $Saves = if ($L['saves']) { $L['saves'] } else { $DefaultSaves }
 $HasOnline = (Test-Path $Exe) -and ([System.IO.File]::ReadAllText($Exe, [System.Text.Encoding]::ASCII).Contains('SSBU_ONLINE'))
-$DefaultServer = 'lobby.ssbuarena.com:39010'                    # our lobby (tools/net/rb_lobby.c, relay only)
+$DefaultServer = 'germany.ssbuarena.com:39010'                    # our lobby (tools/net/rb_lobby.c, relay only)
 # the rollback build: the game DLL and script modules with dirty-page marks (setup.py --rollback of upstream's recipe);
 # without it the normal build runs rollback too (upstream's learned-set save)
 $RbExe = Join-Path $Work 'ssbu_native_rb.exe'

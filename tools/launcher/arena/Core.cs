@@ -30,7 +30,7 @@ namespace Arena
 
     public static class Core
     {
-        public const string DefaultServer = "lobby.ssbuarena.com:39010";      // our lobby (tools/net/rb_lobby.c, relay only)
+        public const string DefaultServer = "germany.ssbuarena.com:39010";      // our lobby (tools/net/rb_lobby.c, relay only)
         public const string Site = "https://ssbuarena.com/";
 
         public static readonly string Build = AppDomain.CurrentDomain.BaseDirectory.TrimEnd('\\');
@@ -38,6 +38,7 @@ namespace Arena
         public static readonly string Cfg = Path.Combine(Build, "config");
         public static readonly string Exe = Path.Combine(Work, "ssbu_native.exe");
         public static readonly string RbExe = Path.Combine(Work, "ssbu_native_rb.exe");
+        public static readonly string UiExe = Path.Combine(Work, "ssbu_ui_native.exe");
         public static readonly string MainElf = Path.Combine(Build, @"binaries\13.0.4\main.elf");
         public static readonly string Fonts = Path.Combine(Build, @"sysdata\fonts");
         public static readonly string GameLog = Path.Combine(Build, "game.log");
@@ -209,7 +210,8 @@ namespace Arena
 
         public static bool GameRunning()
         {
-            return Process.GetProcessesByName("ssbu_native").Length + Process.GetProcessesByName("ssbu_native_rb").Length > 0;
+            return Process.GetProcessesByName("ssbu_native").Length + Process.GetProcessesByName("ssbu_native_rb").Length
+                + Process.GetProcessesByName("ssbu_ui_native").Length > 0;
         }
 
         // ---------------------------------------------------------------- checks
@@ -401,7 +403,7 @@ namespace Arena
             Directory.CreateDirectory(Path.Combine(Build, "cache"));
             var psi = new ProcessStartInfo(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "cmd.exe")) { WorkingDirectory = Work, UseShellExecute = false, CreateNoWindow = true };
             var env = psi.EnvironmentVariables;
-            foreach (var v in new[] { "SSBU_ONLINE", "SSBU_ONLINE_CODE", "SSBU_ONLINE_NAME", "SSBU_ONLINE_DIRECT", "SSBU_NICKNAME", "SSBU_RB_NET", "SSBU_R1_GAMEDLL", "SSBU_NRO_BIN", "SSBU_NET_PING" })
+            foreach (var v in new[] { "SSBU_ONLINE", "SSBU_ONLINE_CODE", "SSBU_ONLINE_NAME", "SSBU_ONLINE_DIRECT", "SSBU_NICKNAME", "SSBU_RB_NET", "SSBU_R1_GAMEDLL", "SSBU_NRO_BIN", "SSBU_NET_PING", "SSBU_COMPETITIVE_UI" })
                 env.Remove(v);
             env["SSBU_ROMFS"] = RomFS ?? "";
             env["SSBU_USERDATA"] = Saves;
@@ -427,6 +429,14 @@ namespace Arena
                 }
             }
             else env["SSBU_ONLINE"] = "off";
+            // Arena's native menu uses the same game DLL (including the rollback pair selected above).
+            // Keep the original hosts available when the optional menu override has not been prepared.
+            if (Competitive && File.Exists(UiExe) && Directory.Exists(Path.Combine(Build, @"characters\arena_menu")))
+            {
+                run = UiExe;
+                env["SSBU_COMPETITIVE_UI"] = "1";
+                env["SSBU_MENU"] = "1"; // the Settings tile opens the existing PC settings overlay
+            }
             psi.Arguments = "/d /c \"\"" + run + "\" \"" + MainElf + "\" 0 > \"" + GameLog + "\" 2>&1\"";
             var p = Process.Start(psi);
             p.EnableRaisingEvents = true;
