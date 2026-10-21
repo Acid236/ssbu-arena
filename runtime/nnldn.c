@@ -483,6 +483,16 @@ int nnldn_players(void) {                 /* players in this player's room, itse
     int s = L.state;
     return s == LS_AP_CREATED || s == LS_STA_CONNECTED ? L.net[NI_NODE_COUNT] : 0;
 }
+/* (R3 pub1, testers 2026-10-20) the address of THE other player of this room (a 1v1 room: exactly one other node), 0 = none or
+ * more than one: net_relay.c sends the rollback messages to it */
+uint32_t nnldn_other_ip(void) {
+    uint32_t me = net_my_ip(), r = 0; int n = 0;
+    AcquireSRWLockShared(&L.lock);
+    if (in_network()) for (int i = 0; i < 8; i++) if (L.net[NODE(i) + 0xb]) { uint32_t ip = u32at(L.net + NODE(i)); if (ip && ip != me) { r = ip; n++; } }
+    ReleaseSRWLockShared(&L.lock);
+    return n == 1 ? r : 0;
+}
+int nnldn_role(void) { int s = L.state; return s == LS_AP_CREATED ? 1 : s == LS_STA_CONNECTED ? 2 : 0; }      /* (R3 pub1) 1 = this game made the room, 2 = it joined one, 0 = no room */
 int nnldn_has_node(uint32_t ip) {
     AcquireSRWLockShared(&L.lock);
     int in = in_network() && node_index(ip) >= 0;

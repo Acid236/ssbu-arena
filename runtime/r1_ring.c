@@ -19,7 +19,7 @@
  *  - the oldest slot is dropped when the ring is full (SSBU_RB_DEPTH, default 7 frames back = 8 states).
  * Public API (a future rb_rollback.c, at the safe point run-ahead uses, the kick after the submission):
  *    int r1_ring_capture(long long frame, Ctx *c);  1 = captured; 0 = not now (a thread not at a wait in time)
- *    int r1_ring_load(long long frame, Ctx *c);     1 = loaded (c = main's registers of that frame); 0 = not in the ring
+ *    int r1_ring_load(long long frame, Ctx *c);     1 = loaded (c = main's registers of that frame); 0 = not in the ring; -1 = refused for now (pub1: a thread was running)
  *    void r1_ring_release(void);                    every slot dropped
  *    long long r1_ring_oldest(void), r1_ring_newest(void);   (-1 = empty)
  *    double r1_ring_last_ms(int load);              the last capture / load in ms
@@ -205,7 +205,8 @@ static uint32_t rg_pool_get_cap(void) {                  /* a buffer for the cap
 static void rg_cb_find(void) {
     if (g_rg_cb_ok >= 0) return;
     uint64_t a = map_sym("g_cbs"), n = map_sym("g_ncbs"), all = map_sym("g_all_cb");
-    g_rg_cb_ok = a && n && all && all - a == 512ull * RG_CBS_SIZE;
+    size_t nvn_gl_r1_cb_size(void);                      /* (R3 pub1) the entry size from nvn_gl.c itself: the compiler of the package exe put g_ncbs between the two arrays */
+    g_rg_cb_ok = a && n && all && (all - a == 512ull * RG_CBS_SIZE || nvn_gl_r1_cb_size() == RG_CBS_SIZE);
     if (g_rg_cb_ok) { g_rg_cbs = (uint8_t *)(uintptr_t)a; g_rg_ncbs = (int *)(uintptr_t)n; }
     LOG("r1: RING: command-buffer save area of nvn_gl.c %s (g_cbs %llx, g_ncbs %llx, g_all_cb %llx)\n", g_rg_cb_ok ? "found: saved per slot" : "NOT found (layout differs): the newest capture's is put back at every load",
         (unsigned long long)a, (unsigned long long)n, (unsigned long long)all);
@@ -555,6 +556,7 @@ static void rgc_after(void) {                           /* after the copies and 
     if (deadfix) ReleaseSRWLockShared(&g_bf_lock);
     g_rgc_dropped += dropped; g_rgc_kept += kept; if (dropped || kept) g_rgc_loads_changed++;
 }
+static long long g_rg_refused;                        /* (R3 pub1) loads refused: a thread still running after the hold */
 int r1_ring_load(long long frame, Ctx *c) {
     int si = -1;
     for (int i = 0; i < g_rg_count; i++) if (rg_slot(i)->frame == frame) si = i;
@@ -581,6 +583,26 @@ int r1_ring_load(long long frame, Ctx *c) {
         if (ra_fibers_quiet() || now_ms() - tq > 200) { if (g_ra_busy_fibers) LOG("r1: RING load: %d fibers still busy after 200 ms\n", g_ra_busy_fibers); break; }
         for (int i = 0; i < g_nth; i++) if (g_th[i].held) { ResumeThread(g_th[i].h); g_th[i].held = 0; }
         SwitchToThread();
+    }
+    /* (R3 pub1: fx2j / fx3h, c0000005 in the sound thread's memcpy right after "nus3::audio update not back at its wait after 500 ms
+     * ... now guest code") a thread that is still RUNNING guest code (not blocked at a wait) after the hold's 500 ms was suspended in
+     * the middle of its code, and the load then changed the memory under its registers. Now such a load is REFUSED: every thread
+     * goes on, nothing was changed yet, the wrong guess stays pending (rb_rollback.c) and the next tick loads again (one frame
+     * further back). SSBU_R1_RUNFIX=0: the old way (loaded anyway). SSBU_RB_NET_TEST_REFUSE=<n> (TEST ONLY): every n-th load is
+     * refused as if a thread were running (the timeline must not change). */
+    {   static int runfix = -1, tn = -1; static long long tc;
+        if (runfix < 0) { const char *e = getenv("SSBU_R1_RUNFIX"); runfix = !(e && e[0] == '0'); e = getenv("SSBU_RB_NET_TEST_REFUSE"); tn = e ? atoi(e) : 0; }
+        int forced = tn > 0 && ++tc % tn == 0;
+        if ((runfix && g_th_running) || forced) {
+            unpark();
+            Ctx *tc2; const char *nm2; HANDLE h2;                  /* the threads made after that frame (stop_born_threads) go on too */
+            for (int i = g_ninfo; guest_thread_info(i, &tc2, &nm2, &h2); i++) if (h2 && GetThreadId(h2) != GetCurrentThreadId()) ResumeThread(h2);
+            g_rg_refused++;
+            if (g_rg_refused <= 20 || g_rg_refused % 100 == 0) LOG("r1: RING load of frame %lld (k %d) REFUSED (%lld so far): %s; every thread goes on, the rollback is tried again next tick\n",
+                frame, k, g_rg_refused, forced ? "test switch SSBU_RB_NET_TEST_REFUSE" : "a thread still running guest code after 500 ms");
+            g_rgp_seg = 1;
+            return -1;
+        }
     }
     double t1 = now_ms();
     R1_CTR("load (state of frame)", frame, 0);
@@ -677,7 +699,7 @@ static void rgs_step(Ctx *c) {
         int k = 1 + g_rgs_ki % g_rgs_k;
         long long target = i - k, best = -1;
         for (int s = 0; s < g_rg_count; s++) { long long f = rg_slot(s)->frame; if (f <= target && f > best) best = f; }
-        if (best >= 0 && r1_ring_load(best, c)) {
+        if (best >= 0 && r1_ring_load(best, c) > 0) {
             g_rgs_ki++; g_rgs_real_since = 0; g_rgs_done++;
             g_rgs_left = (int)(i - best); g_rgs_next = best + 1; g_ra_phase = 2;
             if (g_rgs_left < RG_MAXSLOT) g_rgs_ksum[g_rgs_left]++;

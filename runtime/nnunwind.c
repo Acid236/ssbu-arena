@@ -182,6 +182,9 @@ static int step(const Fde *f, Regs *r, uint64_t *cfa_out) {
 typedef struct { uint64_t cfa; jmp_buf *jb; } CatchSlot;
 #define CATCH_SLOTS 8192
 static CatchSlot g_catch[CATCH_SLOTS];
+/* (R3 pub1) r1_state.c: where the table is and how big (it is part of the rollback state). r1_state.c used to find it in the exe's
+ * linker map, which the prebuilt runtime package does not ship: the table was then never captured nor restored. */
+void *nnunwind_catch_table(size_t *bytes) { if (bytes) *bytes = sizeof g_catch; return g_catch; }
 static SRWLOCK g_catch_lock = SRWLOCK_INIT;
 
 /* (R3 hs13) A record belongs to the HOST stack its jmp_buf is on: two coroutines can use the same guest stack (the same CFA)

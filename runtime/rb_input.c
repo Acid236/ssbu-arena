@@ -70,6 +70,7 @@ RbPad rb_input_get(int p, int frame, int *predicted) {
 }
 
 int rb_input_take_mismatch(void) { int m = g_mismatch; g_mismatch = 0; return m; }
+void rb_input_put_mismatch(int m) { if (m > 0 && (!g_mismatch || m < g_mismatch)) g_mismatch = m; }      /* (R3 pub1) a load refused: taken again next tick */
 
 int rb_input_finalized(void) {
     int fin = g_llatest;

@@ -32,6 +32,7 @@
 
 int net_rb_send(const void *p, int n);                 /* net_relay.c: 1 = sent (or queued by the latency simulation) */
 int net_rb_ready(void);                                /* net_relay.c: joined a lobby (the host's game or a server) */
+int net_rb_no_destination(void);                       /* net_relay.c (pub1): messages not sent: no other player in the room on the public lobby */
 int net_mode(void);
 int net_online(void);
 
@@ -156,6 +157,7 @@ uint64_t rbn_match_seed(void) {
     return g_hs_seed;
 }
 int rbn_match_cancelled(void) { return g_hs_cancelled != 0; }
+const char *rbn_hs_why(void) { return g_hs_why; }      /* (R3 pub1) why the last handshake failed (rb_rollback.c's notice) */
 static void hs_head(RbhMsg *m, int type) { memset(m, 0, sizeof *m); m->type = (uint8_t)type; m->proto = RBH_PROTO; m->game_build = (int16_t)g_game_build; m->exe_stamp = exe_stamp(); m->nonce = g_hs_nonce; }
 static void hs_send(const void *p, int n) { if (net_rb_send(p, n)) g_hs_tx++; }
 static int hs_check(const RbhMsg *m, char *why, size_t n) {           /* 0 = the other game cannot play this match with us */
@@ -261,6 +263,12 @@ static void hs_stage_rule(RbhMatch *m, const RbhMatch *peer) {
 int rbn_handshake(const RbhMatch *mine, RbhMatch *out) {
     if (!rbn_handshake_wanted() || rbn_on() <= 0 || g_loop) return 0;
     LONG round = InterlockedIncrement(&g_hs_round);
+    /* (R3 pub1, testers 2026-10-20) through a lobby server (and on a LAN) NEITHER game is in JOIN mode, so both were "the host":
+     * each waited for the other's CHOICE and sent nothing ("messages sent 0, received 0" for 120 s). The roles now come from
+     * the Local Wireless room: the game that made the room is player 1 (host of the handshake), the one that joined it player 2.
+     * SSBU_RB_NET_PLAYER still forces one (tests). */
+    {   int nnldn_role(void); int role = nnldn_role();
+        if (role && !getenv("SSBU_RB_NET_PLAYER")) { int want = role == 2; if (want != g_local) printf("[rbnet] handshake: this game %s the Local Wireless room: it is player %d (was %d by the online mode)\n", role == 1 ? "made" : "joined", want + 1, g_local + 1); g_local = want; } }
     double limit = getenv("SSBU_RB_NET_HS_WAIT") ? atof(getenv("SSBU_RB_NET_HS_WAIT")) * 1000.0 : 120000.0;
     uint64_t t0 = GetTickCount64(), last_tx = 0, last_log = t0, last_note = 0, last_redraw = 0;
     long long presents = nvn_front_presents(); uint64_t presents_at = t0, notes = 0, redraws = 0;
@@ -305,14 +313,14 @@ int rbn_handshake(const RbhMatch *mine, RbhMatch *out) {
             last_note = now; notes++;
             char t[400]; double w = (now - t0) / 1000.0;
             snprintf(t, sizeof t, "%s\nWaiting %.0f s (this game gives up after %.0f s and goes back to the character select).\nPress Esc or hold B to stop waiting.",
-                     !net_rb_ready() ? "Not connected to the other player's game yet (lobby / room not joined)." : g_hs_peer_nonce ? "The other player is here: agreeing on the match..." : "Waiting for the other player to choose a fighter and start...", w, limit / 1000.0);
+                     !net_rb_ready() ? "Not connected to the other player's game yet (lobby / room not joined)." : net_rb_no_destination() && !g_hs_peer_nonce ? "The other player is not in your Local Wireless room: both players must be in the same room." : g_hs_peer_nonce ? "The other player is here: agreeing on the match..." : "Waiting for the other player to choose a fighter and start...", w, limit / 1000.0);
             menu_notice(t);
         }
         {   long long p = nvn_front_presents();
             if (p != presents) { presents = p; presents_at = now; }
             else if (now - presents_at > 100 && now - last_redraw >= 100) { last_redraw = now; redraws++; nvn_front_osk_redraw(); } }
         if (now - last_log >= 5000) { last_log = now; printf("[rbnet] handshake %ld: still waiting (%.0f s; lobby %s; other game %s; messages sent %lld, received %lld; notice updates %llu, frames shown again %llu)\n", (long)round, (now - t0) / 1000.0,
-                                                          net_rb_ready() ? "joined" : "NOT joined", g_hs_peer_nonce ? "seen" : "not seen", g_hs_tx, g_hs_rx, (unsigned long long)notes, (unsigned long long)redraws); fflush(stdout); }
+                                                          net_rb_ready() ? (net_rb_no_destination() ? "joined, no other player in the room" : "joined") : "NOT joined", g_hs_peer_nonce ? "seen" : "not seen", g_hs_tx, g_hs_rx, (unsigned long long)notes, (unsigned long long)redraws); fflush(stdout); }
         Sleep(5);
     }
     if (!ok) {
@@ -594,6 +602,7 @@ void rbn_drain(long long cur) {
     }
 }
 int rbn_take_mismatch(void) { int m = rb_input_take_mismatch(); if (m) g_stat_mis++; return m; }
+void rbn_put_mismatch(int m) { rb_input_put_mismatch(m); if (m) g_stat_mis--; }      /* (R3 pub1) r1_ring_load refused: the wrong guess stays pending */
 long long rbn_confirmed(void) { return rb_input_remote_latest(g_remote); }
 int rbn_peer_gone(void) {
     if (g_loop || !g_started) return 0;

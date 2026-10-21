@@ -65,7 +65,11 @@ static double g_rbg_t_pre, g_rbg_t_load, g_rbg_t_rerun, g_rbg_t_recap, g_rbg_t_p
 /* (hs14) every capture of the match tells the ring the oldest frame a rollback may still need (r1_ring.c g_rg_need): the
  * newest frame with both players' pads known (a wrong guess can only be at a later frame, and loads the state before it) */
 static long long g_rbg_short_waits;
-static int rbg_capture(long long i, Ctx *c) { g_rg_need = rbn_confirmed(); return r1_ring_capture(i, c); }
+/* (R3 pub1) a load refused at a wrong guess at frame g_rbg_pend (r1_ring_load -1): the state before it must stay in the ring
+ * until the rollback is made next tick; g_rbg_refused_tick: no second try in the same tick (each try may hold for 500 ms) */
+static int g_rbg_pend, g_rbg_refused_tick;
+void rbn_put_mismatch(int m);
+static int rbg_capture(long long i, Ctx *c) { g_rg_need = rbn_confirmed(); if (g_rbg_pend > 0 && g_rbg_pend - 1 < g_rg_need) g_rg_need = g_rbg_pend - 1; return r1_ring_capture(i, c); }
 void rbn_stats(int *delay, int *last, int *maxk) { *delay = rbn_delay(); *last = (int)g_rbg_last_k; *maxk = (int)g_rbg_max_k; }   /* net_relay.c net_stats_get (F2) */
 
 static void rbg_wait_until(double t) {                  /* a high-resolution timer for the long part, a spin for the last 0.3 ms */
@@ -81,13 +85,17 @@ static int rbg_rollback(Ctx *c, long long i, int m) {
     long long target = m - 1, best = -1;
     for (int s = 0; s < g_rg_count; s++) { long long f = rg_slot(s)->frame; if (f <= target && f > best) best = f; }
     if (best < 0) {
-        g_rbg_miss++;
+        g_rbg_miss++; g_rbg_pend = 0;
         if (g_rbg_miss <= 10) LOG("r1: RB NET: wrong guess at frame %lld but no state at or before frame %lld in the ring (oldest %lld): NOT rolled back (desync)\n", (long long)m, target, r1_ring_oldest());
         return 0;
     }
     double t0 = now_ms();
     if (!g_ra_wh_on) { g_rbg_rb_unheld++; if (g_rbg_rb_unheld <= 10) LOG("r1: RB NET: rollback at frame %lld while the task workers are NOT held (watchdog releases so far %lld): the load may leave the job system waiting\n", i, g_ra_wd_fired); }
-    if (!r1_ring_load(best, c)) { g_rbg_miss++; return 0; }
+    if (g_rbg_refused_tick) { rbn_put_mismatch(m); return 0; }      /* (R3 pub1) refused once this tick: next tick */
+    int lr = r1_ring_load(best, c);
+    if (lr < 0) { g_rbg_refused_tick = 1; g_rbg_pend = m; rbn_put_mismatch(m); return 0; }      /* (R3 pub1) refused (a thread running): the wrong guess stays pending */
+    if (!lr) { g_rbg_miss++; return 0; }
+    g_rbg_pend = 0;
     g_rbg_load_ms += now_ms() - t0; g_rbg_t_load += now_ms() - t0; g_rbg_recap_first = -1; g_rbg_t_pass0 = now_ms();
     int k = (int)(i - best);
     g_rgs_left = k; g_rgs_next = best + 1; g_ra_phase = 2;
@@ -107,6 +115,7 @@ static int rbg_sched(long long i, int m) {
 /* at the safe point (H2) of every pass while the fight runs (r1_ring.c rgs_step) */
 static void rbg_step_body(Ctx *c) {
     long long i = g_rgs_next;
+    g_rbg_refused_tick = 0;
     if (g_rbg_wdfix < 0) { const char *e = getenv("SSBU_RB_NET_WDFIX"); g_rbg_wdfix = !e || atoi(e) != 0; e = getenv("SSBU_RB_NET_DETAIL"); g_rbg_detail = e && atoi(e) > 0;
         e = getenv("SSBU_RB_NET_RECAP"); g_rbg_recap = e ? atoi(e) : 1; e = getenv("SSBU_RB_NET_KEEP"); g_rbg_keep = e ? atoi(e) : 2; }
     if (g_rbg_wdfix) g_ra_wd_pause = 1;                 /* (until H2 lets the workers go: r1_state.c ra_kick2) */
@@ -247,7 +256,7 @@ static void rbg_step_body(Ctx *c) {
     }
     if (stalled) g_rbg_stall_ms += now_ms() - ts;
     r1_ring_let_go();
-    rbn_finalize(i);
+    rbn_finalize(g_rbg_pend > 0 && g_rbg_pend - 1 < i ? g_rbg_pend - 1 : i);      /* (R3 pub1) a refused load: its frames are not final yet */
     if (g_rbg_pace) {
         double period = 1000.0 / 60.0 + rbn_pace_extra(g_rgs_next), now = now_ms();
         if (g_rbg_next <= 0 || now - g_rbg_next > 3 * period) g_rbg_next = now;      /* (far behind: no catching up in a burst) */
@@ -303,6 +312,22 @@ static void rbg_pad(int id, uint64_t *b, int *lx, int *ly, int *rx, int *ry) {
          * match the game's own way (results, then the stage select and the character select: run hw2 showed that pause +
          * L + R + A did NOT end it); after that the pause / L + R + A cycle as a last resort */
         uint64_t bb = 0; int stick = 0; double el = now_ms() - g_rbg_quit_t0;
+        /* (R3 pub1, testers 2026-10-20: "controls spazzing, moving by itself, can't press anything", then "fighting myself") the
+         * player is told on screen for the whole time that this game is leaving the match by itself, and after 60 s the pad is
+         * HIS again (the notice says how to quit: + then L + R + A) instead of being driven for ever. SSBU_RB_NET_LEAVE_MS: the
+         * 60 s (test). */
+        {   static double next_note, seen_t0; static int given_back; static double leave_ms = -1; extern void menu_notice(const char *text); const char *rbn_hs_why(void);
+            if (leave_ms < 0) { const char *e = getenv("SSBU_RB_NET_LEAVE_MS"); leave_ms = e && atof(e) > 0 ? atof(e) : 60000.0; }
+            if (seen_t0 != g_rbg_quit_t0) { seen_t0 = g_rbg_quit_t0; next_note = 0; given_back = 0; }
+            if (el >= leave_ms) {
+                if (!given_back) { given_back = 1; LOG("r1: RB NET: the match that was not agreed did not end by itself in %.0f s: the controls are the player's again\n", leave_ms / 1000.0);
+                    char t[400]; snprintf(t, sizeof t, "No online match (%s).\nThis game could not leave the match by itself: the controls are yours again.\nTo quit: press + (pause), then hold L + R + A.", rbn_hs_why()); menu_notice(t); }
+                return;                                   /* the player's own pad from now on */
+            }
+            if (el >= next_note) { next_note = el + 500;
+                char t[400]; snprintf(t, sizeof t, "No online match (%s).\nLeaving this match automatically (%.0f s): your fighter walks off the stage by itself,\nthen the game goes back to the character select. Your controls come back there.", rbn_hs_why(), el / 1000.0);
+                menu_notice(t); }
+        }
         if (id == 0 && el < 20000) stick = -32767;
         else if (id == 0) { long long t = (long long)(el - 20000) % 4000; if (t >= 300 && t < 450) bb = 1ull << 10; else if (t >= 1200 && t < 3600) bb = (1ull << 6) | (1ull << 7) | 1ull; }
         *b = bb; *lx = stick; *ly = *rx = *ry = 0; return;
@@ -334,6 +359,7 @@ static void rbg_fight_off(void) {
     g_rbg_last_k = 0; g_rbg_max_k = 0; g_rbg_short_waits = 0; g_rg_short = 0; g_rg_need = -1; g_rbg_nw = g_rbg_ng = g_rbg_tick_k = 0; g_rbg_rb_unheld = 0; g_rbg_recap_first = 0;
     g_rbg_t_pre = g_rbg_t_load = g_rbg_t_rerun = g_rbg_t_recap = g_rbg_t_pass0 = 0; g_rbg_n_rerun = g_rbg_n_recap = 0;
     g_rbg_wd_before = g_ra_wd_fired;
+    g_rbg_pend = 0;
     rbn_match_reset();
 }
 static int cmp_f(const void *a, const void *b) { float x = *(const float *)a, y = *(const float *)b; return x < y ? -1 : x > y; }
@@ -354,7 +380,7 @@ static void rbg_report(void) {
     LOG("r1: RB NET report: ring memory (hs14, fix %s): captures given up %lld, old states freed early %lld, captures skipped to keep the oldest needed state %lld\n",
         g_rg_poolfix ? "on" : "OFF", g_rg_short_n, g_rg_freed_slots, g_rg_skip_full);
     LOG("r1: RB NET report: task-worker watchdog releases %lld (since the process start), rollbacks with the workers not held %lld (watchdog paused at H2: %s)\n", g_ra_wd_fired, g_rbg_rb_unheld, g_rbg_wdfix ? "yes" : "NO");
-    LOG("r1: RB NET report: loads that took the sound thread at another wait after 5 ms %lld; threads not at their wait after 500 ms %d (last load)\n", g_th_audio_other, g_th_mismatch);
+    LOG("r1: RB NET report: loads that took the sound thread at another wait after 5 ms %lld; threads not at their wait after 500 ms %d (last load); loads refused, a thread still running (pub1) %lld\n", g_th_audio_other, g_th_mismatch, g_rg_refused);
     LOG("r1: RB NET report: fiber host stacks in use at a load (not copied back) %lld, seen %lld; fibers found running by their thread (TEB) at a capture %lld; catch table at loads: entries dropped %lld, live entries put back %lld, loads changed %lld (hs13)\n", g_fib_live_skip, g_fib_live_seen, g_fib_teb_running, g_rgc_dropped, g_rgc_kept, g_rgc_loads_changed);
     { void nnunwind_catch_stats(long long *, long long *, long long *, long long *, long long *); long long l, d, cr, fu, mp; nnunwind_catch_stats(&l, &d, &cr, &fu, &mp);
       LOG("r1: RB NET report: catch table (hs15): %lld live records, %lld removed slots, %lld puts found no free slot in their window, %lld table full, longest probe %lld; dead records dropped at loads %lld (host fiber stacks known %zu)\n", l, d, cr, fu, mp, g_rgc_dead, g_nbf); }

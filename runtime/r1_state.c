@@ -286,6 +286,7 @@ static int g_audio_free;
 static void async_add(uint8_t *a);
 static long long g_th_audio_other;                   /* (R3 hs11) ring loads that took an audio thread at another wait (ra_hold_restore) */
 static Th g_th[256]; static int g_nth, g_th_mismatch, g_ninfo, g_park_ms = 500;
+static int g_th_running;                              /* (R3 pub1) ra_hold_restore: threads still RUNNING (not blocked at a wait) after the 500 ms */
 static int waiting_import(const char *s) { return s && (strstr(s, "Wait") || strstr(s, "wait") || strstr(s, "Sleep") || strstr(s, "Receive") || strstr(s, "Fiber") || strstr(s, "Timed")); }
 /* restore_mode 0: hold every guest thread (except this one) once it is inside a waiting import, note where;
  * restore_mode 1: hold each once it waits at the SAME guest return address as at the save (500 ms at most) */
@@ -366,15 +367,30 @@ extern DWORD g_r1_fls_idx;
  * saved / restored with the fiber. */
 static uint64_t g_fls_var;
 
-static uint64_t map_sym(const char *want) {      /* a static of this exe, by its linker map */
+/* (R3 pub1) The statics of other files that are part of the state (nnunwind.c's catch table, fighter_host.c's FLS index, nvn_gl.c's
+ * command-buffer save area) were found by name in the exe's linker map (<exe>.map beside it). The prebuilt runtime package (setup.py
+ * --rollback) ships ssbu_native_rb.exe WITHOUT its map (and an exe copied under another name has none either): every lookup gave 0,
+ * so the catch table was never captured nor restored by the ring and a load put a coroutine's host stack back without the
+ * record of its catch frame ("f_720052e2f0 handled an exception but was not entered through nro_catch_call", pub1h at frame 72).
+ * Now the files give the addresses themselves; the map is not read any more (SSBU_R1_MAPSYM=1: the old way, test only). */
+void *nnunwind_catch_table(size_t *bytes); void *fighter_host_fls_slot(void); void nvn_gl_r1_cb_area(void **cbs, void **ncbs, void **all);
+static uint64_t map_sym_file(const char *want) {      /* a static of this exe, by its linker map (the old way) */
     char path[MAX_PATH]; DWORD n = GetModuleFileNameA(NULL, path, MAX_PATH); if (n < 5) return 0;
     strcpy(path + n - 4, ".map");
-    FILE *f = fopen(path, "r"); if (!f) return 0;
+    FILE *f = fopen(path, "r"); if (!f) { LOG("r1: %s: NO linker map %s\n", want, path); return 0; }
     char line[512]; uint64_t r = 0;
     while (fgets(line, sizeof line, f)) { char sec[32], name[128]; unsigned long long va; if (sscanf(line, " %31s %127s %llx", sec, name, &va) == 3 && !strcmp(name, want)) { r = (uint64_t)(uintptr_t)GetModuleHandleA(NULL) + va - 0x140000000ull; break; } }
     fclose(f);
     LOG("r1: %s at %llx (linker map)\n", want, (unsigned long long)r);
     return r;
+}
+static uint64_t map_sym(const char *want) {
+    { const char *e = getenv("SSBU_R1_MAPSYM"); if (e && e[0] == '1') return map_sym_file(want); }
+    void *cbs, *ncbs, *all; nvn_gl_r1_cb_area(&cbs, &ncbs, &all);
+    void *p = !strcmp(want, "g_catch") ? nnunwind_catch_table(NULL) : !strcmp(want, "g_fs_fls") ? fighter_host_fls_slot() :
+              !strcmp(want, "g_cbs") ? cbs : !strcmp(want, "g_ncbs") ? ncbs : !strcmp(want, "g_all_cb") ? all : NULL;
+    LOG("r1: %s at %llx (from the code)\n", want, (unsigned long long)(uintptr_t)p);
+    return (uint64_t)(uintptr_t)p;
 }
 static void fls_index_find(void) {
     static int tried; if (!tried) { tried = 1; g_fls_var = map_sym("g_fs_fls"); g_catch_addr = map_sym("g_catch"); }
@@ -1501,7 +1517,7 @@ static int ra_hold_save(void) {
 static void ra_release_save(void) { for (int i = 0; i < g_nth; i++) if (g_th[i].held && !ra_audio(g_th[i].name)) { ResumeThread(g_th[i].h); g_th[i].held = 0; } }
 /* restore: each thread at the SAME wait as at the save (the audio threads were never let go) */
 static void ra_hold_restore(void) {
-    g_th_mismatch = 0;
+    g_th_mismatch = 0; g_th_running = 0;
     for (int i = 0; i < g_nth; i++) {
         Th *t = &g_th[i];
         t->same = 0;
@@ -1518,7 +1534,7 @@ static void ra_hold_restore(void) {
              * SSBU_RB_AUDIO_WAIT=0: the old way. */
             {   static int aw = -1; if (aw < 0) { const char *e = getenv("SSBU_RB_AUDIO_WAIT"); aw = !(e && e[0] == '0'); }
                 if (aw && rgs_wanted() && ra_audio(t->name) && now_ms() - t0 > 5 && waiting_import(t->c->in_import) && th_blocked(t->h)) { t->held = 1; t->rsp = g_tb_rsp; t->rip = g_tb_rip; t->cok = 1; g_th_audio_other++; break; } }
-            if (now_ms() - t0 > 500) { t->held = 1; g_th_mismatch++;
+            if (now_ms() - t0 > 500) { t->held = 1; g_th_mismatch++; if (!(waiting_import(t->c->in_import) && th_blocked(t->h))) g_th_running++;
                 static int said; if (said++ < 20) LOG("r1: hold for a load: thread %s not back at its wait after 500 ms: held at %s @%llx then, now %s @%llx, blocked %d\n", t->name ? t->name : "?",
                     t->imp ? t->imp : "guest code", (unsigned long long)t->from, t->c->in_import ? t->c->in_import : "guest code", (unsigned long long)t->c->import_from, th_blocked(t->h));
                 break; }

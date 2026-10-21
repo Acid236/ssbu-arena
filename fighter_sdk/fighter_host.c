@@ -78,6 +78,7 @@ typedef struct {
 static int g_fs_offline;                           /* SSBU_FIGHTER_OFFLINE: modules are loaded by fighter_offline, the game never starts */
 
 static DWORD g_fs_fls = FLS_OUT_OF_INDEXES;
+void *fighter_host_fls_slot(void) { return (void *)&g_fs_fls; }      /* (R3 pub1) r1_state.c: this index's address, without a linker map */
 static volatile LONG g_fs_recording;               /* recordings in flight (fast test in nro_import_host) */
 static FsMod *g_fs_mods[128];
 static int g_fs_mod_count;

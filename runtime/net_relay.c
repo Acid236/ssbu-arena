@@ -461,10 +461,23 @@ static void tx(const void *p, int n, const struct sockaddr_in *to) {
 void rbn_rx(const uint8_t *p, int n);                  /* rb_net.c */
 static volatile uint32_t g_rb_peer;
 int net_rb_ready(void) { return g_cfg > 0 && g_joined && g_sock != INVALID_SOCKET; }
+/* (R3 pub1, testers 2026-10-20: "messages sent 0, received 0" for 120 s with the other player in the room) the destination was
+ * only learnt from a message received (g_rb_peer), so the joiner's first messages went to "0 = every other player of this lobby
+ * code", which the PUBLIC lobby drops (tools_net/ssbu_lobby.py: destination 0 only with a private code): neither game ever
+ * heard the other (the host answers only a CHOICE). Now the destination is the other player of this Local Wireless room
+ * (nnldn.c), else the address learnt; 0 on the public code of a lobby SERVER = nothing can arrive (the in-game lobbies of HOST / JOIN / LAN pass 0 on): not sent (counted, the notice says so). */
+uint32_t nnldn_other_ip(void);
+static const char *ip_text(uint32_t ip, char *b);
+static volatile LONG g_rb_nodst; static volatile uint32_t g_rb_dst_said;
+int net_rb_no_destination(void) { return g_rb_nodst; }
 int net_rb_send(const void *p, int n) {
     if (!net_rb_ready() || n <= 0 || n > 1400) return 0;
+    uint32_t dst = nnldn_other_ip();
+    if (!dst) dst = g_rb_peer;
+    if (!dst && g_mode == NET_MODE_LOBBY && !_stricmp(g_code, "public")) { InterlockedIncrement(&g_rb_nodst); return 0; }
+    if (dst && dst != g_rb_dst_said) { char a[16]; g_rb_dst_said = dst; printf("[rbnet] rollback messages go to %s (%s)\n", ip_text(dst, a), dst == g_rb_peer ? "the game that wrote to this one" : "the other player of this Local Wireless room"); fflush(stdout); }
     uint8_t b[1500];
-    hdr(b, T_RB); s64(b + 4, g_cookie); s32(b + 12, g_rb_peer);
+    hdr(b, T_RB); s64(b + 4, g_cookie); s32(b + 12, dst);
     memcpy(b + 16, p, (size_t)n);
     tx(b, 16 + n, &g_lobby);
     return 1;
