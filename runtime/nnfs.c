@@ -1222,7 +1222,9 @@ static void account_uid_init(void) {
     char *slash = strrchr(exe, '\\');
     if (slash) *slash = 0;
     const char *env = getenv("SSBU_ACCOUNT_UID");
-    if (!ldn_online_nickname()) { done = 2; return; }
+    const char *lobby = getenv("SSBU_ONLINE");               /* the online lobby (net_relay.c, the launcher's server) counts too */
+    int lobby_on = lobby && lobby[0] && strcmp(lobby, "0") && _stricmp(lobby, "off");
+    if (!ldn_online_nickname() && !lobby_on) { done = 2; return; }
     if (env && strlen(env) >= 32) snprintf(text, sizeof text, "%s", env);
     else {
         snprintf(path, sizeof path, "%s\\..\\config\\account.txt", exe);

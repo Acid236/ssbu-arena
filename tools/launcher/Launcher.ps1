@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# SSBU recomp launcher: one window to set the player name (and the account id made from it), local wireless over the
-# internet (server, room, ping), the save folder (open it, bring in a save from Ryujinx or from any folder), the DLC list,
-# check what the game needs and start it. Windows PowerShell 5.1 + WinForms: nothing to install.
+# SSBU recomp launcher: one window to set the player name (and the account id made from it), online through the lobby
+# server (server, friends code, rollback), the save folder (open it, bring in a save from Ryujinx or from any folder), the
+# DLC list, check what the game needs and start it. Windows PowerShell 5.1 + WinForms: nothing to install.
 # Lives in build\ (scripts\setup.py link copies it there, with "Avvia SSBU.bat"); in the portable copy too.
-# Files it writes: build\config\online.ini, build\config\account.txt, build\config\dlc.txt, build\config\launcher.ini,
+# Files it writes: build\config\account.txt, build\config\dlc.txt, build\config\launcher.ini,
 # and some keys of build\config\graphics.ini (aspect, window, width, height; latency always normal) and controllers.ini ([players], [keyboard]).
 # The game's own data is only read. ASCII only (Windows PowerShell reads scripts in the ANSI code page).
 param([switch]$Check)
@@ -37,7 +37,12 @@ $L = Read-Ini $LauncherIni
 $O = Read-Ini $OnlineIni
 $DefaultSaves = if ($Portable) { Join-Path (Split-Path $Build -Parent) 'saves' } else { Join-Path $Build 'saves' }
 $Saves = if ($L['saves']) { $L['saves'] } else { $DefaultSaves }
-$HasOnline = (Test-Path $Exe) -and ([System.IO.File]::ReadAllText($Exe, [System.Text.Encoding]::ASCII).Contains('ssbu-ldn-fingerprint'))
+$HasOnline = (Test-Path $Exe) -and ([System.IO.File]::ReadAllText($Exe, [System.Text.Encoding]::ASCII).Contains('SSBU_ONLINE'))
+$DefaultServer = 'lobby.ssbuarena.com:39010'                    # our lobby (tools/net/rb_lobby.c, relay only)
+# the rollback build: the game DLL and script modules with dirty-page marks (setup.py --rollback of upstream's recipe);
+# without it the normal build runs rollback too (upstream's learned-set save)
+$RbExe = Join-Path $Work 'ssbu_native_rb.exe'
+$RbPair = (Test-Path $RbExe) -and (Test-Path (Join-Path $Work 'ssbu_game_r1.dll')) -and (Test-Path (Join-Path $Work 'nro_bin_eh_o2r1\lua2cpp_common.dll'))
 
 # the account id from the name: the same name always gives the same id (two players must use two names)
 function Get-UidFromName([string]$name) {
@@ -84,29 +89,28 @@ $uidLabel = Add-Label $gp '' 130 52 380
 function Update-Uid { $uidLabel.Text = if ($name.Text.Trim()) { 'ID giocatore (dal nome): ' + (Get-UidFromName $name.Text.Trim()).Substring(0, 16) + '...' } else { 'Scrivi un nome' } }
 $name.Add_TextChanged({ Update-Uid }); Update-Uid
 
-# online
-$go = Add-Group 'Online (Wireless locale via internet)' 100 150
+# online: everything goes through the lobby server (tools/net/rb_lobby.c on our VPS): no player ever sees another one's
+# address. Local Wireless rooms use the game's own netcode; rollback matches are Smash > Versus (the lobby finds the
+# opponent with the same friends code). Old installs: server / room of online.ini are taken over once.
+$go = Add-Group 'Online (tramite il server)' 100 150
 $onlineOn = New-Object System.Windows.Forms.CheckBox; $onlineOn.Text = 'Attiva'; $onlineOn.Location = New-Object System.Drawing.Point(12, 22)
-$onlineOn.Checked = [bool]($O['server'] -and $O['room']); $go.Controls.Add($onlineOn)
+$onlineOn.Checked = $(if ($L['online']) { $L['online'] -eq 'on' } else { [bool]($O['server'] -and $O['room']) }); $go.Controls.Add($onlineOn)
 Add-Label $go 'Server (ip:porta)' 12 52 | Out-Null
-$server = Add-Box $go ($(if ($O['server']) { $O['server'] } else { '' })) 130 49 250
-Add-Label $go 'Stanza (password)' 12 82 | Out-Null
-$room = Add-Box $go ($(if ($O['room']) { $O['room'] } else { '' })) 130 79 250
-$tip.SetToolTip($room, 'Chi usa la stessa password vede le stesse stanze nel Wireless locale.')
-$pingOn = New-Object System.Windows.Forms.CheckBox; $pingOn.Text = 'Mostra il ping a schermo'; $pingOn.Location = New-Object System.Drawing.Point(130, 108)
-$pingOn.Size = New-Object System.Drawing.Size(170, 22); $pingOn.Checked = ($O['ping_overlay'] -ne 'off'); $go.Controls.Add($pingOn)
-Add-Label $go 'Ritardo input' 305 111 80 | Out-Null
-$delay = New-Object System.Windows.Forms.ComboBox; $delay.DropDownStyle = 'DropDownList'; $delay.Location = New-Object System.Drawing.Point(388, 108)
-$delay.Size = New-Object System.Drawing.Size(120, 22); $go.Controls.Add($delay)
-[void]$delay.Items.Add('Auto (gioco)'); [void]$delay.Items.Add('Minimo (dal ping)'); 0..8 | ForEach-Object { [void]$delay.Items.Add([string]$_) }
-$delay.SelectedIndex = $(if ($O['input_delay'] -match '^\d+$' -and [int]$O['input_delay'] -le 8) { [int]$O['input_delay'] + 2 } elseif ($O['input_delay'] -eq 'auto') { 0 } else { 1 })      # default min: from the ping
-$tip.SetToolTip($delay, 'Frame di anticipo dell''input nel Wireless locale. Minimo (predefinito): il meno possibile senza rallentamenti, calcolato dal ping tra i giocatori (meta'' andata e ritorno + 1 frame: 3 con 60 ms, il gioco ne usa 4). Auto: quelli che sceglie il gioco. 0-8: fissi; 0 solo con ping bassissimo, altrimenti la partita va al rallentatore. Se e'' troppo basso per il ping il gioco aspetta l''altro giocatore (scatti): alza di 1. Ognuno puo'' usare il suo valore.')
-if (-not $HasOnline) {
-    $onlineOn.Checked = $false; $onlineOn.Enabled = $false; $server.Enabled = $false; $room.Enabled = $false; $pingOn.Enabled = $false; $delay.Enabled = $false
-    Add-Label $go 'Questa build non ha l''online (setup.py --ldn-online on)' 200 22 300 | Out-Null
+$server = Add-Box $go ($(if ($L['server']) { $L['server'] } else { $DefaultServer })) 130 49 250
+$tip.SetToolTip($server, 'Il server online (predefinito: ' + $DefaultServer + '). Tutto il traffico passa da li'': nessun giocatore vede l''indirizzo degli altri.')
+Add-Label $go 'Codice amici' 12 82 | Out-Null
+$room = Add-Box $go ($(if ($L['code']) { $L['code'] } elseif ($O['room']) { $O['room'] } else { '' })) 130 79 250
+$tip.SetToolTip($room, 'Chi usa lo stesso codice si trova: stesse stanze nel Wireless locale e avversari della partita rollback. Vuoto: pubblico (chiunque).')
+$rbOn = New-Object System.Windows.Forms.CheckBox; $rbOn.Text = 'Rollback netcode (Smash > Versus trova l''avversario)'; $rbOn.Location = New-Object System.Drawing.Point(130, 106)
+$rbOn.Size = New-Object System.Drawing.Size(380, 22); $rbOn.Checked = ($L['rollback'] -ne 'off'); $go.Controls.Add($rbOn)
+$tip.SetToolTip($rbOn, 'Partite online con il rollback: in Smash > Versus il server ti abbina a chi ha il tuo stesso codice. Le stanze del Wireless locale usano invece il netcode del gioco.')
+$onlineHelp = Add-Label $go '' 12 128 500
+function Update-Online {
+    $e = $onlineOn.Checked -and $HasOnline; $server.Enabled = $e; $room.Enabled = $e; $rbOn.Enabled = $e
+    $onlineHelp.Text = $(if (-not $e) { 'Online spento: si gioca in locale.' } elseif ($rbOn.Checked) { 'Rollback: Smash > Versus. Stanze: Wireless locale (netcode del gioco).' } else { 'Stanze del Wireless locale tramite il server (netcode del gioco).' })
 }
-function Update-Online { $e = $onlineOn.Checked -and $HasOnline; $server.Enabled = $e; $room.Enabled = $e; $pingOn.Enabled = $e; $delay.Enabled = $e }
-$onlineOn.Add_CheckedChanged({ Update-Online }); Update-Online
+if (-not $HasOnline) { $onlineOn.Checked = $false; $onlineOn.Enabled = $false }
+$onlineOn.Add_CheckedChanged({ Update-Online }); $rbOn.Add_CheckedChanged({ Update-Online }); Update-Online
 
 # saves
 $gs = Add-Group 'Salvataggi' 260 120
@@ -287,18 +291,13 @@ function Say($t) { $status.AppendText($t + "`r`n") }
 
 function Save-Settings {
     $n = $name.Text.Trim()
-    if ($onlineOn.Checked -and $HasOnline) {
-        Set-Content -Path $OnlineIni -Encoding ASCII -Value @(
-            '# written by the launcher (build\Launcher.ps1); see tools/online/online.ini.example',
-            ('server = ' + $server.Text.Trim()), ('room = ' + $room.Text.Trim()), ('nickname = ' + $n),
-            ('ping_overlay = ' + $(if ($pingOn.Checked) { 'on' } else { 'off' })),
-            ('input_delay = ' + $(if ($delay.SelectedIndex -le 0) { 'auto' } elseif ($delay.SelectedIndex -eq 1) { 'min' } else { [string]($delay.SelectedIndex - 2) })))
-        if ($n) { Set-Content -Path (Join-Path $Cfg 'account.txt') -Value (Get-UidFromName $n) -Encoding ASCII }
-    } elseif (Test-Path $OnlineIni) {
-        Move-Item -Force $OnlineIni (Join-Path $Cfg 'online.ini.off')      # off: kept aside, back when it is turned on again
-    }
+    if ($onlineOn.Checked -and $HasOnline -and $n) { Set-Content -Path (Join-Path $Cfg 'account.txt') -Value (Get-UidFromName $n) -Encoding ASCII }
+    # the old local wireless online (online.ini, a server that is gone) is never used again: kept aside
+    if (Test-Path $OnlineIni) { Move-Item -Force $OnlineIni (Join-Path $Cfg 'online.ini.old') }
     Set-Content -Path $LauncherIni -Encoding ASCII -Value @('# written by the launcher', ('saves = ' + $Saves), ('nickname = ' + $n),
-        ('competitive = ' + $(if ($compOn.Checked) { 'on' } else { 'off' })))
+        ('competitive = ' + $(if ($compOn.Checked) { 'on' } else { 'off' })),
+        ('online = ' + $(if ($onlineOn.Checked) { 'on' } else { 'off' })), ('server = ' + $server.Text.Trim()), ('code = ' + $room.Text.Trim()),
+        ('rollback = ' + $(if ($rbOn.Checked) { 'on' } else { 'off' })))
     $gfx = @{ aspect = @('keep', 'stretch')[[Math]::Max(0, $aspect.SelectedIndex)]; window = @('windowed', 'borderless', 'fullscreen')[[Math]::Max(0, $winMode.SelectedIndex)]
              latency = 'normal' }      # input latency: always normal (the option is gone)
     if ($winSize.Text.Trim() -match '^(\d{3,5})\s*[xX*]\s*(\d{3,5})$') { $gfx['width'] = $Matches[1]; $gfx['height'] = $Matches[2] }
@@ -308,10 +307,10 @@ function Save-Settings {
     }
     Set-IniValues $PadIni 'keyboard' @{ player = @('auto', '1', '2', 'none')[[Math]::Max(0, $kb.SelectedIndex)] }
 }
-if (-not (Test-Path $OnlineIni) -and (Test-Path (Join-Path $Cfg 'online.ini.off'))) {
-    $O = Read-Ini (Join-Path $Cfg 'online.ini.off')
-    if ($O['server']) { $server.Text = $O['server'] }; if ($O['room']) { $room.Text = $O['room'] }
-    if ($O['input_delay'] -match '^\d+$' -and [int]$O['input_delay'] -le 8) { $delay.SelectedIndex = [int]$O['input_delay'] + 2 } elseif ($O['input_delay'] -eq 'min') { $delay.SelectedIndex = 1 }
+foreach ($old in @('online.ini.off', 'online.ini.old')) {       # an older launcher's settings: the code and the name
+    if ($L['code'] -or $room.Text -or -not (Test-Path (Join-Path $Cfg $old))) { continue }
+    $O = Read-Ini (Join-Path $Cfg $old)
+    if ($O['room']) { $room.Text = $O['room'] }
     if (-not $name.Text -and $O['nickname']) { $name.Text = $O['nickname'] }
 }
 if (-not $name.Text -and $L['nickname']) { $name.Text = $L['nickname'] }
@@ -336,11 +335,13 @@ function Test-All([switch]$Quiet) {
     if ($onlineOn.Checked) {
         if (-not $name.Text.Trim()) { Say '[NO] online: scrivi un nome'; $bad++ }
         elseif ([System.Text.Encoding]::UTF8.GetByteCount($name.Text.Trim()) -gt 32) { Say '[NO] nome troppo lungo (max 32 byte)'; $bad++ }
-        if ($server.Text.Trim() -notmatch '^[^\s:]+(:\d+)?$') { Say '[NO] online: server nel formato ip:porta'; $bad++ }
-        if (-not $room.Text.Trim()) { Say '[NO] online: scrivi la password della stanza'; $bad++ }
+        if ($server.Text.Trim() -notmatch '^[^\s:]+:\d+$') { Say '[NO] online: server nel formato ip:porta'; $bad++ }
+        if ($room.Text.Trim() -match '\s') { Say '[NO] online: il codice amici non puo'' avere spazi'; $bad++ }
+        elseif ([System.Text.Encoding]::UTF8.GetByteCount($room.Text.Trim()) -gt 31) { Say '[NO] online: codice amici troppo lungo (max 31)'; $bad++ }
+        if ($rbOn.Checked) { Say $(if ($RbPair) { '[OK] rollback: build rollback (ssbu_native_rb.exe)' } else { '[OK] rollback: build normale' }) }
     }
-    if (Get-Process ssbu_native -ErrorAction SilentlyContinue) { Say '[NO] il gioco e'' gia'' aperto'; $bad++ }
-    if ($bad -eq 0) { Say ('[OK] tutto pronto' + $(if ($onlineOn.Checked) { ' (online attivo come "' + $name.Text.Trim() + '")' } else { ' (online spento)' })) }
+    if (Get-Process ssbu_native, ssbu_native_rb -ErrorAction SilentlyContinue) { Say '[NO] il gioco e'' gia'' aperto'; $bad++ }
+    if ($bad -eq 0) { Say ('[OK] tutto pronto' + $(if ($onlineOn.Checked) { ' (online come "' + $name.Text.Trim() + '", codice ' + $(if ($room.Text.Trim()) { '"' + $room.Text.Trim() + '"' } else { 'pubblico' }) + $(if ($rbOn.Checked) { ', rollback' } else { '' }) + ')' } else { ' (online spento)' })) }
     return $bad
 }
 
@@ -367,9 +368,21 @@ $play = Add-Button $f 'GIOCA' 392 746 140 {
     $env:SSBU_COMPETITIVE = $env:SSBU_LOOSE_FILES                              # no FS meter, no random items (runtime/competitive.c)
     $cacheMark = @(Get-ChildItem (Join-Path $Build 'cache\vk') -Filter 'prepared_*.txt' -ErrorAction SilentlyContinue).Count
     if ($cacheMark -eq 0) { Say 'Primo avvio: prima di giocare il gioco prepara gli shader per questa scheda video (qualche minuto).' }
+    # online through the lobby server (runtime/net_relay.c), relay only; rollback (runtime/rb_net.c) in Smash > Versus
+    $runExe = $Exe
+    foreach ($v in @('SSBU_ONLINE', 'SSBU_ONLINE_CODE', 'SSBU_ONLINE_NAME', 'SSBU_ONLINE_DIRECT', 'SSBU_NICKNAME', 'SSBU_RB_NET', 'SSBU_R1_GAMEDLL', 'SSBU_NRO_BIN')) { Remove-Item "env:$v" -ErrorAction SilentlyContinue }
+    if ($onlineOn.Checked -and $HasOnline) {
+        $env:SSBU_ONLINE = $server.Text.Trim(); $env:SSBU_ONLINE_NAME = $name.Text.Trim(); $env:SSBU_NICKNAME = $name.Text.Trim()
+        $env:SSBU_ONLINE_CODE = $(if ($room.Text.Trim()) { $room.Text.Trim() } else { 'public' })
+        $env:SSBU_ONLINE_DIRECT = '0'                                          # never a direct path: no player sees another one's address
+        if ($rbOn.Checked) {
+            $env:SSBU_RB_NET = 'net'
+            if ($RbPair) { $runExe = $RbExe; $env:SSBU_R1_GAMEDLL = 'ssbu_game_r1.dll'; $env:SSBU_NRO_BIN = 'nro_bin_eh_o2r1' }
+        }
+    } else { $env:SSBU_ONLINE = 'off' }
     # no console window: the game's output goes to game.log through a hidden cmd.exe (its exit code is the game's)
     $psi = New-Object System.Diagnostics.ProcessStartInfo; $psi.FileName = "$env:WINDIR\System32\cmd.exe"; $psi.WorkingDirectory = $Work
-    $psi.Arguments = '/d /c ""' + $Exe + '" "' + $MainElf + '" 0 > "' + (Join-Path $Build 'game.log') + '" 2>&1"'
+    $psi.Arguments = '/d /c ""' + $runExe + '" "' + $MainElf + '" 0 > "' + (Join-Path $Build 'game.log') + '" 2>&1"'
     $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
     $script:game = [System.Diagnostics.Process]::Start($psi)
     Say 'Gioco avviato (log: build\game.log).'
