@@ -70,6 +70,9 @@ def compile_one(name):
     return name, r.returncode, r.stderr[-2000:], time.time() - t
 
 
+order_key = None          # build_opt.py: compile order (slowest first by measured time)
+
+
 def cmd_compile(jobs, force):
     os.makedirs(OBJ, exist_ok=True)
     sources = sorted(n for n in os.listdir(GEN) if n.endswith('.c'))
@@ -114,7 +117,8 @@ def cmd_compile(jobs, force):
         if n.endswith('.obj') and n not in wanted:
             os.remove(os.path.join(OBJ, n))
     # longest first (source size: the compile time follows it): the biggest files no longer start last and hold up the end
-    todo.sort(key=lambda n: -os.path.getsize(os.path.join(GEN, n)))
+    # (build_opt.py sets order_key: by the seconds each file took before, see build_opt.hints)
+    todo.sort(key=order_key or (lambda n: -os.path.getsize(os.path.join(GEN, n))))
     print('sources: %d   to compile: %d   jobs: %d' % (len(sources), len(todo), jobs), flush=True)
     t0 = time.time()
     failed, done, cpu = [], 0, 0.0
@@ -124,8 +128,12 @@ def cmd_compile(jobs, force):
             cpu += secs
             if code:
                 failed.append(name)
-                print('FAILED %s\n%s' % (name, err), flush=True)
-            if done % 50 == 0 or done == len(todo):
+                # 2026-10-21 (a tester: 539 files FAILED with no text, 6-11 s each, 10 jobs): the exit code says which kind (Windows
+                # 0xC0000005 / 0xC0000017 / 0xC000012D, or a negative signal elsewhere = the compiler crashed or ran out of memory)
+                why = '' if (err or '').strip() else ' (exit code %s, no message: the compiler crashed - usually out of memory with %d at once; it is compiled again with fewer at the end)' % (
+                    ('0x%08X' % (code & 0xffffffff)) if isinstance(code, int) and (code < 0 or code > 255) else code, jobs)
+                print('FAILED %s%s\n%s' % (name, why, err), flush=True)
+            if done % 10 == 0 or done == len(todo):
                 print('  %d/%d   %.0fs elapsed   %.0fs compiler time' % (done, len(todo), time.time() - t0, cpu), flush=True)
     # a file that failed while many compilers ran at once usually ran out of memory (clang crashes "due to signal" on the
     # biggest files): those are compiled again with far fewer at a time, then one by one, before the step gives up

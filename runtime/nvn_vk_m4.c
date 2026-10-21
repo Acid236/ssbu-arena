@@ -625,7 +625,20 @@ static VkPipeline stagelib_ensure(VStage *v, int alone, int *how) {
     FbInfo fbi = {(VkStructureType)1000192000, NULL, &fb_all, 1, &fb_st};
     ri.pNext = &fbi;
     VkResult r = pw_graphics(g_pcache, &gi, lib);
-    if (r != VK_SUCCESS) vkd_fail("vkCreateGraphicsPipelines, stage library (%s stage %u): %s", isfs ? "fragment" : "vertex", v->id, vk_result_name(r));
+    /* (2026-10-21, tester: AMD RX 6750 XT, VK_ERROR_INITIALIZATION_FAILED during the first-run preparation) tried again, then
+     * without the pipeline cache; if the driver still refuses, the next start uses whole pipelines (no stage libraries):
+     * the marker file ../cache/vk/no_stage_libraries.txt (vk_gpl_mode), deleted by hand to try the libraries again */
+    for (int t = 0; r != VK_SUCCESS && t < 3; t++) {
+        printf("nvn_vk: the driver refused the stage library (%s stage %u): %s; trying again%s\n", isfs ? "fragment" : "vertex", v->id, vk_result_name(r), t == 2 ? " without the pipeline cache" : "");
+        fflush(stdout);
+        Sleep(50 << t);
+        r = pw_graphics(t == 2 ? VK_NULL_HANDLE : g_pcache, &gi, lib);
+    }
+    if (r != VK_SUCCESS) {
+        FILE *mk = fopen("../cache/vk/no_stage_libraries.txt", "w");
+        if (mk) { fprintf(mk, "The graphics driver refused a stage library (%s): the game uses whole pipelines from the next start. Delete this file to try the libraries again.\n", vk_result_name(r)); fclose(mk); }
+        vkd_fail("vkCreateGraphicsPipelines, stage library (%s stage %u): %s. START THE GAME AGAIN: from now on it uses whole pipelines, which this driver accepts", isfs ? "fragment" : "vertex", v->id, vk_result_name(r));
+    }
     LONG64 dt = tk() - t0;
     fb_note(0, &fb_all, dt);
     EnterCriticalSection(&g_sh_lock);

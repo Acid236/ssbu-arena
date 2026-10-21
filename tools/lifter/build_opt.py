@@ -239,6 +239,48 @@ def ladder_save(objdir, name, key, step):
             json.dump(d, f, indent=0, sort_keys=True)
 
 
+_hints = {}
+
+
+def hints(objdir):
+    """What earlier compiles of the same file took: <obj dir>\\_times.json (this PC) on top of build_hints.json beside this
+    script (measured on a full build and shipped). For each object: [sha1 of its source + flags, seconds, inlined]
+    (inlined: 1 the inlined compile made the object, 0 it went over RECOMP_INLINE_LIMIT or failed). A first build then
+    starts the slowest files first (by time, not size: the tail of the build was a few big files started late) and does
+    not spend RECOMP_INLINE_LIMIT seconds on each of the ~400 files known to fall back (20 s x 400 / 12 jobs ~ 11 min).
+    A hash that does not match (other lifter output, other flags) is ignored: then the old way (size order, one try)."""
+    with _ladder_lock:
+        if objdir not in _hints:
+            d = {}
+            for p in (os.path.join(HERE, 'build_hints.json'), os.path.join(objdir, '_times.json')):
+                try:
+                    with open(p) as f:
+                        d.update(json.load(f))
+                except (OSError, ValueError):
+                    pass
+            _hints[objdir] = d
+        return _hints[objdir]
+
+
+def hint_key(src):
+    with open(src, 'rb') as f:
+        return hashlib.sha1(f.read() + repr((OPT, EXTRA, INLINE)).encode()).hexdigest()
+
+
+def hint_save(objdir, name, key, secs, inlined):
+    d = hints(objdir)
+    with _ladder_lock:
+        d[name] = [key, round(secs, 1), inlined]
+
+
+def hints_write(objdir):
+    """Writes _times.json (the files compiled now plus what was known)."""
+    d = _hints.get(objdir)
+    if d:
+        with open(os.path.join(objdir, '_times.json'), 'w') as f:
+            json.dump(d, f, indent=0, sort_keys=True)
+
+
 def compile_file(src, obj, base_flags, time_limit=None, extra=None):
     """Compile with the fallback ladder. Returns (exit code, output, seconds, description of the fallback or '')."""
     time_limit = time_limit or TIME_LIMIT
@@ -312,10 +354,20 @@ def compile_file_inline(src, obj, base_flags, time_limit=None):
     hour") or fails is compiled the normal way (compile_file, its own ladder), so the slowdown per file is bounded. The
     files that compile fast, most of them, keep the faster code. Without RECOMP_INLINE: compile_file."""
     if not INLINE:
-        return compile_file(src, obj, base_flags, time_limit)
+        r = compile_file(src, obj, base_flags, time_limit)
+        if r[0] == 0:
+            hint_save(os.path.dirname(obj), os.path.basename(obj), hint_key(src), r[2], 0)
+        return r
     with _tries_lock:
         _tries[obj] += 1
         n = _tries[obj]
+    objdir, name = os.path.dirname(obj), os.path.basename(obj)
+    key = hint_key(src)
+    known = hints(objdir).get(name)
+    if n == 1 and known and known[0] == key and known[2] == 0:
+        code, out, secs, note = compile_file(src, obj, base_flags, time_limit)
+        hint_save(objdir, name, key, secs, 0)
+        return code, out, secs, 'helpers not inlined (known to go over %.0f s)' % INLINE_LIMIT + ('; ' + note if note else '')
     if n == 1:
         hdr, count, lines = optnone_header(src, obj, OPTNONE_LINES)
         cmd = [CLANG, '-c', OPT] + EXTRA + [INLINE_FLAG] + base_flags + (['-include', hdr] if hdr else []) + [src, '-o', obj]
@@ -323,13 +375,19 @@ def compile_file_inline(src, obj, base_flags, time_limit=None):
         if want:
             mem_acquire(want)
         try:
-            code, out, secs = run_limited(cmd, INLINE_LIMIT, want)
+            # a file known to make it inlined (same source and flags) gets room for a busier PC: without it ~30 of the files
+            # measured at 15-19 s went over the limit on the next full build and lost the inlined helpers
+            limit = max(INLINE_LIMIT, 2 * known[1] + 5) if known and known[0] == key and known[2] == 1 else INLINE_LIMIT
+            code, out, secs = run_limited(cmd, limit, want)
         finally:
             if want:
                 mem_release(want)
         if code == 0:
+            hint_save(objdir, name, key, secs, 1)
             return 0, out, secs, ('%d function(s) over %d statements unoptimised (%d statements)' % (count, OPTNONE_LINES, lines) if count else '')
         code2, out2, secs2, note2 = compile_file(src, obj, base_flags, time_limit)
+        if code2 == 0:
+            hint_save(objdir, name, key, secs2, 0)
         return code2, out2, secs + secs2, ('helpers not inlined (%s)' % ('over %.0f s' % INLINE_LIMIT if code is None else 'the inlined compile failed')) + ('; ' + note2 if note2 else '')
     return compile_file(src, obj, base_flags, time_limit)      # a retry round (build.py, fewer jobs): the normal way
 
@@ -376,7 +434,17 @@ def cmd_main(jobs):
         print('the game objects were compiled %s the inlined helpers: all %d are compiled again (once)' % ('with' if have == '1' else 'without', len(old)), flush=True)
         for n in old:
             os.remove(os.path.join(build.OBJ, n))
-    rc = build.cmd_compile(jobs, False)
+    def order_key(n):                    # slowest first by the time it took before (same source and flags), else by size
+        h = hints(build.OBJ).get(n[:-2] + '.obj')
+        size = os.path.getsize(os.path.join(build.GEN, n))
+        if h and h[0] == hint_key(os.path.join(build.GEN, n)):
+            return -h[1]
+        return -size * 3e-6                # ~1 MB of source ~ 3 s: unmeasured files sit among the measured ones
+    build.order_key = order_key
+    try:
+        rc = build.cmd_compile(jobs, False)
+    finally:
+        hints_write(build.OBJ)
     report(build.OBJ)
     if rc:
         return rc

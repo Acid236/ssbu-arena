@@ -473,6 +473,9 @@ typedef struct {
     int eos_in;                                       /* end of stream received: no input buffer is offered again until a flush */
     int parked[MAX_IN], parked_n;                     /* input buffers held back while decoded frames wait (back-pressure) */
     FILE *save;                                       /* SSBU_MOVIE_SAVE_H264=<file>: what the game sent, for offline tests */
+    DWORD feeder_tid;                                 /* (V 22/10) the game's feed thread of this track (the one that calls GetInputBuffer), see feeder_found_empty */
+    ULONGLONG client_since[MAX_IN];                   /* tick at which the game acquired each input index */
+    unsigned long long rescued;
 } Dec;
 
 /* Live decoders. The game can still call a Decoder through a pointer it holds after another thread destroyed it
@@ -1062,13 +1065,70 @@ static void ext_SeekTo(Ctx *c) {                      /* (int64 timeUs) */
     RET(SUCCEEDED(hr) ? ST_OK : ST_FAILED);
 }
 
+/* (V 2026-10-22, the opening movie black for ~40 s after the boot resync seek) The game's two feed threads [game 0x71036f6c20
+ * video, 0x71036f4240 audio] each keep a list of the input indices the decoder event handler acquired [handler 0x71036f3710:
+ * AcquireInputBufferIndex, push to the list (0x71036f6e80), message 1]; every 1 ms (or per message) one feed step
+ * [0x71036f6ce0] asks GetTrackIndexForAvailableData and, when the next sample is its own track, pops an index and does
+ * GetInputBuffer / Read / GetSampleTime / SendInputBufferForDecode / Advance. The game's Seek [0x71036e7620] (player state
+ * >= 4) does Flush x2, posts "empty your list" to both feed threads (message 3 video, 5 audio), SeekTo, sleeps 16 ms, posts it
+ * again, then Start x2. The list is emptied when the feed thread RECEIVES that message, i.e. asynchronously. On the console a
+ * feed step is quick (MediaCodec decodes elsewhere). Here Media Foundation decodes inside ReadSample (ext_fill), so a feed
+ * thread can be inside one step for a long time (the first VP9 pictures on a busy PC; SSBU_MOVIE_TEST_VIDEO_DELAY in the
+ * test): the "empty" messages are then received AFTER Start, after the handler had already pushed the indices Start offered,
+ * and they wipe them. The decoder believes the game holds all its inputs, the game's list is empty: no video input for ever,
+ * and since the extractor's next sample stays a video one, no audio either (24-draw black frames, until a second seek
+ * flushes and restarts everything). Proof: n11_mvs1 (SeekTo while the first sample was held, then no SendInput at all).
+ * Detection (exact, no game address): a feed step that got its own track and did NOT call GetInputBuffer before the same
+ * thread's next GetTrackIndexForAvailableData found its list empty. If at that point the decoder of that track still counts
+ * indices as held by the game for more than RESCUE_MS (an index normally goes acquire -> list -> pop within a millisecond),
+ * they were lost with the list: they are offered again (input event), as Start would have. SSBU_MOVIE_RESCUE=0: off (test). */
+#define RESCUE_MS 100
+static __declspec(thread) Ext *t_gti_ext;             /* this thread's last GetTrackIndexForAvailableData: extractor, */
+static __declspec(thread) int t_gti_track = -1;       /* the track it returned (-1 none / not ok), */
+static __declspec(thread) int t_gti_fed;              /* and whether a GetInputBuffer followed */
+static void feeder_found_empty(Ext *e, int track) {
+    static int on = -1;
+    if (on < 0) { const char *v = getenv("SSBU_MOVIE_RESCUE"); on = !(v && v[0] == '0'); }
+    if (!on) return;
+    Dec *d = NULL;
+    DWORD me = GetCurrentThreadId();
+    AcquireSRWLockShared(&g_dec_live_lock);
+    for (int i = 0; i < MAX_LIVE_DEC && !d; i++) {
+        Dec *x = (Dec *)g_dec_live[i];
+        if (x && x->ext == e && x->track == track && !x->h264 && x->feeder_tid == me) d = x;
+    }
+    ReleaseSRWLockShared(&g_dec_live_lock);
+    if (!d) return;                                   /* not the feed thread of that track (the other one, which skips it) */
+    ULONGLONG now = GetTickCount64();
+    int n = 0;
+    EnterCriticalSection(&d->cs);
+    if (!d->dead && d->started && !d->eos_in) {
+        for (int i = 0; i < d->nin; i++) {
+            if (d->in_state[i] != IN_CLIENT || now - d->client_since[i] < RESCUE_MS) continue;
+            Token t; memcpy(&t, d->mem + (size_t)i * d->slot, sizeof t);    /* (none expected: Send clears the slot) */
+            if (t.magic == TOKEN_MAGIC && t.s) IMFSample_Release(t.s);
+            memset(d->mem + (size_t)i * d->slot, 0, d->slot);
+            d->in_state[i] = IN_OFFERED; d->in_list[d->in_n++] = i;
+            n++;
+        }
+        d->rescued += (unsigned long long)n;
+    }
+    LeaveCriticalSection(&d->cs);
+    if (!n) return;
+    printf("movie: Decoder(%s): the game's feed thread has no input index left while %d acquired ones were never sent (its list was emptied late, after a seek's Start): offered again (tick %llu)\n",
+           d->is_video ? "video" : "audio", n, (unsigned long long)now);
+    signal_event(d, 0);
+}
 static void ext_GetTrackIndexForAvailableData(Ctx *c) {   /* (size_t *track) */
     Ext *e = ext_of(A0);
     if (!e || !A1) { RET(ST_INVALID); return; }
+    if (t_gti_ext == e && t_gti_track >= 0 && !t_gti_fed) feeder_found_empty(e, t_gti_track);
     ext_lock(e);
     int r = ext_fill(e);
+    int tr = r == ST_OK ? e->pend_track : -1;
     if (r == ST_OK) wr64(A1, (uint64_t)e->pend_track);
     ext_unlock(e);
+    t_gti_ext = e; t_gti_track = tr; t_gti_fed = 0;
     RET(r);
 }
 
@@ -1627,6 +1687,7 @@ static void dec_AcquireInputBufferIndex(Ctx *c) {     /* (int *index, int *moreA
         memmove(d->in_list, d->in_list + 1, (size_t)(d->in_n - 1) * sizeof d->in_list[0]);
         more = --d->in_n;
         d->in_state[found] = IN_CLIENT;
+        d->client_since[found] = GetTickCount64();
     }
     dec_unlock(d);
     wr32(A1, (uint32_t)found);
@@ -1645,7 +1706,9 @@ static void dec_GetInputBuffer(Ctx *c) {              /* (int index, Buffer *out
     if (!dec_enter(d)) { RET(ST_INVALID); return; }
     int ok = d->mem && i < d->nin;
     uint64_t base = ok ? (uint64_t)(uintptr_t)(d->mem + (size_t)i * d->slot) : 0, cap = ok ? (uint64_t)d->slot : 0;
+    if (ok && !d->h264) d->feeder_tid = GetCurrentThreadId();   /* the feed thread of this track (feeder_found_empty) */
     dec_unlock(d);
+    t_gti_fed = 1;
     if (!ok) { RET(ST_INVALID); return; }
     buf_release(c, b);
     wr64(b + B_BASE, base);
@@ -1672,11 +1735,12 @@ static void dec_SendInputBufferForDecode(Ctx *c) {    /* (int index, int offset,
         RET(held ? ST_OK : ST_INVALID);
         return;
     }
+    int test_held = 0;
     {   /* TEST ONLY, SSBU_MOVIE_TEST_VIDEO_DELAY=<ms>: the first video sample of each decoder is held that long before it is
          * taken (a slow first VP9 picture, as on a busy PC: the boot resync then comes before the first video frame) */
         static int delay = -1;
         if (delay < 0) { const char *v = getenv("SSBU_MOVIE_TEST_VIDEO_DELAY"); delay = v ? atoi(v) : 0; }
-        if (delay > 0 && d->is_video && d->in_count == 0 && !(flags & FLAG_EOS)) { printf("movie: TEST: first video sample held %d ms\n", delay); Sleep((DWORD)delay); }
+        if (delay > 0 && d->is_video && d->in_count == 0 && !(flags & FLAG_EOS)) { printf("movie: TEST: first video sample held %d ms\n", delay); Sleep((DWORD)delay); test_held = 1; }
     }
     if (!dec_enter(d)) { RET(ST_INVALID); return; }   /* d->mem is gone once the destructor ran */
     dec_error_check(d);
@@ -1724,6 +1788,10 @@ static void dec_SendInputBufferForDecode(Ctx *c) {    /* (int index, int offset,
         d->in_state[i] = IN_OFFERED; d->in_list[d->in_n++] = i;
         dec_unlock(d);
         signal_event(d, 0);
+        /* TEST ONLY (V 22/10), with SSBU_MOVIE_TEST_VIDEO_DELAY: a seek's Flush + Start came during the hold (the token was
+         * voided). Returning 30 ms later lets the event handler push this index again BEFORE this feed thread receives the
+         * seek's "empty your list" messages, so every input index is lost (the n11_mvs1 order; otherwise it is a race). */
+        if (test_held) Sleep(30);
         RET(ST_OK);
         return;
     }
@@ -1835,8 +1903,8 @@ static void dec_GetOutputBuffer(Ctx *c) {             /* (int index, Buffer *out
         wr64(b + B_I64, (uint64_t)s->ts);
         wr32(b + B_U32, s->flags);
         if (n) d->copied++;
-        if (d->copied == 1 && n) printf("movie: Decoder(%s): first frame copied to the game (%zu bytes into a %llu-byte buffer at %llx, t=%.3f s)\n",
-                                        d->is_video ? "video" : "audio", n, (unsigned long long)cap, (unsigned long long)base, s->ts / 1e6);
+        if (d->copied == 1 && n) printf("movie: Decoder(%s): first frame copied to the game (%zu bytes into a %llu-byte buffer at %llx, t=%.3f s, tick %llu)\n",
+                                        d->is_video ? "video" : "audio", n, (unsigned long long)cap, (unsigned long long)base, s->ts / 1e6, (unsigned long long)GetTickCount64());
         else if (d->is_video && d->copied % 300 == 0 && n) printf("movie: %llu video frames delivered (t=%.1f s)\n", d->copied, s->ts / 1e6);
     }
     dec_unlock(d);

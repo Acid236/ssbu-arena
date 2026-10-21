@@ -50,6 +50,7 @@ extern char **environ;
 #endif
 #include "imgui.h"
 #include "net_stats.h"
+extern "C" uint32_t net_match_host(void);      /* net_relay.c / net_off.c: the matched host (the F1 table marks its room) */
 extern "C" {
 #include "gfx_options.h"
 #include "menu.h"
@@ -1087,7 +1088,11 @@ static DWORD WINAPI osk_name_thread(LPVOID arg) {          /* the player's name 
     InterlockedExchange(&g_osk_busy, 0);
     return 0;
 }
-static DWORD WINAPI restart_thread(LPVOID) { Sleep(100); exit(0); return 0; }      /* the exit handlers run */
+/* (2026-10-21, a Linux tester: Exit game / Restart -> SIGSEGV, then the process stayed and grew until the OOM killer) exit()
+ * ran the exit handlers while the game's threads still ran: a thread jumped into what they had freed. Here (Linux / macOS:
+ * no UPnP or lobby handlers to run) the end is report_and_exit: the reports, the log flushed, then _exit, as the window's X does. */
+extern "C" void report_and_exit(int code);                 /* hostrt.c */
+static DWORD WINAPI restart_thread(LPVOID) { Sleep(100); report_and_exit(0); return 0; }
 static void restart_game(void) {                           /* this exe again, same arguments, environment and standard handles */
     char pid[16], exe[MAX_PATH], path[MAX_PATH];
     snprintf(pid, sizeof pid, "%d", (int)getpid());
@@ -1149,7 +1154,7 @@ static void sec_experimental(void) {
     tag(1, S.runahead != S0.runahead);
     ImGui::SameLine();
     if (ra_build()) ImGui::TextDisabled("one frame less input delay in fights; costs a second pass of each frame on the CPU");
-    else ImGui::TextDisabled("needs the run-ahead build (the game DLL with write marks); this build cannot run it");
+    else ImGui::TextDisabled("not ready yet: it is being moved onto the normal build (like rollback)");
     ImGui::Separator();
     /* (2) your name: the console user's nickname (nnfs.c) and the name the lobby shows (net_relay.c); graphics.ini player_name */
     static char pname[33], pname0[33];
@@ -1494,6 +1499,7 @@ static void draw_stats(void) {
 
 /* ------------------------------------------------------------------ O2: Find an opponent (net_relay.c net_match_*)
  * Returns the matched host's address while this game is matched to join (its row in the table below says so). */
+static uint32_t sec_match(void) __attribute__((unused));
 static uint32_t sec_match(void) {
     NetMatch m;
     net_match_get(&m);
@@ -1562,7 +1568,7 @@ static void sec_rooms(void) {
         ImGui::TextColored(ImVec4(0.45f, 0.9f, 0.45f, 1), "%.*s", (int)(end - d), d); }
     ImGui::SameLine(); ImGui::Text("  mods:"); ImGui::SameLine();
     ImGui::PushTextWrapPos(0.0f); ImGui::TextUnformatted(net_mods_text()); ImGui::PopTextWrapPos();
-    uint32_t match_host = sec_match();
+    uint32_t match_host = net_match_host();      /* (owner 2026-10-22: no matchmaking from F1; the game's own Online menu will do it) */
     ImGui::Separator();
     help("Every room of your lobby, any version or mod set. Join a room from the game: Local Wireless > Rooms List. "
          "Rooms of another version or mod set are listed there too, but joining one is refused and says why. Select a row for details.");
@@ -1646,6 +1652,14 @@ static void draw_overlay(void) {
     ImGui::End();
 }
 
+static void exit_game(void) {                              /* F1 -> Exit game: the exit handlers run, then a hard end if one hangs */
+    static volatile LONG once;
+    if (InterlockedExchange(&once, 1)) return;
+    printf("menu: exit game\n");
+    fflush(stdout);
+    CreateThread(NULL, 0, restart_thread, NULL, 0, NULL);
+    CreateThread(NULL, 0, [](LPVOID) -> DWORD { Sleep(4000); fflush(stdout); _Exit(0); return 0; }, NULL, 0, NULL);
+}
 /* The settings as SSBU Arena's screen: the whole window, nothing to move or resize; the sections on the left (L / R, or the
  * d-pad and A on the list), the chosen one on a card on the right, the controller hints at the top. B goes back (menu_frame). */
 static int g_back_blocked;                         /* last frame: an item in use or a popup open: B is theirs, it does not close */
@@ -1737,7 +1751,16 @@ static void draw_arena(int cw, int ch) {
     if (ImGui::Button("  Done  ")) menu_request_toggle();
     ImGui::PopStyleColor(4);
     ImGui::SameLine();
+    if (ImGui::Button("Exit game")) ImGui::OpenPopup("Exit the game?");
+    ImGui::SameLine();
     ImGui::TextDisabled("Saved at once to config\\graphics.ini");
+    if (ImGui::BeginPopupModal("Exit the game?", NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::Text("Are you sure? Progress not saved by the game is lost.");
+        if (ImGui::Button("Yes, exit")) { exit_game(); ImGui::CloseCurrentPopup(); }
+        ImGui::SameLine();
+        if (ImGui::Button("No") || ImGui::IsKeyPressed(ImGuiKey_Escape)) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
     ImGui::EndChild();
     ImGui::PopStyleVar();
     ImGui::PopStyleColor();

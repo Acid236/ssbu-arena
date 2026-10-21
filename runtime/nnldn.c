@@ -421,6 +421,7 @@ static void scan(Ctx *c, uint64_t out, uint64_t count_p, int32_t room, uint64_t 
         printf("[online] ldn: scan %llu (filter %#x, room for %d): %d room(s)%s%s\n", (unsigned long long)scans, flags, room, found, answered ? "" : " (no list from the lobby in time)",
                first_at >= 0 ? ", the matched host's room first" : "");
     if (found) input_mark("ldn:scan-found");
+    input_mark("ldn:scanned");                      /* (R3 lwr, test aid) a scan was made (SSBU_SEQ @ldn:scanned) */
     RET(0);
 }
 static void ldn_Scan(Ctx *c) { scan(c, c->x[0], c->x[1], (int32_t)c->x[2], c->x[3]); }

@@ -99,6 +99,31 @@ void debug_mode_frame(long long frame) {
                rd32(GA(0x71052c41b0ULL) + 0x420), (unsigned long long)rd64(sel), rd32(sel + 8), rd32(sel + 0xc), rd8(GA(0x7105309985ULL)), g_dm.stage,
                rd8(GA(0x71052c41b0ULL) + 0x4c), rd32(GA(0x71052c41b0ULL) + 0x54), r0 ? (int)rd32(r0 + 0xd8) : -1, r1 ? (int)rd32(r1 + 0xd8) : -1);
         hex_lines("debug match:   stage block", GA(0x71052c41b0ULL) + 0x420, 0x30);
+        if (getenv("SSBU_DEBUG_CTRLSCAN")) {              /* (R3 lwr, research) =<profile>: every copy of that profile's control bytes + 0x24 .. + 0x4c in memory */
+            uint64_t x0 = sr64(GA(0x7105313510ULL)), x = x0 ? sr64(x0) : 0, a = x ? sr64(x + 0x58) : 0, b = a ? sr64(a) : 0, q = b ? sr64(b) : 0;
+            uint8_t pat[0x10]; uint64_t src = q + 0xf7d8ull * (uint64_t)atoi(getenv("SSBU_DEBUG_CTRLSCAN")) + 0x30;
+            if (q && safe_read(src, pat, sizeof pat)) {
+                SYSTEM_INFO si; GetSystemInfo(&si); uint8_t *p = (uint8_t *)si.lpMinimumApplicationAddress; MEMORY_BASIC_INFORMATION mi; int hits = 0;
+                while (p < (uint8_t *)si.lpMaximumApplicationAddress && VirtualQuery(p, &mi, sizeof mi)) {
+                    if (mi.State == MEM_COMMIT && !(mi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) && (mi.Protect & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE)) && mi.RegionSize < (1ull << 31)) {
+                        const uint8_t *bb = mi.BaseAddress;
+                        for (size_t i = 0; i + sizeof pat <= mi.RegionSize; i++) if (bb[i] == pat[0] && !memcmp(bb + i, pat, sizeof pat) && (uint64_t)(bb + i) != src && hits < 30) { hits++; printf("debug ctrl: scan: copy of the profile's bytes + 0x30 at %p (region %p)\n", bb + i, mi.BaseAddress); hex_lines("debug ctrl: scan:   ", (uint64_t)(bb + i) - 0x40, 0x80); }
+                    }
+                    p = (uint8_t *)mi.BaseAddress + mi.RegionSize;
+                }
+                printf("debug ctrl: scan: %d copies (profile bytes at %llx)\n", hits, (unsigned long long)src);
+                {   uint64_t base = GA(0x7105338860ULL); for (int s = 0; s < 3; s++) { uint64_t o = sr64(base + 8ull * s); printf("debug ctrl: slot %d obj %llx subs %llx %llx %llx %llx\n", s, (unsigned long long)o, (unsigned long long)sr64(o + 0x10), (unsigned long long)sr64(o + 0x18), (unsigned long long)sr64(o + 0x20), (unsigned long long)sr64(o + 0x28)); } }
+                fflush(stdout);
+            } }
+        if (getenv("SSBU_DEBUG_CTRLWATCH")) hex_lines("debug ctrl: singleton at the fight start", sr64(GA(0x71052c40f0ULL)), 0x120);
+        if (getenv("SSBU_DEBUG_P1PROFILE_LATE")) {        /* (R3 lwr, research) =<from>,<to>: profile from's control bytes over profile to's, at the fight start */
+            int from = 0, to = 1; sscanf(getenv("SSBU_DEBUG_P1PROFILE_LATE"), "%d,%d", &from, &to);
+            uint64_t x0 = sr64(GA(0x7105313510ULL)), x = x0 ? sr64(x0) : 0, a = x ? sr64(x + 0x58) : 0, b = a ? sr64(a) : 0, q = b ? sr64(b) : 0;
+            if (q) for (int k = 0x24; k < 0x50; k++) wr8(q + 0xf7d8ull * (uint64_t)to + k, rd8(q + 0xf7d8ull * (uint64_t)from + k));
+            printf("debug ctrl: research: at the fight start profile %d's control bytes copied over profile %d\n", from, to); }
+        if (getenv("SSBU_DEBUG_MIDUMP")) { hex_lines("debug midump: fight on: FighterManager impl", impl, 0x200); hex_lines("debug midump: fight on: rule", GA(0x71052c41b0ULL), 0x580);      /* (R3 lwr, research) */
+            for (int e = 0; e < 2; e++) { char t[64]; uint64_t en = sr64(impl + 0x20 + 8ull * e); snprintf(t, sizeof t, "debug midump: fight on: entry%d", e); hex_lines(t, en, 0x400);
+                snprintf(t, sizeof t, "debug midump: fight on: info%d", e); hex_lines(t, fighter_info_record(e), 0x400); } }
         fflush(stdout);
     }
     if (g_end_limit && n >= g_end_limit) InterlockedExchange64(&g_end_fired, frame);
@@ -253,7 +278,7 @@ static uint64_t hash40(const char *s) {
  * name-tag profile state + 0x214 (table [[[[0x7105313510] + 0x58]]] + 0xf7d8 * profile + 0xc, default 0x7105313518).
  * Both games force + 0x454 = 1 with the agreed layout of each player, so a player's own controls are the same on both PCs. */
 #include "rb_hs.h"
-static int g_hs_wanted, g_hs_ok, g_hs_local;
+static int g_hs_wanted, g_hs_ok, g_hs_local, g_hs_lwr;      /* (R3 lwr) g_hs_lwr: a Local Wireless room's match played with rollback */
 static RbhMatch g_hs_m;
 /* (hs12) player 1's panel state as the game's function got it (before any change here): the template of player 2's state
  * when the select screen had NO panel for player 2 (each player picks only his own fighter; the other game's player is
@@ -267,14 +292,69 @@ static void hs_fill_empty(uint64_t st, int idx) {
     wr32(st + 0x70, (uint32_t)idx + 1); if (rd32(st + 0x298) == 1) wr32(st + 0x298, (uint32_t)idx + 1);
     wr32(st + 0x7c, 0); wr32(st + 0x210, 0xffffffffu); wr32(st + 0x214, 0); wr8(st + 0x450, 0);
 }
+/* (R3 lwr) a name-tag profile (0xf7d8 bytes each, 0x3d of them): as the record builder 0x7101788260 finds it (0x71017884 5c..80):
+ * [[0x7105313510]] = the save's root (byte + 0 must be 0), [[[root + 0x58]]] + 0xf7d8 * index; a profile whose byte + 0 is 0
+ * (not in use) or index -1 / >= 0x3d -> the game's default profile 0x7105313518. Read in runs lwc1v / lwc2v (SSBU_DEBUG_CTRLDUMP):
+ * + 0 in use, + 0xc the name (UTF-16), + 0x24 .. + 0x4e the controls (three controller kinds' button maps and options; the
+ * builder reads the kind's last byte + 0x2f / + 0x3f / + 0x4b into record + 0x48). (hs12 read one pointer too few: it always
+ * got the default profile.) */
+static uint64_t prof_ptr(uint32_t prof) {
+    uint64_t def = GA(0x7105313518ULL);
+    if (prof >= 0x3d) return def;
+    uint64_t x0 = sr64(GA(0x7105313510ULL)), x = x0 ? sr64(x0) : 0;
+    if (!x || rd8(x) != 0) return def;
+    uint64_t a = sr64(x + 0x58), b = a ? sr64(a) : 0, q = b ? sr64(b) : 0;
+    uint64_t p = q ? q + 0xf7d8ull * prof : 0;
+    return p && rd8(p) ? p : def;
+}
+/* (R3 lwr, owner 2026-10-22: each player plays with HIS OWN name-tag controls) the controls a match uses: the set-up
+ * 0x7101780440 (after the records, from 0x710155ed20) copies, for each human player i, its profile's + 0x24 .. + 0x4e (record
+ * + 0x40 = the profile) into the controls object [0x71052c40f0] + 0x18 + 0x50 * i, and binds the player to its controller slot
+ * (record + 0x1c, 0x7101754d80); the fight reads only that copy (runs lwc_c0 / lwc_late: profile 0's bytes over player 1's
+ * profile at its record change the fight, at the fight start they do not; lwc_w: hardware write watch on the copy). The
+ * builder also takes ONE option byte of the controller kind into record + 0x48 (profile + 0x2f GameCube, + 0x3f Pro / two
+ * Joy-Cons / handheld, + 0x4b one Joy-Con; kind = [[0x7105338860 + 8 * slot] + 0x10] + 0x9c, if [0x71053388b0] + 8). In a room
+ * match each game sends its own player's 0x2b bytes + that byte; both games then hold both players' own controls. */
+#define LWR_CTL 0x2b
+static uint8_t g_lwr_ctl[2][LWR_CTL + 2];      /* + LWR_CTL: the option byte; + LWR_CTL + 1: 1 = the player's own controller is a GameCube one */ static int g_lwr_ctl_ok, g_lwr_ctl_applied;
+static void lwr_own_controls(uint64_t st, uint8_t out[LWR_CTL + 2]) {
+    uint32_t prof = rd32(st + 0x214), slot = rd32(st + 0x210);
+    uint64_t p = rd8(st + 0x450) && rd32(st + 0x78) == 0 ? prof_ptr(prof) : GA(0x7105313518ULL);
+    for (int k = 0; k < LWR_CTL; k++) out[k] = rd8(p + 0x24 + (uint64_t)k);
+    uint8_t opt = 0;
+    if (rd8(st + 0x450) && rd32(st + 0x78) == 0) {
+        uint64_t ctl = GA(0x7105338830ULL), h = sr64(GA(0x71053388b0ULL));
+        if (slot < 10 && h && rd8(h + 8)) ctl = sr64(GA(0x7105338860ULL) + 8ull * slot);
+        uint64_t sub = ctl ? sr64(ctl + 0x10) : 0; uint32_t kind = sub ? rd32(sub + 0x9c) : 0xffffffffu;
+        if (ctl && kind < 7 && ((0x66u >> kind) & 1)) opt = rd8(p + 0x3f); else if (ctl && kind - 3 < 2) opt = rd8(p + 0x4b); else if (ctl && kind == 7) opt = rd8(p + 0x2f);
+    }
+    out[LWR_CTL] = opt;
+    {   int nnhid_native_gc0(void); const char *e = getenv("SSBU_RB_NET_TEST_GC");      /* (TEST ONLY) =1: this game's player's controller taken as a GameCube one */
+        out[LWR_CTL + 1] = (uint8_t)(nnhid_native_gc0() || (e && e[0] == '1')); }
+    {   const char *e = getenv("SSBU_RB_NET_TEST_CTL");    /* (TEST ONLY) =<0x2b bytes in hex>: this game's own player's controls, as if its profile held them */
+        if (e && strlen(e) >= 2 * LWR_CTL) { for (int k = 0; k < LWR_CTL; k++) { unsigned v = 0; sscanf(e + 2 * k, "%2x", &v); out[k] = (uint8_t)v; }
+            printf("[rbnet] room match: TEST: this game's player's controls from SSBU_RB_NET_TEST_CTL\n"); fflush(stdout); } }
+}
+static ImportFn g_orig_controls_fill;
+static void controls_fill_hook(Ctx *c, void *user) {
+    (void)user;
+    g_orig_controls_fill(c);
+    if (!g_hs_lwr || !g_lwr_ctl_ok || g_lwr_ctl_applied) return;
+    uint64_t o = sr64(GA(0x71052c40f0ULL)); if (!o) return;
+    for (int i = 0; i < 2; i++) {
+        for (int k = 0; k < LWR_CTL; k++) wr8(o + 0x18 + 0x50ull * (uint64_t)i + (uint64_t)k, g_lwr_ctl[i][k]);
+        char t[200]; int n = 0; for (int k = 0; k < LWR_CTL; k++) n += snprintf(t + n, sizeof t - n, "%02x", g_lwr_ctl[i][k]);
+        printf("[rbnet] room match: player %d plays with its own name-tag controls (profile + 0x24 .. + 0x4e: %s; record option byte %u)\n", i + 1, t, g_lwr_ctl[i][LWR_CTL]);
+    }
+    g_lwr_ctl_applied = 1;
+    fflush(stdout);
+}
 static int hs_layout(uint64_t st, uint16_t out[11]) {
     uint32_t type = rd32(st + 0x78);
     if (rd8(st + 0x454) || (rd8(st + 0x455) && type == 0)) { for (int k = 0; k < 11; k++) out[k] = rd16(st + 0x54 + 2ull * k); return 1; }
     uint32_t prof = rd32(st + 0x214);
     if (!rd8(st + 0x455) && prof != 0xffffffffu && type == 0) {
-        uint64_t p = GA(0x7105313518ULL), x = sr64(GA(0x7105313510ULL));
-        if (prof < 0x3d && x && rd8(x) == 0) { uint64_t a = sr64(x + 0x58), b = a ? sr64(a) : 0, q = b ? sr64(b) : 0; if (q) p = q + 0xf7d8ull * prof; }
-        if (!rd8(p)) p = GA(0x7105313518ULL);
+        uint64_t p = prof_ptr(prof);
         for (int k = 0; k < 11; k++) out[k] = rd16(p + 0xc + 2ull * k);
         return 1;
     }
@@ -291,6 +371,7 @@ static void hs_apply(uint64_t st, int idx, uint32_t type_was) {
         if (getenv("SSBU_RB_NET_WATCH")) { uint64_t off = strtoull(getenv("SSBU_RB_NET_WATCH"), NULL, 16); if (off <= 1) off = 0x98;      /* (hs12: =<hex offset in the match block>) */
             uint64_t w[1] = {MELEE_INFO + (off & ~7ull)}; printf("[rbnet] research: match block + 0x%llx at the handshake = %016llx\n", (unsigned long long)(off & ~7ull), (unsigned long long)rd64(w[0])); debug_watch(w, 1); }
         g_hs_ok = rbn_handshake(&me, &g_hs_m); g_hs_local = 0;
+        {   int rbn_room_rollback(void); g_hs_lwr = g_hs_ok && rbn_room_rollback(); }
         {   int rbn_match_cancelled(void); if (!g_hs_ok && rbn_match_cancelled() == 2) return; }      /* (R3 pub2) a Local Wireless room fight: nothing changed */
         if (!g_hs_ok) {                                   /* (hs12) not agreed: a local match of this game (player 2 = this player's fighter again), left at once by rb_rollback.c */
             g_hs_m = me; g_hs_m.chara[1] = me.chara[0]; g_hs_m.colour[1] = (uint8_t)((me.colour[0] + 1) & 7); g_hs_m.has_layout[1] = me.has_layout[0];
@@ -300,8 +381,10 @@ static void hs_apply(uint64_t st, int idx, uint32_t type_was) {
             if (g_hs_m.rule_kind == 1) g_hs_m.stock = 1;
         }
         if (g_hs_ok && !g_hs_local) {
+            if (!g_hs_lwr) {                              /* (R3 lwr: a room's match: the stage, hazards and items are the room's, the same on both PCs) */
             for (int k = 0; k < 0x20; k++) wr8(sel + (uint64_t)k, g_hs_m.stage[k]);
             wr8(GA(0x7105309985ULL), g_hs_m.hazards); wr32(MELEE_INFO + 0x54, g_hs_m.items);
+            }
             /* (hs12) the stage set-up's inputs as the host had them (rb_hs.h: run tw5, a stage variation chosen from each game's own history) */
             {   int d = 0; uint8_t h[0x60], stg[0xb0];
                 safe_read(GA(0x71050c5ad0ULL), h, sizeof h); safe_read(MELEE_INFO + 0x420, stg, sizeof stg);
@@ -319,9 +402,59 @@ static void hs_apply(uint64_t st, int idx, uint32_t type_was) {
                 printf("[rbnet] handshake: the global generator %llx was %08x %08x %08x %08x; set from the agreed seed\n", (unsigned long long)g, rd32(g), rd32(g + 4), rd32(g + 8), rd32(g + 12));
                 for (int k = 0; k < 4; k++) { z += 0x9E3779B97F4A7C15ull; uint64_t y = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull; y = (y ^ (y >> 27)) * 0x94D049BB133111EBull; y ^= y >> 31; wr32(g + 4ull * k, (uint32_t)y | (k == 0)); }
                 fflush(stdout); }
+            /* (R3 lwr) the room's match made a local versus match: the match block's melee mode (+ 0; FighterManager impl + 0xc0 takes it,
+             * app::lua_bind::FighterManager__is_melee_mode_*) is 1 in a Local Wireless room's match and 0 in a local Smash (versus) match,
+             * the rest of the rule header the same (runs lwres3 / lwres3v, SSBU_DEBUG_MIDUMP: the room's match and a local versus match
+             * at the set-up and at the fight start: rule + 0, + 1 and FighterManager impl + 0xc0 the only differences there). So the game's
+             * own online netcode does not play this fight; both games run it as the local match rollback expects. SSBU_RB_NET_ROOM_MODE=<n>:
+             * the mode written (test), -1 = not changed. */
+            if (g_hs_lwr) {
+                const char *e = getenv("SSBU_RB_NET_ROOM_MODE"); int to = e && *e ? atoi(e) : 0; uint8_t was = rd8(MELEE_INFO);
+                if (to >= 0) wr8(MELEE_INFO, (uint8_t)to);
+                printf("[rbnet] room match: melee mode (match block + 0) %u -> %u: played as a local versus match with rollback (room maker = player 1)\n", was, rd8(MELEE_INFO));
+                fflush(stdout);
+            }
         }
     }
     if (!g_hs_ok || idx < 0 || idx > 1) return;
+    if (g_hs_lwr) {                                     /* (R3 lwr) the players' fighters, colours, rules are the room's own (the same on both PCs) */
+        /* Which controller drives a player: state + 0x210 = the controller slot (the record builder reads the controller object
+         * 0x7105338860[state + 0x210]). In the room's records this game's own player has slot 0 (its name tag, + 0x450) and the
+         * other game's player is a network player (+ 0x451 -> record + 0xa5 = 1, slot -1): made a local match, the network player
+         * read no controller and this game's player read port 1 whatever its index (run lwr17, SSBU_RB_NET_DETAIL: the joiner's
+         * player 2 moved with port 1's pad; lwr18: with no slot at all neither player moved). So on both PCs player i gets
+         * controller slot i (port i, where rb_rollback.c gives player i's pads), no network flag, and no name-tag profile (+ 0x214
+         * = -1: the controls are the game's default ones on both PCs; a player's own name-tag controls exist only on his own
+         * PC). Run lwr20: both players move, each with its own pads, on both PCs. SSBU_RB_NET_ROOM_NORM=0: the room's states as
+         * they are (test). The 11 words at state + 0x54 (record + 0x28, written with + 0x454 = 1) hold the player's name-tag text
+         * in these runs ("Anto..."): each player's own, so both records are the same: player 1's from the handshake (the room
+         * maker's own), player 2's sent by the joiner at this record (rb_net.c rbn_room_layout). */
+        static int norm = -1; if (norm < 0) { const char *e = getenv("SSBU_RB_NET_ROOM_NORM"); norm = e && *e ? atoi(e) : 1; }
+        if (norm) {
+            int rbn_local_player(void); int rbn_room_layout(const uint16_t mine[11], int has, const uint8_t mine_ctl[LWR_CTL + 2], uint16_t other[11], int *other_has, uint8_t other_ctl[LWR_CTL + 2]);
+            int local = rbn_local_player(), has = 0; uint16_t lay[11]; memset(lay, 0, sizeof lay);
+            if (idx == 0) { g_lwr_ctl_ok = 0; g_lwr_ctl_applied = 0; }
+            if (idx == local) lwr_own_controls(st, g_lwr_ctl[idx]);      /* (before the state is changed below: its own profile and controller) */
+            if (idx == 0) { if (local == 0) has = hs_layout(st, lay); else { has = g_hs_m.has_layout[0]; memcpy(lay, g_hs_m.layout[0], sizeof lay); } }
+            else {
+                uint16_t own[11], other[11]; int own_has, other_has = 0;
+                if (local == 1) own_has = hs_layout(st, own); else { own_has = g_hs_m.has_layout[0]; memcpy(own, g_hs_m.layout[0], sizeof own); }
+                int got = rbn_room_layout(own, own_has, g_lwr_ctl[local], other, &other_has, g_lwr_ctl[1 - local]);
+                g_lwr_ctl_ok = got;
+                {   void nnhid_lwr_styles(int on, int gc0, int gc1);       /* (R3 lwr) port i in player i's own controller kind on both PCs */
+                    if (got) { nnhid_lwr_styles(1, g_lwr_ctl[0][LWR_CTL + 1], g_lwr_ctl[1][LWR_CTL + 1]);
+                        printf("[rbnet] room match: controller kinds: player 1 %s, player 2 %s (ports 1 / 2 shown so on this PC)\n", g_lwr_ctl[0][LWR_CTL + 1] ? "GameCube" : "Pro", g_lwr_ctl[1][LWR_CTL + 1] ? "GameCube" : "Pro"); } }
+                if (local == 1) { has = own_has; memcpy(lay, own, sizeof lay); } else if (got) { has = other_has; memcpy(lay, other, sizeof lay); }
+            }
+            if (!has) { uint64_t p = GA(0x7105313518ULL); for (int k = 0; k < 11; k++) lay[k] = rd16(p + 0xc + 2ull * k); }      /* (the game's default profile) */
+            printf("[rbnet] room match: player %d (%s): ui_chara %016llx colour %u; panel state: name tag %d, network player %d, controller slot %d, profile %d -> controller slot %d, a local human\n", idx + 1,
+                   idx == local ? "this game's player" : "the other game's player", (unsigned long long)rd64(st + 0x88), rd8(st + 0x90), rd8(st + 0x450), rd8(st + 0x451), (int)rd32(st + 0x210), (int)rd32(st + 0x214), idx);
+            wr8(st + 0x450, 1); wr8(st + 0x451, 0); wr32(st + 0x210, (uint32_t)idx); wr32(st + 0x214, 0xffffffffu);
+            wr8(st + 0x454, 1); for (int k = 0; k < 11; k++) wr16(st + 0x54 + 2ull * k, lay[k]);
+            fflush(stdout);
+        }
+        return;
+    }
     if (type_was == 3) {                                /* (hs12) no panel for this player on this game's select screen: player 1's state is the template */
         if (!g_hs_p1_ok) { printf("[rbnet] handshake: player %d has NO panel on this game's select screen and player 1's state was not read: this match will not be the agreed one\n", idx + 1); fflush(stdout); return; }
         hs_fill_empty(st, idx); wr64(st + 0x80, g_hs_m.chara[idx]);
@@ -387,10 +520,50 @@ static void match_player_hook(Ctx *c, void *user) {
         if (g_dm_hazards >= 0) wr8(GA(0x7105309985ULL), (uint8_t)g_dm_hazards);
         if (g_dm.items >= 0) wr32(MELEE_INFO + 0x54, g_dm.items ? 2u : 0u);
     }
+    if (idx == 0) { void nnhid_lwr_styles(int on, int gc0, int gc1); nnhid_lwr_styles(0, 0, 0); }      /* (R3 lwr) a new set-up: the ports in their own kinds again */
+    if (idx == 0) { void rbn_set_setup_waiting(int waiting); rbn_set_setup_waiting(c->x[30] == GA(0x71017911dcULL)); }      /* (R3 lwr) a Local Wireless room's waiting-stage fight: built from its own set-up (runs lwres2 / lwres3: return address 0x71017911dc; the room's match and the select screens: 0x710178f498) */
     if (g_hs_wanted) hs_apply(st, idx, type_was);       /* R3: the match both online games agreed (rb_net.c handshake) */
     if (idx == 1) g_dm_state1_ok = safe_read(st, g_dm_state1, sizeof g_dm_state1);
     g_orig_player_record(c);
+    if (idx == 1 && g_hs_lwr && g_lwr_ctl_ok) for (int i = 0; i < 2; i++) wr8(MI_PLAYER(i) - 8 + 0x48, g_lwr_ctl[i][LWR_CTL]);      /* (R3 lwr) each player's own option byte (record + 0x48, see lwr_own_controls) */
     if (idx == 1 && rd32(st + 0x78) == 0) { void input_mark(const char *what); input_mark("setup-2p"); }      /* (R3 pub2, test aid) a match set up with a human player 2 (SSBU_SEQ @untilmark:setup-2p) */
+    if (getenv("SSBU_DEBUG_P1PROFILE") && idx == 0) {     /* (R3 lwr, research) player 1's name-tag profile index forced (=<n>), or (=c<n>) profile n's
+                                                           * control bytes + 0x24 .. + 0x50 copied over player 1's own profile's (in memory only, this run) */
+        const char *e = getenv("SSBU_DEBUG_P1PROFILE");
+        uint64_t x0 = sr64(GA(0x7105313510ULL)), x = x0 ? sr64(x0) : 0, a = x ? sr64(x + 0x58) : 0, b = a ? sr64(a) : 0, q = b ? sr64(b) : 0;
+        if (e[0] == 'c' && q) { uint32_t from = (uint32_t)atoi(e + 1), own = rd32(st + 0x214);
+            if (own < 0x3d) for (int k = 0x24; k < 0x50; k++) wr8(q + 0xf7d8ull * own + k, rd8(q + 0xf7d8ull * from + k));
+            printf("debug ctrl: research: profile %u's control bytes copied over player 1's profile %u\n", from, own); }
+        else { printf("debug ctrl: research: player 1's profile %d -> %d\n", (int)rd32(st + 0x214), atoi(e)); wr32(st + 0x214, (uint32_t)atoi(e)); }
+        fflush(stdout);
+    }
+    if (getenv("SSBU_DEBUG_W500") && idx == 0) {          /* (R3 lwr, research) who writes match block + 0x500 (the block check's last differing bytes) */
+        hex_lines("debug w500: block + 0x4d0 at player 1's record", MELEE_INFO + 0x4d0, 0xb0);
+        uint64_t w[1] = {MELEE_INFO + 0x500}; debug_watch(w, 1); fflush(stdout);
+    }
+    if (getenv("SSBU_DEBUG_CTRLWATCH") && idx == 0) {     /* (R3 lwr, research) who writes the controls singleton's (0x71052c40f0) players 1 / 2 blocks */
+        uint64_t o = sr64(GA(0x71052c40f0ULL));
+        hex_lines("debug ctrl: singleton at player 1's record", o, 0x120);
+        if (o) { uint64_t w[2] = {o + 0x18, o + 0x68}; debug_watch(w, 2); }
+        fflush(stdout);
+    }
+    if (getenv("SSBU_DEBUG_CTRLDUMP") && idx <= 1) {      /* (R3 lwr, research) the player's name-tag profile and its controller slot's objects */
+        uint32_t prof = rd32(st + 0x214), slot = rd32(st + 0x210); char t[80];
+        uint64_t x0 = sr64(GA(0x7105313510ULL)), x = x0 ? sr64(x0) : 0, a = x ? sr64(x + 0x58) : 0, b = a ? sr64(a) : 0, q = b ? sr64(b) : 0;
+        if (idx == 0) hex_lines("debug ctrl:   default profile", GA(0x7105313518ULL), 0x100);
+        if (idx == 0) for (uint32_t k = 0; k < 0x3d; k++) { uint64_t pp = prof_ptr(k); if (pp == GA(0x7105313518ULL)) continue; char nm[24]; int j; for (j = 0; j < 10 && rd16(pp + 0xc + 2ull * j); j++) nm[j] = (char)rd16(pp + 0xc + 2ull * j); nm[j] = 0;
+            char t[100]; int n = 0; for (int b2 = 0; b2 < 0x2b; b2++) n += snprintf(t + n, sizeof t - n, "%02x", rd8(pp + 0x24 + (uint64_t)b2)); printf("debug ctrl: profile %u \"%s\": %s\n", k, nm, t); }
+        printf("debug ctrl: player %d: profile %d (table %llx) slot %d 0x450 %d 0x451 %d\n", idx, (int)prof, (unsigned long long)q, (int)slot, rd8(st + 0x450), rd8(st + 0x451));
+        if (q && prof < 0x3d) { snprintf(t, sizeof t, "debug ctrl:   p%d profile", idx); hex_lines(t, q + 0xf7d8ull * prof, 0x100); }
+        if (slot < 10) { uint64_t o = sr64(GA(0x7105338860ULL) + 8ull * slot); snprintf(t, sizeof t, "debug ctrl:   p%d slot obj", idx); hex_lines(t, o, 0x40);
+            for (int k = 0; k < 4; k++) { snprintf(t, sizeof t, "debug ctrl:   p%d slot sub%d", idx, k); hex_lines(t, sr64(o + 0x10 + 8ull * k), 0x100); } }
+        fflush(stdout);
+    }
+    if (getenv("SSBU_DEBUG_MIDUMP") && idx <= 1) {        /* (R3 lwr, research) the match block after this record: rule header and the two records */
+        char tag[64]; snprintf(tag, sizeof tag, "debug midump: after p%d (from %llx) rule", idx, (unsigned long long)c->x[30]);
+        if (idx == 1 || atoi(getenv("SSBU_DEBUG_MIDUMP")) > 1) { hex_lines(tag, MELEE_INFO, 0x580); hex_lines("debug midump:   rec0", MI_PLAYER(0) - 8, 0x260); hex_lines("debug midump:   rec1", MI_PLAYER(1) - 8, 0x260); }
+        fflush(stdout);
+    }
     printf("debug match: player %d: screen choice %llx type %u level %u -> record %llx: ui_chara %llx, fighter kind %d, type %d, colour %d, cpu level %d\n", idx,
            (unsigned long long)was, type_was, rd32(st + 0x224), (unsigned long long)rec, (unsigned long long)rd64(rec), (int)(int8_t)rd8(rec + 8), rd8(rec + 0xa), rd8(rec + 0x19), rd8(rec + 0x79));
     if (getenv("SSBU_DEBUG_RESEARCH") && idx == 0) {
@@ -529,6 +702,7 @@ void debug_mode_init(void) {
     if (getenv("SSBU_DEBUG_MATCH") || g_dm_list || g_hs_wanted) {
         if (getenv("SSBU_DEBUG_MATCH")) parse_match(getenv("SSBU_DEBUG_MATCH"));
         printf("debug match: hook on the player record builder %llx: id %d\n", FN_PLAYER_RECORD, hook_install(FN_PLAYER_RECORD, match_player_hook, NULL, &g_orig_player_record));
+        if (g_hs_wanted) printf("debug match: hook on the match controls set-up %llx: id %d (R3 lwr: Local Wireless room matches, each player's own controls)\n", (unsigned long long)GA(0x7101780440ULL), hook_install(GA(0x7101780440ULL), controls_fill_hook, NULL, &g_orig_controls_fill));
     }
     if (getenv("SSBU_DEBUG_RESEARCH")) printf("debug research: hook on the entry set-up: id %d\n", hook_install(FN_ENTRY_SETUP, research_entry_setup, NULL, &g_orig_entry_setup));
     if (getenv("SSBU_DEBUG_DUMP") || g_dm.text[0] || g_end_limit ||getenv("SSBU_DEBUG_RESEARCH") || getenv("SSBU_DEBUG_WATCHENTRY")) CreateThread(NULL, 0, dump_thread, NULL, 0, NULL);

@@ -608,7 +608,7 @@ static void fibers_report(void) {
 /* ---------------------------------------------------------------- save / restore */
 static const char *where(uint8_t *a);
 static int g_mark; static int mark_setup(void); static void blk1_init(void);
-static int g_ra, g_save_failed; static int ra_hold_quiet(double limit);
+static int g_ra, g_save_failed; static int ra_hold_quiet(double limit); static const char *g_ra_busy_first_save(void);      /* (R3 lwr) the thread that kept the first save from being made */
 size_t nvn_r1_cb_save(void); void nvn_r1_cb_restore(void); static size_t g_ra_cb_bytes;      /* nvn_gl.c */
 static size_t g_saved_bytes;
 static void save(Ctx *c) {
@@ -641,7 +641,7 @@ static void save(Ctx *c) {
     }
     if (g_fast > 0 && g_cycle < g_learn) async_learn();
     double tp0 = now_ms();
-    if (g_ra > 0) { if (!ra_hold_quiet(200)) { LOG("r1: RA: first save: no quiet moment within 200 ms: not now\n"); g_save_failed = 1; return; } } else park_quiet(0);
+    if (g_ra > 0) { if (!ra_hold_quiet(200)) { LOG("r1: RA: first save: no quiet moment within 200 ms: not now (busy: %s)\n", g_ra_busy_first_save()); g_save_failed = 1; return; } } else park_quiet(0);
     fibers_save();
     double t1b = now_ms();
     for (int i = 0; i < g_nr; i++) { memcpy(g_r[i].s, g_r[i].a, g_r[i].n); g_saved_bytes += g_r[i].n; }
@@ -1422,6 +1422,8 @@ static volatile int g_ra_wd_pause, g_ra_wd_base;   /* 1 = paused, 2 = long limit
 static int g_ra_skip = 1; static long long g_ra_skipped_kicks, g_ra_skipped_lines;      /* default 1: the preparation kicks of a speculative pass (pictures and hash checked identical); 2 (the render kick) changes 0.3 % of the picture */
 static long long g_ra_skip_why[4];                      /* holds that failed: task worker, audio, other thread, a job fiber running */
 static const char *g_ra_busy;
+static const char *g_ra_busy_imp;                       /* (R3 lwr, log) the import the busy thread was in */
+static const char *g_ra_busy_first_save(void) { static char b[300]; snprintf(b, sizeof b, "%s, in import %s", g_ra_busy ? g_ra_busy : "?", g_ra_busy_imp ? g_ra_busy_imp : "none"); return b; }
 static double g_ra_t_mark, g_ra_spec_sum, g_ra_real_sum; static long long g_ra_nspec, g_ra_nreal;
 static double g_ra_s[16384], g_ra_r[16384], g_ra_sh[16384], g_ra_rh[16384]; static size_t g_ra_sp[16384], g_ra_rp[16384]; static int g_ra_ns, g_ra_nr;
 static char *g_ra_kind; static long long g_ra_nkind, g_ra_kcap;              /* per fight frame (frame line calls): 'R' real, 'S' speculative */
@@ -1514,7 +1516,7 @@ static int ra_hold_save(void) {
                 if (g_hp_on) hp_add(t->name, now_ms() - t0, spins);
                 for (int j = 0; j < i; j++) if (g_th[j].held) { ResumeThread(g_th[j].h); g_th[j].held = 0; }
                 if (all_first) for (int j = i + 1; j < g_nth; j++) if (pre[j]) { ResumeThread(g_th[j].h); pre[j] = 0; }
-                g_ra_busy = t->name;
+                g_ra_busy = t->name; g_ra_busy_imp = t->c->in_import;      /* (R3 lwr) and the import it was in (log) */
                 if (strstr(t->name, "TaskWorker")) g_ra_skip_why[0]++; else if (ra_audio(t->name)) g_ra_skip_why[1]++; else g_ra_skip_why[2]++;
                 return 0;
             }

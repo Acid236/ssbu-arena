@@ -760,7 +760,7 @@ function Reset-Steps {
 }
 function Add-Step([string]$id, [string]$title, [double]$est) {
     if ($est -le 0) { $est = 10 }
-    $s = @{ id = $id; title = $title; est = $est; state = 'wait'; secs = 0.0; done = 0.0; total = 0.0; t0 = $null; msg = ''; item = $null }
+    $s = @{ id = $id; title = $title; est = $est; state = 'wait'; secs = 0.0; done = 0.0; total = 0.0; estp = $false; t0 = $null; msg = ''; item = $null }
     $item = New-Object System.Windows.Forms.ListViewItem($title)
     [void]$item.SubItems.Add('waiting'); [void]$item.SubItems.Add(''); [void]$item.SubItems.Add('')
     $item.ImageKey = 'wait'
@@ -779,7 +779,7 @@ function Show-Step($s) {
     elseif ($s.secs -gt 0) { $t = Fmt-Dur $s.secs }
     $it.SubItems[2].Text = $t
     $note = $s.msg
-    if ($s.state -eq 'run' -and $s.total -gt 0) { $note = ('{0} / {1}  {2}' -f [int]$s.done, [int]$s.total, $s.msg).Trim() }
+    if ($s.state -eq 'run' -and $s.total -gt 0 -and -not $s.estp) { $note = ('{0} / {1} files  {2}' -f [int]$s.done, [int]$s.total, $s.msg).Trim() }   # (estimated seconds: no numbers)
     $it.SubItems[3].Text = $note
     switch ($s.state) {
         'fail' { $it.ForeColor = $cFail }
@@ -888,6 +888,7 @@ function Handle-Event($e) {
             if ($s) {
                 if ($null -ne $e.done) { $s.done = [double]$e.done }
                 if ($null -ne $e.total) { $s.total = [double]$e.total }
+                $s.estp = [bool]$e.est
                 if ($s.state -eq 'wait') { Set-StepState $s 'run' $null '' }
                 if ($e.msg) { $s.msg = [string]$e.msg }
             }

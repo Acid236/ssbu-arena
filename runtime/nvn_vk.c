@@ -94,6 +94,7 @@ void display_before_present(void);
     X(VkResult, vkResetCommandBuffer, (VkCommandBuffer, VkFlags)) \
     X(void, vkCmdPipelineBarrier, (VkCommandBuffer, VkFlags, VkFlags, VkFlags, uint32_t, const void *, uint32_t, const void *, uint32_t, const VkImageMemoryBarrier *)) \
     X(void, vkCmdClearColorImage, (VkCommandBuffer, VkImage, VkImageLayout, const VkClearColorValue *, uint32_t, const VkImageSubresourceRange *)) \
+    X(void, vkCmdCopyImage, (VkCommandBuffer, VkImage, VkImageLayout, VkImage, VkImageLayout, uint32_t, const VkImageCopy *)) \
     X(VkResult, vkCreateSemaphore, (VkDevice, const VkSemaphoreCreateInfo *, const VkAllocationCallbacks *, VkSemaphore *)) \
     X(void, vkDestroySemaphore, (VkDevice, VkSemaphore, const VkAllocationCallbacks *)) \
     X(VkResult, vkCreateFence, (VkDevice, const VkFenceCreateInfo *, const VkAllocationCallbacks *, VkFence *)) \
@@ -146,10 +147,20 @@ static const char *vk_result_name(VkResult r) {
     return buf;
 }
 static void vkd_lost_report(void);                                    /* nvn_vk_draw.c (PR #32): what the driver and the markers say about the loss */
+static void vk_unavailable(void);
 static void vk_fatal(const char *what, VkResult r) {
     printf("nvn_vk: %s failed: %s\n", what, vk_result_name(r));
     fflush(stdout);
     if (r == VK_ERROR_DEVICE_LOST && V.device) vkd_lost_report();
+    /* (2026-10-21, tester: Quadro M1200, the device lost at the 4th frame, every start) a device lost in the first 20 s: this
+     * driver cannot run the game's Vulkan; graphics.ini gets renderer = opengl (F1 > Graphics switches back) and the game
+     * starts again with OpenGL (vk_unavailable) */
+    if (r == VK_ERROR_DEVICE_LOST && nvn_front_frame_next() < 1200 && !getenv("SSBU_RENDERER")) {
+        printf("nvn_vk: the device was lost at frame %lld, at the start: graphics.ini now says renderer = opengl\n", nvn_front_frame_next());
+        fflush(stdout);
+        gfx_ini_set("renderer", "opengl");
+        vk_unavailable();
+    }
     ExitProcess(5);
 }
 /* A call that may fail while running (present path): counted, reported a few times, the frame goes on. */
@@ -253,6 +264,33 @@ static void *vk_sym(const char *name) {
     return p;
 }
 
+/* (2026-10-21, tester: "game not booting error 5": the Vulkan loader had no window surface) Vulkan cannot be used on this PC
+ * (no driver, no surface, no device): unless a renderer was asked for (SSBU_RENDERER), this exe starts again with the
+ * OpenGL renderer, same arguments and standard handles, and this process ends. Otherwise the exit code 5 as before. */
+static void vk_unavailable(void) {
+#ifdef _WIN32
+    const char *e = getenv("SSBU_RENDERER");
+    if (!(e && e[0])) {
+        wchar_t dir[MAX_PATH], pid[16];
+        STARTUPINFOW si; PROCESS_INFORMATION pi;
+        GetCurrentDirectoryW(MAX_PATH, dir);
+        swprintf(pid, 16, L"%lu", GetCurrentProcessId());
+        SetEnvironmentVariableW(L"SSBU_RESTART_WAIT_PID", pid);
+        SetEnvironmentVariableW(L"SSBU_RENDERER", L"gl");
+        memset(&si, 0, sizeof si); si.cb = sizeof si;
+        HANDLE h[3] = {GetStdHandle(STD_INPUT_HANDLE), GetStdHandle(STD_OUTPUT_HANDLE), GetStdHandle(STD_ERROR_HANDLE)};
+        for (int i = 0; i < 3; i++) if (h[i] && h[i] != INVALID_HANDLE_VALUE) SetHandleInformation(h[i], HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
+        si.dwFlags = STARTF_USESTDHANDLES; si.hStdInput = h[0]; si.hStdOutput = h[1]; si.hStdError = h[2];
+        wchar_t *cmd = _wcsdup(GetCommandLineW());
+        printf("nvn_vk: Vulkan cannot be used on this PC: the game starts again with the OpenGL renderer (F1 > Graphics > renderer)\n");
+        fflush(stdout);
+        if (cmd && CreateProcessW(NULL, cmd, NULL, NULL, TRUE, 0, NULL, dir, &si, &pi)) { CloseHandle(pi.hThread); CloseHandle(pi.hProcess); ExitProcess(0); }
+        printf("nvn_vk: starting again with OpenGL FAILED (error %lu)\n", GetLastError());
+        fflush(stdout);
+    }
+#endif
+    ExitProcess(5);
+}
 /* Render thread, once. Returns 1; any failure prints its cause and ends the process with code 5 (as the OpenGL path does). */
 int nvn_vk_init(void *hwnd) {
     static const char *const k_wanted[] = {"VK_KHR_swapchain", "VK_EXT_extended_dynamic_state3", "VK_EXT_vertex_input_dynamic_state", "VK_KHR_push_descriptor", "VK_EXT_custom_border_color",
@@ -261,7 +299,7 @@ int nvn_vk_init(void *hwnd) {
     VkResult r;
     V.hwnd = hwnd;
     V.loader = LoadLibraryA("vulkan-1.dll");
-    if (!V.loader) { printf("nvn_vk: vulkan-1.dll cannot be loaded (error %lu): no Vulkan driver on this PC\n", GetLastError()); fflush(stdout); ExitProcess(5); }
+    if (!V.loader) { printf("nvn_vk: vulkan-1.dll cannot be loaded (error %lu): no Vulkan driver on this PC\n", GetLastError()); fflush(stdout); vk_unavailable(); }
 #define X(ret, name, args) name = vk_sym(#name);
     VKF(X)
 #undef X
@@ -282,7 +320,7 @@ int nvn_vk_init(void *hwnd) {
     uint32_t next = 0, nlayers = 0;
 #ifdef _WIN32
     exts[next++] = "VK_KHR_surface"; exts[next++] = "VK_KHR_win32_surface";
-    if (!has_name(iext, niext, "VK_KHR_surface") || !has_name(iext, niext, "VK_KHR_win32_surface")) { printf("nvn_vk: the Vulkan loader has no VK_KHR_surface / VK_KHR_win32_surface\n"); fflush(stdout); ExitProcess(5); }
+    if (!has_name(iext, niext, "VK_KHR_surface") || !has_name(iext, niext, "VK_KHR_win32_surface")) { printf("nvn_vk: the Vulkan loader has no VK_KHR_surface / VK_KHR_win32_surface\n"); fflush(stdout); vk_unavailable(); }
 #else
     {   /* the surface extensions of SDL's video driver (X11 or Wayland) */
         Uint32 n = 0;
@@ -319,7 +357,7 @@ int nvn_vk_init(void *hwnd) {
     ici.flags = iflags;
 #endif
     r = vkCreateInstance(&ici, NULL, &V.instance);
-    if (r != VK_SUCCESS) vk_fatal("vkCreateInstance", r);
+    if (r != VK_SUCCESS) { printf("nvn_vk: vkCreateInstance failed: %s\n", vk_result_name(r)); fflush(stdout); vk_unavailable(); }
     if (V.validate) {
         vkCreateDebugUtilsMessengerEXT = (void *)vkGetInstanceProcAddr(V.instance, "vkCreateDebugUtilsMessengerEXT");
         vkDestroyDebugUtilsMessengerEXT = (void *)vkGetInstanceProcAddr(V.instance, "vkDestroyDebugUtilsMessengerEXT");
@@ -347,7 +385,7 @@ int nvn_vk_init(void *hwnd) {
     VkPhysicalDevice gpus[16];
     uint32_t ngpu = 16;
     r = vkEnumeratePhysicalDevices(V.instance, &ngpu, gpus);
-    if ((r != VK_SUCCESS && r != VK_INCOMPLETE) || !ngpu) { printf("nvn_vk: no Vulkan device (%s, %u devices)\n", vk_result_name(r), (unsigned)ngpu); fflush(stdout); ExitProcess(5); }
+    if ((r != VK_SUCCESS && r != VK_INCOMPLETE) || !ngpu) { printf("nvn_vk: no Vulkan device (%s, %u devices)\n", vk_result_name(r), (unsigned)ngpu); fflush(stdout); vk_unavailable(); }
     int forced = getenv("SSBU_VK_DEVICE") ? atoi(getenv("SSBU_VK_DEVICE")) : -1, best = -1, best_score = -1;
     uint32_t best_family = 0;
     if (forced < 0 && gfx_options()->gpu[0]) {    /* track O: gpu = <number> | <part of the name> in graphics.ini (the environment switch wins) */
@@ -384,7 +422,7 @@ int nvn_vk_init(void *hwnd) {
                family < 0 ? " - cannot present to the window with a graphics + compute queue" : p.apiVersion < VK_API_VERSION_1_3 ? " - below Vulkan 1.3" : "");
         if (forced >= 0 ? (int)i == forced && usable : score > best_score) { best = (int)i; best_score = score; best_family = (uint32_t)family; }
     }
-    if (best < 0) { printf("nvn_vk: no usable Vulkan 1.3 device%s\n", forced >= 0 ? " (SSBU_VK_DEVICE names one that is not usable)" : ""); fflush(stdout); ExitProcess(5); }
+    if (best < 0) { printf("nvn_vk: no usable Vulkan 1.3 device%s\n", forced >= 0 ? " (SSBU_VK_DEVICE names one that is not usable)" : ""); fflush(stdout); if (forced >= 0) ExitProcess(5); vk_unavailable(); }
     V.gpu = gpus[best]; V.family = best_family;
     vkGetPhysicalDeviceProperties(V.gpu, &V.props);
 
