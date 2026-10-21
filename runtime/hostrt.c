@@ -36,7 +36,9 @@ static const uint64_t g_code_13_0_5[][2] = {         /* 13.0.4 -> 13.0.5 offsets
     {0x653240, 0x653240},       /* entry set-up (debug_mode.c) */
     {0x147f330, 0x147f330},     /* path formatter (newmodule_host.c) */
     {0x1519430, 0x1519430},     /* hook self-test function (hook_host.c) */
+    {0x1780440, 0x17802a0},     /* match controls set-up (debug_mode.c, room rollback: each player's own controls; 63 / 63 words) */
     {0x1788260, 0x17880c0},     /* player record builder (debug_mode.c) */
+    {0x17911dc, 0x17910fc},     /* return address of the room's waiting-stage record build (debug_mode.c; 43 / 43 words) */
     {0x179e440, 0x179e400},     /* select screen table entry copy (debug_mode.c, R3 online: player 2's panel) */
     {0x17df5f0, 0x17df5b0},     /* path sub-builder (newmodule_host.c) */
     {0x17dfe50, 0x17dfe10},     /* path sub-builder 2 (newmodule_host.c) */
