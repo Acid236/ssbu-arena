@@ -145,6 +145,14 @@ def main():
             print('%s was older than %s: copied again' % (a.exe, main_exe))
         else:
             print('note: %s is older than %s and may run an older runtime (--refresh copies it again)' % (a.exe, main_exe))
+    logo = os.path.join(REPO, 'media', 'opensmash.ico')       # the window's icon (display.c reads it beside the exe): a newer one
+    if os.path.isfile(logo) and not (a.linux or a.mac):        # after an update is copied at once (the build copies it only at link)
+        dst = os.path.join(work, 'opensmash.ico')
+        try:
+            if not os.path.isfile(dst) or open(dst, 'rb').read() != open(logo, 'rb').read():
+                shutil.copy2(logo, dst)
+        except OSError:
+            pass
     env = {k: v for k, v in os.environ.items() if not k.startswith(('RECOMP_', 'SSBU_'))}
     romfs = state['dump']['romfs']
     if not os.path.isdir(romfs) and os.path.isdir(os.path.join(a.build, 'dump', 'romfs')):
