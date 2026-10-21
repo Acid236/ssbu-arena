@@ -536,6 +536,7 @@ struct VTex {
     int w, h, d, levels, layers, samples, expand, decode, is3d, feedback, bpb, bw, bh;
     int rs; float sx, sy;                          /* track O: rs = 1 when the image is scaled from the game's texture, smaller or larger (w, h are the image's; sx, sy = image / game; PR #8) */
     VView *views; VTex *next, *prev;
+    VTex *shadow; int shadow_ok;                   /* 2026-10-21 (AMD render bugs): a copy of this depth target for the shaders that sample it while it is bound (depth_copy_on) */
 };
 /* ---- Track O: internal resolution scale (graphics.ini resolution_scale; SSBU_VK_SCALE wins; plan\phases\O1_options.md, session 7).
  * A texture of the screen class (2D, one layer, attachable, the game's size exactly 1920x1080 >> k, k = 0..6) gets an image
@@ -602,8 +603,14 @@ static void vt_layout(VTex *vt, VkImageLayout to) {
     image_barrier(vt->img, vt->aspect, vt->layout, to);
     vt->layout = to;
 }
+static LONG64 g_depth_copies;                         /* depth_shadow: copies made */
 static void vt_check(VTex *vt) { if (vt->magic != 0x56544558) vkd_fail("an image is used after it was destroyed (texture record %p)", (void *)vt); }
 static void vt_destroy(VTex *vt) {
+    if (vt->shadow) {
+        VTex *sh = vt->shadow;
+        for (VView *v = sh->views, *n; v; v = n) { n = v->next; vkDestroyImageView(V.device, v->view, NULL); free(v); }
+        vkDestroyImage(V.device, sh->img, NULL); vmem_free(sh->mem); free(sh); vt->shadow = NULL; R.images_live--;
+    }
     for (VView *v = vt->views, *n; v; v = n) { n = v->next; vkDestroyImageView(V.device, v->view, NULL); free(v); }
     vkDestroyImage(V.device, vt->img, NULL);
     vmem_free(vt->mem);
@@ -1623,6 +1630,62 @@ static void vkd_lost_report(void) {                /* nvn_vk.c vk_fatal: once, w
     }
     fflush(stdout);
 }
+/* 2026-10-21, AMD render bugs (four players on AMD RX 6700 XT / 6750 XT / 9070 XT and an integrated Radeon: stages dark,
+ * posterized or in a white haze; NVIDIA and Intel fine): every frame some stage effects (fog, soft particles: nvn_vk_fb lines)
+ * sample the depth target that is bound to the pass. That was done by keeping the depth image in GENERAL layout, attached
+ * and sampled at once (a feedback loop). Legal for reads, but AMD's depth compression is the suspect. With depth_copy_on()
+ * (AMD by default; SSBU_VK_DEPTHCOPY=1 / 0 forces it) the depth is instead copied once per target binding into a shadow
+ * image of the same format, which the shader samples; the depth target itself stays in its attachment layout. */
+static int depth_copy_on(void) {
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("SSBU_VK_DEPTHCOPY");
+        on = e && e[0] ? atoi(e) != 0 : V.props.vendorID == 0x1002;
+        printf("nvn_vk: depth targets sampled while bound: %s (%s)\n", on ? "a copy is sampled" : "sampled in place (GENERAL layout)", e && e[0] ? "SSBU_VK_DEPTHCOPY" : on ? "AMD: the default there" : "the default");
+    }
+    return on;
+}
+static VTex *depth_shadow(VTex *vt) {                  /* the copy of depth target vt, up to date for this binding; the pass is ended */
+    VTex *sh = vt->shadow;
+    if (!sh) {
+        VkImageCreateInfo ci = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+        VkMemoryRequirements rq;
+        sh = calloc(1, sizeof *sh);
+        *sh = *vt; sh->views = NULL; sh->next = sh->prev = NULL; sh->shadow = NULL; sh->feedback = 0;
+        ci.imageType = VK_IMAGE_TYPE_2D; ci.format = vt->fmt; ci.extent.width = (uint32_t)vt->w; ci.extent.height = (uint32_t)vt->h; ci.extent.depth = 1;
+        ci.mipLevels = (uint32_t)vt->levels; ci.arrayLayers = (uint32_t)vt->layers; ci.samples = VK_SAMPLE_COUNT_1_BIT; ci.tiling = VK_IMAGE_TILING_OPTIMAL;
+        ci.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT; ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE; ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        VkResult r = vkCreateImage(V.device, &ci, NULL, &sh->img);
+        if (r != VK_SUCCESS) vkd_fail("vkCreateImage (depth copy %dx%d format %d): %s", vt->w, vt->h, (int)vt->fmt, vk_result_name(r));
+        vkGetImageMemoryRequirements(V.device, sh->img, &rq);
+        sh->mem = vmem_alloc(rq, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0);
+        VKC(vkBindImageMemory(V.device, sh->img, sh->mem.mem, sh->mem.off));
+        sh->layout = VK_IMAGE_LAYOUT_UNDEFINED;
+        vt->shadow = sh; R.images++; R.images_live++;
+    }
+    if (!vt->shadow_ok) {
+        VkImageCopy rg[32];
+        int n = 0;
+        vt_layout(vt, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        vt_layout(sh, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        for (int l = 0; l < vt->levels && n < 30; l++)
+            for (int a = 0; a < 2; a++) {
+                VkFlags bit = a ? VK_IMAGE_ASPECT_STENCIL_BIT : VK_IMAGE_ASPECT_DEPTH_BIT;
+                if (!(vt->aspect & bit)) continue;
+                memset(&rg[n], 0, sizeof rg[n]);
+                rg[n].srcSubresource.aspectMask = rg[n].dstSubresource.aspectMask = bit;
+                rg[n].srcSubresource.mipLevel = rg[n].dstSubresource.mipLevel = (uint32_t)l;
+                rg[n].srcSubresource.layerCount = rg[n].dstSubresource.layerCount = (uint32_t)vt->layers;
+                rg[n].extent.width = (uint32_t)lvl_(vt->w, l); rg[n].extent.height = (uint32_t)lvl_(vt->h, l); rg[n].extent.depth = 1;
+                n++;
+            }
+        vkCmdCopyImage(R.cmd, vt->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, sh->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, (uint32_t)n, rg);
+        vt->shadow_ok = 1;
+        g_depth_copies++;
+    }
+    vt_layout(sh, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    return sh;
+}
 /* The image view and sampler of one declared sampler of stage s. May end the pass (upload, layout change). */
 static void resolve_sampler(int s, VStage *v, int i) {
     unsigned u = v->smp[i].unit;
@@ -1644,7 +1707,10 @@ static void resolve_sampler(int s, VStage *v, int i) {
         int ok = have == dim || (dim == DIM_2D && (have == DIM_2DA || have == DIM_CUBE || have == DIM_CUBEA)) || (dim == DIM_2DA && (have == DIM_2D || have == DIM_CUBE || have == DIM_CUBEA)) ||
                  (dim == DIM_CUBE && have == DIM_CUBEA) || (dim == DIM_CUBEA && have == DIM_CUBE) || (dim == DIM_1D && have == DIM_1DA) || (dim == DIM_1DA && have == DIM_1D) ||
                  ((dim == DIM_CUBE || dim == DIM_CUBEA) && (have == DIM_2DA) && e.nlay >= 6 && vt->w == vt->h);
-        if (ok && vt->samples == 1) {
+        if (ok && vt->samples == 1 && attached && R.depth.tex == t && vt->aspect != VK_IMAGE_ASPECT_COLOR_BIT && !vt->is3d && have_targets_live() && depth_copy_on()) {
+            VTex *sh = depth_shadow(vt);              /* (AMD render bugs) the copy, not the bound image */
+            g_dtex[g_ndtex].view = vt_view(sh, &e, dim, 0); g_dtex[g_ndtex].layout = sh->layout; if (di) di->dummy = 0;
+        } else if (ok && vt->samples == 1) {
             if (attached && have_targets_live()) { if (!vt->feedback) { vt->feedback = 1; R.feedback++; pass_end();
                     {   /* 2026-10-20 (render bugs V): the first feedback passes in the log: which shader samples which bound target */
                         static int nfb;
@@ -3113,7 +3179,7 @@ static void exec(const Cmd *m, int depth) {
         int n = (int)a[0] < 8 ? (int)a[0] : 8;
         pass_end();
         for (int i = 0; i < R.ncol; i++) if (R.col[i].tex && R.col[i].tex->vk) ((VTex *)R.col[i].tex->vk)->feedback = 0;
-        if (R.depth.tex && R.depth.tex->vk) ((VTex *)R.depth.tex->vk)->feedback = 0;
+        if (R.depth.tex && R.depth.tex->vk) { ((VTex *)R.depth.tex->vk)->feedback = 0; ((VTex *)R.depth.tex->vk)->shadow_ok = 0; }
         memset(R.col, 0, sizeof R.col); memset(&R.depth, 0, sizeof R.depth);
         R.ncol = 0; R.have_targets = 0;
         for (int i = 0; i < n; i++) if (col[i].tex && !col[i].tex->dead) { R.col[i] = col[i]; R.ncol = i + 1; R.have_targets = 1; }
