@@ -3574,6 +3574,7 @@ static int g_pic[4];          /* where vk_present2 put the game picture in the s
  * as fractions of the picture); otherwise (room, character select, 3-4 players) a short list at the top left.
  * Dark copy one dot down-right under the light text, so it reads on any background. */
 int ldn_ping_overlay(int *ms, int max);                 /* ldn_online.inc (nnnet.c) */
+int net_ping_overlay(int *ms, int max);                 /* net_relay.c: the same values online through the lobby server */
 /* 2026-10-19: drawn the way fighting games show it next to the player (the owner's picture): a signal icon of four
  * bars and the number, both in the colour of the quality (green up to 60 ms, yellow up to 120, red above, or no answer),
  * with a dark outline; bars lit: 4 up to 40 ms, 3 up to 80, 2 up to 130, else 1. */
@@ -3614,6 +3615,7 @@ static void ldn_ping_item(uint32_t index, int x, int y, int dot, int ms) {    /*
 }
 static void ldn_ping_draw(uint32_t index) {
     int ms[8], n = ldn_ping_overlay(ms, 8);
+    if (n <= 0) n = net_ping_overlay(ms, 8);
     if (n <= 0) return;
     ovl_make();
     int X0 = g_pic[0], Y0 = g_pic[1], W = g_pic[2] > 0 ? g_pic[2] : (int)V.extent.width, H = g_pic[3] > 0 ? g_pic[3] : (int)V.extent.height;

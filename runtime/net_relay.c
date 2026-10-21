@@ -473,6 +473,8 @@ int net_rb_ready(void) { return g_cfg > 0 && g_joined && g_sock != INVALID_SOCKE
  * heard the other (the host answers only a CHOICE). Now the destination is the other player of this Local Wireless room
  * (nnldn.c), else the address learnt; 0 on the public code of a lobby SERVER = nothing can arrive (the in-game lobbies of HOST / JOIN / LAN pass 0 on): not sent (counted, the notice says so). */
 uint32_t nnldn_other_ip(void);
+int nnldn_node_ips(uint32_t *ips, int max);          /* nnldn.c: the room's node addresses (ping overlay) */
+static void peer_rtts(const uint8_t *p, int count, int len);      /* the ping overlay (below) */
 static const char *ip_text(uint32_t ip, char *b);
 static volatile uint32_t g_rb_match_peer;              /* (R3 net3) the opponent of the last rollback-match search (lobby 1.4), 0 = none */
 static volatile LONG64 g_rb_rx_other;                  /* (R3 net3) rollback messages from another player than that opponent: dropped */
@@ -1399,7 +1401,7 @@ static DWORD WINAPI client_thread(LPVOID unused) {
         }
         if (!g_joined && t - last_join >= 500) { send_join(); last_join = t; }
         if (g_joined && t - last_ping >= 1000) {
-            uint8_t p[4 + 8 + 8 + 1];
+            uint8_t p[4 + 8 + 8 + 1 + 2];                   /* (+2: our round trip to the lobby, for the others' ping overlay; an older lobby ignores it) */
             int nd = 0;
             hdr(p, T_PING);
             s64(p + 4, g_cookie);
@@ -1408,6 +1410,7 @@ static DWORD WINAPI client_thread(LPVOID unused) {
             for (int i = 0; i < g_npeers; i++) nd += fresh(&g_peers[i], t);
             ReleaseSRWLockShared(&g_peers_lock);
             p[20] = (uint8_t)nd;
+            { LONG me = g_ping; s16(p + 21, me < 0 ? 0xFFFF : me > 65534 ? 65534 : (uint16_t)me); }
             tx(p, sizeof p, &g_lobby);
             last_ping = t;
         }
@@ -1457,6 +1460,7 @@ static DWORD WINAPI client_thread(LPVOID unused) {
                 InterlockedExchange(&g_players, g16(buf + 12));
                 InterlockedExchange(&g_rooms, g16(buf + 14));
                 if (n >= 20) { InterlockedExchange(&g_searching, g16(buf + 16)); InterlockedExchange(&g_code_players, g16(buf + 18)); }   /* O2 (a newer lobby) */
+                if (n >= 23 && buf[20] == 'P' && buf[21] == 'R') peer_rtts(buf + 23, buf[22], n - 23);      /* rb_lobby.c: the others' round trips */
             }
             break;
         case T_MATCH_STATE:
@@ -1534,6 +1538,53 @@ void net_start(void) {
         } else say("no UDP socket (error %d): online play unavailable", WSAGetLastError());
     }
     InitOnceComplete(&once, 0, NULL);
+}
+
+/* ---------------------------------------------------------------- the ping overlay (nvn_vk_draw.c ldn_ping_draw)
+ * Every game puts its round trip to the lobby in its PING; our lobby (tools/net/rb_lobby.c) answers each PONG with the
+ * round trips of the players of the same Local Wireless room or rollback match (vip u32, ms u16). net_ping_overlay()
+ * hands the renderer one value per player slot: each player's ping to the server, -1 not known yet, -2 no player there.
+ * Shown in a room (its players in node order) and in an online rollback match (players 1 and 2). SSBU_NET_PING=0: off. */
+#define PRTT_MAX 16
+static struct { uint32_t vip; int ms; uint64_t at; } g_prtt[PRTT_MAX];
+static SRWLOCK g_prtt_lock = SRWLOCK_INIT;
+static void peer_rtts(const uint8_t *p, int count, int len) {
+    uint64_t t = ms_now();
+    AcquireSRWLockExclusive(&g_prtt_lock);
+    for (int k = 0; k < count && (k + 1) * 6 <= len; k++) {
+        uint32_t vip = g32(p + 6 * k); int ms = g16(p + 6 * k + 4), free_i = -1, i;
+        for (i = 0; i < PRTT_MAX && g_prtt[i].vip != vip; i++) if (free_i < 0 && (!g_prtt[i].vip || t - g_prtt[i].at > 15000)) free_i = i;
+        if (i == PRTT_MAX) i = free_i;
+        if (i >= 0) { g_prtt[i].vip = vip; g_prtt[i].ms = ms == 0xFFFF ? -1 : ms; g_prtt[i].at = t; }
+    }
+    ReleaseSRWLockExclusive(&g_prtt_lock);
+}
+static int peer_rtt(uint32_t vip) {
+    int ms = -1; uint64_t t = ms_now();
+    if (!vip || !TryAcquireSRWLockShared(&g_prtt_lock)) return -1;
+    for (int i = 0; i < PRTT_MAX; i++) if (g_prtt[i].vip == vip && t - g_prtt[i].at < 15000) { ms = g_prtt[i].ms; break; }
+    ReleaseSRWLockShared(&g_prtt_lock);
+    return ms;
+}
+int net_ping_overlay(int *ms, int max) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("SSBU_NET_PING"); on = !(e && e[0] == '0'); }
+    if (!on || g_cfg <= 0 || !g_joined || max < 2) return 0;
+    int rbn_started(void), rbn_local_player(void);
+    if (rbn_started()) {                                  /* an online rollback match: players 1 and 2 */
+        int me = rbn_local_player() ? 1 : 0;
+        uint32_t other = nnldn_other_ip(); if (!other) other = g_rb_match_peer; if (!other) other = g_rb_peer;
+        ms[me] = (int)g_ping; ms[1 - me] = peer_rtt(other);
+        return 2;
+    }
+    uint32_t ips[8]; int nodes = nnldn_node_ips(ips, 8), n = 0;      /* a Local Wireless room: its players in node order */
+    for (int i = 0; i < nodes && i < max; i++) {
+        ms[i] = -2;
+        if (!ips[i]) continue;
+        ms[i] = ips[i] == g_ip ? (int)g_ping : peer_rtt(ips[i]);
+        n = i + 1;
+    }
+    return n;
 }
 
 /* net_stats.h: the F2 overlay's online fields, read once per drawn frame on the render thread; never blocks.

@@ -33,3 +33,4 @@ void net_match_find(void) {}
 void net_match_find_rb(void) {}
 void net_match_cancel(void) {}
 void net_match_get(NetMatch *o) { memset(o, 0, sizeof *o); o->state = MM_OFFLINE; o->players = o->searching = o->code_players = -1; }
+int net_ping_overlay(int *ms, int max) { (void)ms; (void)max; return 0; }      /* no online play in this build */

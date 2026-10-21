@@ -104,9 +104,12 @@ $tip.SetToolTip($room, 'Chi usa lo stesso codice si trova: stesse stanze nel Wir
 $rbOn = New-Object System.Windows.Forms.CheckBox; $rbOn.Text = 'Rollback netcode (Smash > Versus trova l''avversario)'; $rbOn.Location = New-Object System.Drawing.Point(130, 106)
 $rbOn.Size = New-Object System.Drawing.Size(380, 22); $rbOn.Checked = ($L['rollback'] -ne 'off'); $go.Controls.Add($rbOn)
 $tip.SetToolTip($rbOn, 'Partite online con il rollback: in Smash > Versus il server ti abbina a chi ha il tuo stesso codice. Le stanze del Wireless locale usano invece il netcode del gioco.')
+$pingOn = New-Object System.Windows.Forms.CheckBox; $pingOn.Text = 'Mostra il ping a schermo'; $pingOn.Location = New-Object System.Drawing.Point(130, 22)
+$pingOn.Size = New-Object System.Drawing.Size(200, 22); $pingOn.Checked = ($L['ping'] -ne 'off'); $go.Controls.Add($pingOn)
+$tip.SetToolTip($pingOn, 'In ogni partita online: accanto a ogni giocatore il suo ping verso il server (verde fino a 60 ms, giallo fino a 120, rosso oltre).')
 $onlineHelp = Add-Label $go '' 12 128 500
 function Update-Online {
-    $e = $onlineOn.Checked -and $HasOnline; $server.Enabled = $e; $room.Enabled = $e; $rbOn.Enabled = $e
+    $e = $onlineOn.Checked -and $HasOnline; $server.Enabled = $e; $room.Enabled = $e; $rbOn.Enabled = $e; $pingOn.Enabled = $e
     $onlineHelp.Text = $(if (-not $e) { 'Online spento: si gioca in locale.' } elseif ($rbOn.Checked) { 'Rollback: Smash > Versus. Stanze: Wireless locale (netcode del gioco).' } else { 'Stanze del Wireless locale tramite il server (netcode del gioco).' })
 }
 if (-not $HasOnline) { $onlineOn.Checked = $false; $onlineOn.Enabled = $false }
@@ -297,7 +300,7 @@ function Save-Settings {
     Set-Content -Path $LauncherIni -Encoding ASCII -Value @('# written by the launcher', ('saves = ' + $Saves), ('nickname = ' + $n),
         ('competitive = ' + $(if ($compOn.Checked) { 'on' } else { 'off' })),
         ('online = ' + $(if ($onlineOn.Checked) { 'on' } else { 'off' })), ('server = ' + $server.Text.Trim()), ('code = ' + $room.Text.Trim()),
-        ('rollback = ' + $(if ($rbOn.Checked) { 'on' } else { 'off' })))
+        ('rollback = ' + $(if ($rbOn.Checked) { 'on' } else { 'off' })), ('ping = ' + $(if ($pingOn.Checked) { 'on' } else { 'off' })))
     $gfx = @{ aspect = @('keep', 'stretch')[[Math]::Max(0, $aspect.SelectedIndex)]; window = @('windowed', 'borderless', 'fullscreen')[[Math]::Max(0, $winMode.SelectedIndex)]
              latency = 'normal' }      # input latency: always normal (the option is gone)
     if ($winSize.Text.Trim() -match '^(\d{3,5})\s*[xX*]\s*(\d{3,5})$') { $gfx['width'] = $Matches[1]; $gfx['height'] = $Matches[2] }
@@ -370,11 +373,12 @@ $play = Add-Button $f 'GIOCA' 392 746 140 {
     if ($cacheMark -eq 0) { Say 'Primo avvio: prima di giocare il gioco prepara gli shader per questa scheda video (qualche minuto).' }
     # online through the lobby server (runtime/net_relay.c), relay only; rollback (runtime/rb_net.c) in Smash > Versus
     $runExe = $Exe
-    foreach ($v in @('SSBU_ONLINE', 'SSBU_ONLINE_CODE', 'SSBU_ONLINE_NAME', 'SSBU_ONLINE_DIRECT', 'SSBU_NICKNAME', 'SSBU_RB_NET', 'SSBU_R1_GAMEDLL', 'SSBU_NRO_BIN')) { Remove-Item "env:$v" -ErrorAction SilentlyContinue }
+    foreach ($v in @('SSBU_ONLINE', 'SSBU_ONLINE_CODE', 'SSBU_ONLINE_NAME', 'SSBU_ONLINE_DIRECT', 'SSBU_NICKNAME', 'SSBU_RB_NET', 'SSBU_R1_GAMEDLL', 'SSBU_NRO_BIN', 'SSBU_NET_PING')) { Remove-Item "env:$v" -ErrorAction SilentlyContinue }
     if ($onlineOn.Checked -and $HasOnline) {
         $env:SSBU_ONLINE = $server.Text.Trim(); $env:SSBU_ONLINE_NAME = $name.Text.Trim(); $env:SSBU_NICKNAME = $name.Text.Trim()
         $env:SSBU_ONLINE_CODE = $(if ($room.Text.Trim()) { $room.Text.Trim() } else { 'public' })
         $env:SSBU_ONLINE_DIRECT = '0'                                          # never a direct path: no player sees another one's address
+        $env:SSBU_NET_PING = $(if ($pingOn.Checked) { '1' } else { '0' })      # each player's ping to the server, next to the player (nvn_vk_draw.c)
         if ($rbOn.Checked) {
             $env:SSBU_RB_NET = 'net'
             if ($RbPair) { $runExe = $RbExe; $env:SSBU_R1_GAMEDLL = 'ssbu_game_r1.dll'; $env:SSBU_NRO_BIN = 'nro_bin_eh_o2r1' }

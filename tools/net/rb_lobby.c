@@ -90,6 +90,7 @@ struct Client {
     Match *match;
     int has_final; uint32_t f_sid; int f_state, f_role; uint32_t f_peer; char f_name[NAME_LEN + 1];
     int kind; uint32_t rb_peer;
+    int rtt;                                    /* its round trip to this lobby (from its PING), ms; -1 unknown */
 };
 
 static Client g_c[MAX_CLIENTS];
@@ -311,7 +312,7 @@ static void on_join(const uint8_t *p, int n, const struct sockaddr_in *at, Clien
         c->used = 1; c->at = *at; memcpy(c->nonce, p + 4, 8); c->ip = ip;
         memcpy(c->name, tmp.name, sizeof c->name); memcpy(c->code, tmp.code, sizeof c->code);
         memcpy(c->build, tmp.build, BUILD_LEN); c->build_len = tmp.build_len;
-        c->cookie = rnd64(); c->mods_len = -1; c->kind = KIND_ROOM;
+        c->cookie = rnd64(); c->mods_len = -1; c->kind = KIND_ROOM; c->rtt = -1;
         at_put(c); g_by_ip[ip & 0xFFFF] = free_i + 1; g_nclients++; if (free_i + 1 > g_hi) g_hi = free_i + 1;
         say("%s joined (code '%s', build %.*s) as %s", c->name, c->code, c->build_len, (const char *)c->build, vip(ip));
     }
@@ -499,9 +500,18 @@ static void packet(const uint8_t *p, int n, const struct sockaddr_in *at) {
             if (same_part(x, c)) { same++; searching += x->searching; if (x->has_room) rooms++; }
             if (same_code(x, c)) code++;
         }
-        uint8_t b[4 + 8 + 8], *q = hdr(b, PONG); q = wbytes(q, p + 12, 8);
-        q = w16(q, (unsigned)same); q = w16(q, (unsigned)rooms); q = w16(q, (unsigned)searching); w16(q, (unsigned)code);
-        csend(b, sizeof b, c);
+        if (n >= 23) { unsigned r = (unsigned)p[21] << 8 | p[22]; c->rtt = r == 0xFFFF ? -1 : (int)r; }     /* (our games) its round trip */
+        /* + "PR", count, (vip u32, ms u16) x count: the round trips of the players of its room and of its rollback opponent,
+         * for their ping overlay (an older game reads the first 20 bytes only) */
+        uint8_t b[4 + 8 + 8 + 3 + 8 * 6], *q = hdr(b, PONG); q = wbytes(q, p + 12, 8);
+        q = w16(q, (unsigned)same); q = w16(q, (unsigned)rooms); q = w16(q, (unsigned)searching); q = w16(q, (unsigned)code);
+        Client *o = room_of(c), *m[9]; int nm = o ? members(o, m) : 0, k = 0;
+        Client *rb = c->rb_peer ? by_ip(c->rb_peer) : NULL;
+        if (rb && rb != c && same_part(rb, c)) { int dup = 0; for (int i = 0; i < nm; i++) dup |= m[i] == rb; if (!dup) m[nm++] = rb; }
+        uint8_t *cnt = q + 2; q[0] = 'P'; q[1] = 'R'; q += 3;
+        for (int i = 0; i < nm && k < 8; i++) if (m[i] != c) { q = w32(q, m[i]->ip); q = w16(q, m[i]->rtt < 0 ? 0xFFFFu : (unsigned)m[i]->rtt); k++; }
+        *cnt = (uint8_t)k;
+        csend(b, (size_t)(q - b), c);
     } else if (kind == LEAVE && ck) drop(c, "left");
     else if (kind == LIST && n >= 16 && ck) on_list(c, p + 12, n >= 17 && (p[16] & 1));
     else if (kind == ROOMS && n >= 16 && ck) on_rooms(c, p + 12);

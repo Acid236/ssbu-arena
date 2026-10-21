@@ -492,6 +492,14 @@ uint32_t nnldn_other_ip(void) {
     ReleaseSRWLockShared(&L.lock);
     return n == 1 ? r : 0;
 }
+/* the address of each node of this player's room (0 = no node in that slot), in the room's node order; 0 = not in a room */
+int nnldn_node_ips(uint32_t *ips, int max) {
+    int n = 0;
+    AcquireSRWLockShared(&L.lock);
+    if (in_network()) for (int i = 0; i < 8 && i < max; i++) { ips[i] = L.net[NODE(i) + 0xb] ? u32at(L.net + NODE(i)) : 0; if (ips[i]) n = i + 1; }
+    ReleaseSRWLockShared(&L.lock);
+    return n;
+}
 int nnldn_role(void) { int s = L.state; return s == LS_AP_CREATED ? 1 : s == LS_STA_CONNECTED ? 2 : 0; }      /* (R3 pub1) 1 = this game made the room, 2 = it joined one, 0 = no room */
 int nnldn_has_node(uint32_t ip) {
     AcquireSRWLockShared(&L.lock);
