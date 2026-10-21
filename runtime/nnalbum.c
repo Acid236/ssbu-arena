@@ -388,6 +388,7 @@ static void album_ReadAlbumMovieStream(Ctx *c) {                                
     if (i < 0 || (int64_t)A4 < 0) r = CAPS_RESULT(i < 0 ? 23 : 8);                   /* [suyu] ResultOutOfRange */
     else if (A1 && A2) {
         uint8_t *dst = (uint8_t *)(uintptr_t)A1;
+        { void r1_wrote(uint64_t, uint64_t); r1_wrote(A1, A2); }      /* R1 / R4 (r1_state.c): the kernel writes these guest pages */
         while (got < A2 && A4 + got < g_streams[i].size) {
             OVERLAPPED ov;
             DWORD n = 0, want = (DWORD)(A2 - got > 0x1000000 ? 0x1000000 : A2 - got);

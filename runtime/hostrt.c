@@ -28,6 +28,8 @@ MainLayout g_main;
 static const uint64_t g_code_13_0_5[][2] = {         /* 13.0.4 -> 13.0.5 offsets from GUEST_BASE, sorted by the first */
     {0x0382a0, 0x0382a0},       /* FUN_71000382a0 (nvn_gl.c), 2,884 bytes in both */
     {0x047d20, 0x047d20},       /* clock read return address (nnsdk.c, fixed seed) */
+    {0x081980, 0x081980},       /* allocation site, caller of a 1.4 MB block (rb_learned.c, the presentation pool) */
+    {0x0a3fd8, 0x0a3fd8},       /* allocation site, caller of an 8 MB block (rb_learned.c) */
     {0x138534, 0x138534},       /* clock read return address (nnsdk.c, fixed seed) */
     {0x2c55e0, 0x2c55e0},       /* nninitStartup */
     {0x2c5620, 0x2c5620},       /* nnMain */
@@ -51,6 +53,7 @@ static const uint64_t g_code_13_0_5[][2] = {         /* 13.0.4 -> 13.0.5 offsets
     {0x3548240, 0x35487f0}, /* job runner (r1_ring.c, profile 2) */
     {0x3549170, 0x3549720}, /* worker kick 2 (r1_state.c) */
     {0x354c720, 0x354ccd0}, /* worker kick (r1_state.c) */
+    {0x3559e08, 0x355a3b8},     /* allocation site of an 8 MB block (rb_learned.c) */
     {0x355b540, 0x355baf0}, /* EffectManager update (r1_ring.c, profile 2) */
     {0x3569c70, 0x356a220}, /* pad sentinel reset (r1_ring.c, profile 2) */
     {0x356d7a0, 0x356dd50}, /* rollback re-run / snapshot ring (r1_ring.c, r1_state.c), test switches only */
@@ -90,10 +93,12 @@ static const uint64_t g_code_13_0_5[][2] = {         /* 13.0.4 -> 13.0.5 offsets
     {0x374c5b8, 0x374cb68}, /* render loop: logic call 2 (r1_state.c) */
     {0x374e000, 0x374e5b0}, /* rollback re-run / snapshot ring (r1_ring.c, r1_state.c), test switches only */
     {0x375ea70, 0x375f020}, /* input dispatch (r1_ring.c, profile 2) */
+    {0x3760cf8, 0x37612a8},     /* allocation site of the 1.4 MB blocks (rb_learned.c) */
     {0x37857f0, 0x3785da0}, /* rollback re-run / snapshot ring (r1_ring.c, r1_state.c), test switches only */
     {0x37a3ea0, 0x37a4450}, /* message text (newmodule_host.c) */
     {0x37a3fc0, 0x37a4570}, /* message label exists (newmodule_host.c) */
     {0x37f0590, 0x37f0b40}, /* submission step (r1_state.c) */
+    {0x3816944, 0x3816ef4},     /* allocation site of the graphics 16 MB buffer (rb_learned.c) */
     {0x3828300, 0x38288b0},     /* function with catch (...) (cxxrt_selftest.h) */
     {0x382b690, 0x382bc40},     /* call site in it */
     {0x382cb34, 0x382d0e4},     /* its landing pad */
@@ -105,8 +110,11 @@ static const uint64_t g_code_13_0_5[][2] = {         /* 13.0.4 -> 13.0.5 offsets
     {0x386fc30, 0x38701e0},     /* graphics frame end (fighter_host.c, SSBU_DETERMINISTIC) */
     {0x38fae10, 0x38fb3c0},     /* luaD_throw */
     {0x38faf00, 0x38fb4b0},     /* luaD_rawrunprotected */
+    {0x392dc40, 0x392e1f0},     /* jemalloc posix_memalign (rb_learned.c) */
     {0x392dce0, 0x392e290},     /* je_aligned_alloc (the game's memalign) */
+    {0x392dd80, 0x392e330},     /* jemalloc realloc (rb_learned.c) */
     {0x392e590, 0x392eb40},     /* free_default (the game's free) */
+    {0x392e8a0, 0x392ee50},     /* jemalloc malloc_size (rb_learned.c) */
     {0x39a3e70, 0x39a4420},     /* zstd: free stream (nvn_vk_store.c) */
     {0x39a4040, 0x39a45f0},     /* zstd: decompress stream (nvn_vk_store.c) */
     {0x39bfb30, 0x39c00e0}, /* raw copy of uncompressed files (loose_files.c) */
