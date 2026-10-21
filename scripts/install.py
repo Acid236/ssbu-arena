@@ -207,7 +207,7 @@ def stream(cmd, env=None, cwd=None, on_line=None, hb=None, prefix=''):
                 last = time.time()
                 h = hb()
                 if h:
-                    PROG.emit(ev='progress', id=h[0], done=int(h[1]), total=int(h[2]), est=True)
+                    PROG.emit(ev='progress', id=h[0], done=int(h[1]), total=int(h[2]), est=h[3] if len(h) > 3 else True)
             continue
         if line is None:
             break
@@ -938,9 +938,34 @@ def step_build(cx, P):
             P.start(s)
             P.end(s, 'dry', 'would run')
 
+    def compiled(s):
+        """(done, total) files of this run of the step from its log (build.py prints "  N/M   Ts elapsed" after the line
+        "sources: S   to compile: M"), or None. Before, the window showed seconds against the estimate (2835 / 2660)."""
+        if s != 'compile':
+            return None
+        try:
+            with open(os.path.join(BUILD, 'logs', 'compile.log'), 'rb') as f:
+                f.seek(0, 2)
+                f.seek(max(0, f.tell() - 262144))
+                t = f.read().decode('utf-8', 'replace')
+        except OSError:
+            return None
+        i = t.rfind('sources: ')
+        m = re.match(r'sources: \d+\s+to compile: (\d+)', t[i:]) if i >= 0 else None
+        if not m or not int(m.group(1)):
+            return None
+        n = re.findall(r'^\s+(\d+)/\d+\s+\d+s elapsed', t[i:], re.M)
+        return (int(n[-1]) if n else 0, int(m.group(1)))
+
     def hb():
         s = cur['id']
-        return (s, time.time() - P.t0.get(s, time.time()), est(s)) if s in ('compile', 'nro', 'lift', 'link') else None
+        if s not in ('compile', 'nro', 'lift', 'link'):
+            return None
+        c = compiled(s)
+        if c:
+            return (s, c[0], c[1], False)
+        e = est(s)
+        return (s, min(time.time() - P.t0.get(s, time.time()), 0.95 * e), e)      # seconds: never past the estimate
     rc, tail = stream(cmd, on_line=on_line, hb=hb, prefix='   ')
     if rc:
         if cur['id']:

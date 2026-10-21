@@ -129,7 +129,7 @@ def cmd_compile(jobs, force):
             if code:
                 failed.append(name)
                 print('FAILED %s\n%s' % (name, err), flush=True)
-            if done % 50 == 0 or done == len(todo):
+            if done % 10 == 0 or done == len(todo):
                 print('  %d/%d   %.0fs elapsed   %.0fs compiler time' % (done, len(todo), time.time() - t0, cpu), flush=True)
     # a file that failed while many compilers ran at once usually ran out of memory (clang crashes "due to signal" on the
     # biggest files): those are compiled again with far fewer at a time, then one by one, before the step gives up
