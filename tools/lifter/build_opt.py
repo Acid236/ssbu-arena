@@ -53,7 +53,7 @@ EXTRA = ['-ffp-contract=off'] + os.environ.get('RECOMP_CFLAGS', '').split()
 # sources, same floating-point flags; a file whose inlined compile fails is compiled again without it (compile_file).
 INLINE_FLAG = '-Dinline=__inline__ __attribute__((always_inline))'
 INLINE = os.environ.get('RECOMP_INLINE', '0') not in ('', '0')      # the game code only (cmd_main); the script modules keep EXTRA
-INLINE_LIMIT = float(os.environ.get('RECOMP_INLINE_LIMIT', '45'))   # seconds an inlined compile may take; longer: the file is compiled without
+INLINE_LIMIT = float(os.environ.get('RECOMP_INLINE_LIMIT', '20'))   # seconds an inlined compile may take; longer: the file is compiled without
 OPTNONE_LINES = int(os.environ.get('RECOMP_OPTNONE_LINES', '20000'))
 TIME_LIMIT = float(os.environ.get('RECOMP_TIME_LIMIT', '180'))
 # Linux build: address-space limit per compiler, bytes (0: none). Set by limit_memory(): the most one compiler may get.
@@ -307,7 +307,7 @@ _jobs = [0]
 
 
 def compile_file_inline(src, obj, base_flags, time_limit=None):
-    """With RECOMP_INLINE: ONE inlined compile with a short time limit (RECOMP_INLINE_LIMIT, 45 s); a file that takes longer
+    """With RECOMP_INLINE: ONE inlined compile with a short time limit (RECOMP_INLINE_LIMIT, 20 s); a file that takes longer
     (the biggest generated files: inlining made the whole game compile 2-4x slower, testers 2026-10-21 "40 min -> over an
     hour") or fails is compiled the normal way (compile_file, its own ladder), so the slowdown per file is bounded. The
     files that compile fast, most of them, keep the faster code. Without RECOMP_INLINE: compile_file."""
