@@ -2,11 +2,9 @@
  *
  * From the moment the window exists until the game's first present, nothing draws into it: the boot (main.elf, the game
  * DLL, the Vulkan device and its pipeline cache, the container store, the game's own boot) left it black for seconds, and
- * on a first start for minutes. The window thread paints it meanwhile with GDI+: the owner's Donkey Kong silhouette
- * (media/loading_kong.png) with his arm (media/loading_arm.png) turning counter-clockwise around the shoulder, winding up
- * the Giant Punch, small in the bottom-right corner on black, and beside it the step the title bar shows
- * (display_title_note) when one is known. Both PNGs were rendered from the owner's SVGs at 4 px per SVG unit, the whole
- * viewBox each, so the constants below are in SVG units.
+ * on a first start for minutes. The window thread paints Kirby's Inhale hitbox animation with GDI+, small in the
+ * bottom-right corner on black, beside the current boot step. tools/ui/loading_inhale.py prepares its transparent
+ * atlas from Ultimate Frame Data's original loop, with subtle breathing and cyan suction particles.
  *
  * It stops for good at the first present (display_present_plan / display_before_present / display_pace, game's thread),
  * under a lock the painter holds while it paints: once the first present has begun, no GDI pixel is drawn into the window
@@ -14,23 +12,13 @@
  * no PNG, no gdiplus.dll, a test window off-screen or SSBU_LOADING_ANIM=0: the window stays black as before. Host only:
  * nothing the game reads changes. */
 
-/* ---- the art, as the owner approved it (2026-10-21; his reference: Pictures\OpenSmash\loading\kong_arm_v4_fast.gif):
- * the arm's point LA_ARM_PIN (arm SVG units; bottom-left of the arm, outside its shape) is put on Kong's shoulder
- * LA_KONG_PIN (kong SVG units) and the arm turns around it, counter-clockwise, one turn in LA_TURN_MS. Drawn in this
- * order: the arm (behind), Kong's solid black silhouette (media/loading_kong_back.png: Kong's outline closed and filled,
- * so the arm never shows through his eyes, mouth or inner lines), Kong. (At 8 px per unit: pivot (400, 300) px on Kong,
- * (0, 320) px on the arm.) */
-#define LA_ARM_PIN_X 0.0f
-#define LA_ARM_PIN_Y 40.0f
-#define LA_KONG_PIN_X 50.0f
-#define LA_KONG_PIN_Y 37.5f
-#define LA_TURN_MS 600                     /* one turn of the arm: 600 degrees a second */
-#define LA_ARM_REACH_UP 13.0f              /* the arm's turn goes this far above Kong's viewBox (its farthest point is 50 units from the pivot) */
-#define LA_KONG_W 104.34f                  /* the viewBoxes */
-#define LA_KONG_H 105.13f
-#define LA_ARM_W 49.28f
-#define LA_ARM_H 41.89f
-#define LA_SIZE 0.15f                      /* the kong viewBox's height, of the client height */
+/* Atlas dimensions match media/loading_kirby.json. All frame selection uses wall time, independent of boot work. */
+#define LA_FRAME_W 384
+#define LA_FRAME_H 256
+#define LA_COLS 10
+#define LA_FRAMES 60
+#define LA_FPS 30
+#define LA_SIZE 0.17f                      /* whole animation box, of the client height */
 #define LA_MARGIN 0.025f                   /* from the bottom-right corner, of the client height */
 
 typedef struct { UINT32 version; void *debug_cb; BOOL no_bg_thread, no_codecs; } LaGdipInput;
@@ -38,17 +26,16 @@ typedef int (WINAPI *la_startup_t)(ULONG_PTR *, const LaGdipInput *, void *);
 typedef int (WINAPI *la_load_t)(const WCHAR *, void **);
 typedef int (WINAPI *la_from_hdc_t)(HDC, void **);
 typedef int (WINAPI *la_set_t)(void *, int);
-typedef int (WINAPI *la_xy_t)(void *, float, float, int);
-typedef int (WINAPI *la_rot_t)(void *, float, int);
-typedef int (WINAPI *la_draw_t)(void *, void *, float, float, float, float);
+typedef int (WINAPI *la_draw_t)(void *, void *, float, float, float, float, float, float, float, float, int, void *, void *, void *);
+typedef int (WINAPI *la_size_t)(void *, UINT *);
 typedef int (WINAPI *la_del_t)(void *);
-typedef int (WINAPI *la_reset_t)(void *);
 static struct {
-    la_from_hdc_t from_hdc; la_set_t smoothing, interp, pixoff; la_xy_t translate, scale; la_rot_t rotate; la_draw_t draw; la_del_t del; la_reset_t reset;
-    void *kong, *arm, *back;
+    la_from_hdc_t from_hdc; la_set_t smoothing, interp, pixoff; la_draw_t draw; la_del_t del;
+    void *kirby;
     int on;                                /* window thread: painting (timer running) */
+    volatile int ready;                    /* gdiplus and the atlas are loaded */
     RECT last;                             /* the client part painted last (bottom-right; the timer repaints it) */
-    HFONT font; int font_h;
+    HFONT font, title; int font_h;         /* title: Barlow Condensed ExtraBold Italic (arena_fonts\ beside the exe), else bold Segoe UI */
     LARGE_INTEGER t0;
 } LA;
 static SRWLOCK g_la_lock = SRWLOCK_INIT;
@@ -95,27 +82,28 @@ static void la_start(HWND h, int visible) {
     LA.smoothing = g ? (la_set_t)(void *)GetProcAddress(g, "GdipSetSmoothingMode") : NULL;
     LA.interp = g ? (la_set_t)(void *)GetProcAddress(g, "GdipSetInterpolationMode") : NULL;
     LA.pixoff = g ? (la_set_t)(void *)GetProcAddress(g, "GdipSetPixelOffsetMode") : NULL;
-    LA.translate = g ? (la_xy_t)(void *)GetProcAddress(g, "GdipTranslateWorldTransform") : NULL;
-    LA.scale = g ? (la_xy_t)(void *)GetProcAddress(g, "GdipScaleWorldTransform") : NULL;
-    LA.rotate = g ? (la_rot_t)(void *)GetProcAddress(g, "GdipRotateWorldTransform") : NULL;
-    LA.draw = g ? (la_draw_t)(void *)GetProcAddress(g, "GdipDrawImageRect") : NULL;
+    LA.draw = g ? (la_draw_t)(void *)GetProcAddress(g, "GdipDrawImageRectRect") : NULL;
     LA.del = g ? (la_del_t)(void *)GetProcAddress(g, "GdipDeleteGraphics") : NULL;
-    LA.reset = g ? (la_reset_t)(void *)GetProcAddress(g, "GdipResetWorldTransform") : NULL;
-    if (!startup || !load || !LA.from_hdc || !LA.smoothing || !LA.interp || !LA.pixoff || !LA.translate || !LA.scale || !LA.rotate || !LA.draw || !LA.del || !LA.reset) {
+    la_size_t width = g ? (la_size_t)(void *)GetProcAddress(g, "GdipGetImageWidth") : NULL;
+    la_size_t height = g ? (la_size_t)(void *)GetProcAddress(g, "GdipGetImageHeight") : NULL;
+    if (!startup || !load || !LA.from_hdc || !LA.smoothing || !LA.interp || !LA.pixoff || !LA.draw || !LA.del || !width || !height) {
         printf("display: loading animation off: gdiplus.dll not usable\n"); InterlockedExchange(&g_la_off, 1); return;
     }
     ULONG_PTR token; LaGdipInput in = {1, NULL, FALSE, FALSE};
     WCHAR p[MAX_PATH + 32]; DWORD n = GetModuleFileNameW(NULL, p, MAX_PATH);
     while (n && p[n - 1] != L'\\' && p[n - 1] != L'/') n--;
     if (startup(&token, &in, NULL) == 0 && n) {
-        wcscpy(p + n, L"loading_kong.png"); if (load(p, &LA.kong)) LA.kong = NULL;
-        wcscpy(p + n, L"loading_arm.png"); if (load(p, &LA.arm)) LA.arm = NULL;
-        wcscpy(p + n, L"loading_kong_back.png"); if (load(p, &LA.back)) LA.back = NULL;
+        wcscpy(p + n, L"loading_kirby.png"); if (load(p, &LA.kirby)) LA.kirby = NULL;
     }
-    if (!LA.kong || !LA.arm || !LA.back) { printf("display: loading animation off: loading_kong.png / loading_arm.png / loading_kong_back.png not beside the exe\n"); InterlockedExchange(&g_la_off, 1); return; }
+    UINT aw = 0, ah = 0;
+    if (!LA.kirby || width(LA.kirby, &aw) || height(LA.kirby, &ah) || aw != LA_FRAME_W * LA_COLS || ah != LA_FRAME_H * (LA_FRAMES / LA_COLS)) {
+        printf("display: loading animation off: loading_kirby.png missing or atlas dimensions invalid\n"); InterlockedExchange(&g_la_off, 1); return;
+    }
+    LA.ready = 1;                          /* the atlas is loaded: la_hold may show it again during the shader hold */
     if (g_la_off) return;                  /* (a present already) */
     LA.on = 1;
-    SetTimer(h, LA_TIMER, 33, NULL);       /* about 30 pictures a second */
+    SetTimer(h, LA_TIMER, 16, NULL);       /* wall-time selects a 30 FPS atlas frame */
+    printf("display: Kirby Inhale loading animation: %d frames at %d FPS\n", LA_FRAMES, LA_FPS); fflush(stdout);
     InvalidateRect(h, NULL, TRUE);
 }
 
@@ -124,18 +112,27 @@ static void la_paint(HWND h, HDC dc) {
     RECT cr; GetClientRect(h, &cr);
     int cw = cr.right, ch = cr.bottom;
     if (cw < 64 || ch < 64) return;
-    float s = (float)ch * LA_SIZE / LA_KONG_H;               /* pixels per SVG unit */
-    int margin = (int)((float)ch * LA_MARGIN), ih = (int)(LA_KONG_H * s) + 1, iw = (int)(LA_KONG_W * s) + 1;
+    int margin = (int)((float)ch * LA_MARGIN), ih = (int)((float)ch * LA_SIZE), iw = ih * LA_FRAME_W / LA_FRAME_H;
     int fh = ch / 36 < 13 ? 13 : ch / 36;
-    int reach = (int)(LA_ARM_REACH_UP * s) + 1;
-    RECT r = {cw * 2 / 5, ch - margin - ih - reach, cw, ch};  /* the part repainted: the text's width and the figure, with the arm's turn above it */
+    RECT r = {cw * 2 / 5, ch - margin - ih - fh * 3, cw, ch};      /* the text, the shader bar above the animation and the animation */
     if (r.top < 0) r.top = 0;
     int w = r.right - r.left, hh = r.bottom - r.top;
     if (w <= 0 || hh <= 0) return;
     LA.last = r;
     if (fh != LA.font_h) {
+        static int barlow = -1;
+        if (barlow < 0) {                  /* Arena's title font, private to this process (scripts/setup.py copies it to arena_fonts\) */
+            char p[MAX_PATH + 64]; DWORD k = GetModuleFileNameA(NULL, p, MAX_PATH);
+            while (k && p[k - 1] != '\\' && p[k - 1] != '/') k--;
+            p[k] = 0; strcat(p, "arena_fonts\\BarlowCondensed-ExtraBoldItalic.ttf");
+            barlow = AddFontResourceExA(p, FR_PRIVATE, NULL) > 0;
+            if (!barlow) { p[k] = 0; strcat(p, "..\\..\\tools\\launcher\\arena\\Assets\\Fonts\\BarlowCondensed-ExtraBoldItalic.ttf"); barlow = AddFontResourceExA(p, FR_PRIVATE, NULL) > 0; }
+        }
         if (LA.font) DeleteObject(LA.font);
+        if (LA.title) DeleteObject(LA.title);
         LA.font = CreateFontA(-fh, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, ANTIALIASED_QUALITY, 0, "Segoe UI");
+        LA.title = barlow ? CreateFontA(-fh * 3 / 2, 0, 0, 0, FW_EXTRABOLD, TRUE, 0, 0, DEFAULT_CHARSET, 0, 0, ANTIALIASED_QUALITY, 0, "Barlow Condensed ExtraBold")
+                          : CreateFontA(-fh * 5 / 4, 0, 0, 0, FW_BOLD, TRUE, 0, 0, DEFAULT_CHARSET, 0, 0, ANTIALIASED_QUALITY, 0, "Segoe UI");
         LA.font_h = fh;
     }
     HDC m = CreateCompatibleDC(dc);
@@ -144,27 +141,40 @@ static void la_paint(HWND h, HDC dc) {
     FillRect(m, &all, (HBRUSH)GetStockObject(BLACK_BRUSH));
     LARGE_INTEGER now, fq; QueryPerformanceCounter(&now); QueryPerformanceFrequency(&fq);
     double ms = (double)(now.QuadPart - LA.t0.QuadPart) * 1000.0 / (double)fq.QuadPart;
-    float turn = (float)fmod(ms, (double)LA_TURN_MS) / (float)LA_TURN_MS;
-    float ox = (float)(cw - margin - iw - r.left), oy = (float)(ch - margin - ih - r.top);
+    unsigned frame = (unsigned long long)(ms * LA_FPS / 1000.0) % LA_FRAMES;
+    int below = g_splash_prep_pct >= 0 ? fh * 3 : 0;      /* the shader hold: room under the animation for its bar and line */
+    float ox = (float)(cw - margin - iw - r.left), oy = (float)(ch - margin - ih - below - r.top);
     void *g = NULL;
     if (LA.from_hdc(m, &g) == 0 && g) {
         LA.smoothing(g, 4); LA.interp(g, 7); LA.pixoff(g, 4);     /* anti-alias, high-quality bicubic, half-pixel offset */
-        LA.translate(g, ox, oy, 0); LA.scale(g, s, s, 0);        /* (order 0 = prepend: the last call applies first to the points) */
-        LA.translate(g, LA_KONG_PIN_X, LA_KONG_PIN_Y, 0);
-        LA.rotate(g, -360.0f * turn, 0);                         /* negative = counter-clockwise on screen */
-        LA.translate(g, -LA_ARM_PIN_X, -LA_ARM_PIN_Y, 0);
-        LA.draw(g, LA.arm, 0, 0, LA_ARM_W, LA_ARM_H);            /* the arm, behind */
-        LA.reset(g);
-        LA.translate(g, ox, oy, 0); LA.scale(g, s, s, 0);
-        LA.draw(g, LA.back, 0, 0, LA_KONG_W, LA_KONG_H);         /* Kong's black silhouette over it, Kong on top */
-        LA.draw(g, LA.kong, 0, 0, LA_KONG_W, LA_KONG_H);
+        LA.draw(g, LA.kirby, ox, oy, (float)iw, (float)ih,
+                (float)((frame % LA_COLS) * LA_FRAME_W), (float)((frame / LA_COLS) * LA_FRAME_H),
+                (float)LA_FRAME_W, (float)LA_FRAME_H, 2 /* UnitPixel */, NULL, NULL, NULL);
         LA.del(g);
     }
     char note[sizeof g_la_note];
     AcquireSRWLockShared(&g_la_note_lock); memcpy(note, g_la_note, sizeof note); ReleaseSRWLockShared(&g_la_note_lock);
-    if (note[0]) {
+    int pct = g_splash_prep_pct;
+    if (pct >= 0) {                        /* SSBU Arena: the shaders (prep_first_hold): "LOADING SHADERS 37%" and a thin bar above Kirby */
+        if (pct > 100) pct = 100;
+        int bx0 = (int)ox + iw / 8, bx1 = (int)ox + iw - iw / 8, bh = fh / 5 < 3 ? 3 : fh / 5;
+        int by = (int)oy + ih - ih / 16;  /* the bar, just under the animation */
+        RECT track = {bx0, by, bx1, by + bh}, done = {bx0, by, bx0 + (bx1 - bx0) * pct / 100, by + bh};
+        HBRUSH tb = CreateSolidBrush(RGB(0x1E, 0x2A, 0x38)), ab = CreateSolidBrush(RGB(0x65, 0xC7, 0xFF));
+        FillRect(m, &track, tb); if (done.right > done.left) FillRect(m, &done, ab);
+        DeleteObject(tb); DeleteObject(ab);
+        HFONT of = (HFONT)SelectObject(m, LA.title ? LA.title : LA.font);
+        SetBkMode(m, TRANSPARENT);
+        char num[8]; snprintf(num, sizeof num, "%d%%", pct);
+        const char *what = g_splash_prep_load ? "LOADING SHADERS " : "PREPARING SHADERS ";
+        SIZE sn, sw; GetTextExtentPoint32A(m, num, (int)strlen(num), &sn); GetTextExtentPoint32A(m, what, (int)strlen(what), &sw);
+        int ty = by + bh + fh / 3, tx = (bx0 + bx1 + sw.cx + sn.cx) / 2 - sn.cx;      /* under the bar, centred on it */
+        SetTextColor(m, RGB(0x65, 0xC7, 0xFF)); TextOutA(m, tx, ty, num, (int)strlen(num));
+        SetTextColor(m, RGB(0xEE, 0xF3, 0xF7)); TextOutA(m, tx - sw.cx, ty, what, (int)strlen(what));
+        SelectObject(m, of);
+    } else if (note[0]) {
         HFONT of = (HFONT)SelectObject(m, LA.font);
-        SetBkMode(m, TRANSPARENT); SetTextColor(m, RGB(200, 200, 200));
+        SetBkMode(m, TRANSPARENT); SetTextColor(m, RGB(166, 193, 216));
         RECT tr = {0, 0, (int)ox - fh / 2, hh - margin - ih / 6};
         DrawTextA(m, note, -1, &tr, DT_RIGHT | DT_BOTTOM | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
         SelectObject(m, of);
@@ -173,8 +183,25 @@ static void la_paint(HWND h, HDC dc) {
     SelectObject(m, old); DeleteObject(bm); DeleteDC(m);
 }
 
+/* SSBU Arena: the shaders are loaded (or prepared) INSIDE the first present, before its picture reaches the window
+ * (nvn_vk_draw.c prep_first_hold), so the animation had stopped and the window showed one still frame for the whole
+ * wait. During that hold it runs again with "LOADING SHADERS n%" and its bar; it stops again (under the paint lock)
+ * when the hold ends, before the first picture. Any thread; the window thread restarts the timer (WM_APP + 0x53). */
+#define LA_RESUME (WM_APP + 0x53)
+static void la_hold(int on) {
+    if (!LA.ready) return;
+    if (on) { if (InterlockedExchange(&g_la_off, 0)) PostMessageA(g_hwnd, LA_RESUME, 0, 0); return; }
+    AcquireSRWLockExclusive(&g_la_lock);
+    InterlockedExchange(&g_la_off, 1);
+    ReleaseSRWLockExclusive(&g_la_lock);
+}
+
 /* wndproc: WM_PAINT and the timer while the animation runs; returns 1 when it handled the message */
 static int la_wndproc(HWND h, UINT msg, WPARAM w) {
+    if (msg == LA_RESUME) {
+        if (!g_la_off && LA.ready && !LA.on) { LA.on = 1; SetTimer(h, LA_TIMER, 16, NULL); InvalidateRect(h, NULL, FALSE); }
+        return 1;
+    }
     if (!LA.on) return 0;
     if (msg == WM_TIMER && w == LA_TIMER) {
         if (g_la_off) { KillTimer(h, LA_TIMER); LA.on = 0; return 1; }

@@ -220,7 +220,10 @@ input sequence reached its last step, 12,613 frames presented, 0 Vulkan call fai
 **The simple way: `build\Avvia SSBU.bat`** (copied there by the link step). It starts `build\SSBU Arena.exe`, the
 launcher of `tools/launcher/arena` (WPF on .NET Framework 4.8, already in Windows 10 / 11), which the link step builds
 when the .NET SDK is installed (`dotnet build tools/launcher/arena -c Release`); without it, the older PowerShell window
-`Launcher.ps1` with the same settings. Home: Play, the player, controller and game files state. Settings: the
+`Launcher.ps1` with the same settings. Home: Play, the player, controller and game files state. Before the first match
+(and after a new game build or graphics driver) Play prepares the shaders first, with a progress bar: the game runs
+hidden with `SSBU_PREPARE_ONLY=1`, does the first-run preparation, writes the pipeline cache and its marker and ends
+(log: `build\prepare.log`); the match then starts without the long first-run wait. Settings: the
 player name (the account id is made from it), online through the Arena server (friend code, rollback, ping on screen,
 server), the save folder (open it, import a save from Ryujinx automatically or from any
 folder holding `save_data`, the save that was there is kept as `save-backup-<date>`), the DLC list from a folder of your

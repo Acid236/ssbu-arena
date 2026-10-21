@@ -3680,10 +3680,26 @@ static void present_progress(float frac) { if (!g_ovl.bar_arg) return; g_ovl.fra
  * loading screen or draw (a link is 0.011 ms on NVIDIA, up to 3.9 ms on Intel). */
 extern volatile LONG g_display_close;              /* display.c */
 int display_splash_prep(int pct, int eta_s, int loading);      /* display.c: the window's own loading screen shows the preparation (or the loading at start) */
+/* SSBU_PREPARE_ONLY=1 (the SSBU Arena launcher, with SSBU_SHOW=0): the first-run preparation alone. The game boots as
+ * always up to its first present, the preparation runs exactly as on a first start, its progress goes to stdout as
+ * `##prep {json}` lines, and once the pipeline cache and the marker are written the process ends: the next start of the
+ * game finds the marker and loads the shaders instead of preparing them (the progress lines: nvn_vk_m4.c
+ * prep_only_progress). Exit codes: 0 prepared (or already prepared),
+ * 1 stopped, 3 no preparation on this device (no stage libraries), 4 no container could be read from the game's data. */
+static void prep_only_end(int code, const char *state) {
+    printf("##prep {\"state\":\"%s\"}\n", state);
+    fflush(stdout);
+    TerminateProcess(GetCurrentProcess(), (UINT)code);
+}
 static void prep_first_hold(LONG64 frame) {
-    static int done, mode = -1;
+    static int done, mode = -1, only = -1;
     if (done) return;
-    if (mode < 0) { const char *e = getenv("SSBU_VK_PREPARE"); mode = e ? (!_stricmp(e, "background") ? 1 : !_stricmp(e, "off") ? 2 : 0) : gfx_options()->shader_prepare; }
+    if (only < 0) { const char *e = getenv("SSBU_PREPARE_ONLY"); only = e && atoi(e) != 0; }
+    if (mode < 0) { const char *e = getenv("SSBU_VK_PREPARE"); mode = only ? 0 : e ? (!_stricmp(e, "background") ? 1 : !_stricmp(e, "off") ? 2 : 0) : gfx_options()->shader_prepare; }
+    if (only) {
+        if (!g_prep_thread) prep_only_end(3, "unsupported");
+        if (g_prep_marked) prep_only_end(0, "already");
+    }
     /* 2026-10-16: on a PREPARED start with shader_load = start (g_prep_loadall, nvn_vk_m4.c prep_start) the same screen
      * says "LOADING SHADERS": the game's first present waits until every container is in memory (the work began at the
      * device's creation, during the white screen of the game's own boot; this shows what is left) */
@@ -3741,9 +3757,16 @@ static void prep_first_hold(LONG64 frame) {
     if (stopped) printf("nvn_vk_prep: FIRST-RUN PREPARATION STOPPED after %.1f s (the window was closed): the pipeline cache is saved on the exit path, no marker: the next start goes on from the stage records and the cache\n", el);
     else {
         printf("nvn_vk_prep: FIRST-RUN PREPARATION FINISHED in %.1f s on %d workers (state %d): %lld stage jobs; the pipeline cache and the marker are written now; pipelines of pairs never drawn on this PC are NOT made here (linked at their first loading screen)\n", el, g_pw_nthread, g_prep_state, (long long)g_pq_done);
+        if (only) {                                /* written here, at once and on this thread, before the process ends */
+            InterlockedExchange(&g_pcsave_want, 0);
+            if (g_prep_state == 3) prep_only_end(4, "nodata");
+            pcache_save_at(0, 1);
+            prep_only_end(0, "done");
+        }
         if (InterlockedExchange(&g_pcsave_want, 0)) pcache_save_at(1, 1);
     }
     fflush(stdout);
+    if (only) prep_only_end(1, "stopped");
 }
 static void vk_present(void *arg) { vk_present2(arg, 0); }
 static void vk_present2(void *arg, int progress) {

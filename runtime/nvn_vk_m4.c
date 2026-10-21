@@ -867,6 +867,7 @@ static int g_prep_state, g_prep_fight_cap = 0 /* run s10n2: 4 workers at the low
 static HANDLE g_prep_thread;
 static LONG64 g_pk_queued, g_pk_done, g_bar_keep_n, g_bar_keep_tk;      /* the jobs of the containers made into memory (prep == 1) */
 static volatile LONG g_prep_urgent;                /* a loading screen waits for them: every worker, normal priority */
+static int g_prep_only;                             /* SSBU_PREPARE_ONLY=1 (nvn_vk_draw.c prep_first_hold): nothing else runs, every worker on the preparation at normal priority */
 static LONG64 g_prep_t0, g_prep_t1, g_prep_vars, g_prep_fight_frames, g_boosts;
 static int g_prep_nfiles, g_prep_read, g_prep_bad;
 static void prep_start(void);
@@ -1489,7 +1490,7 @@ static DWORD WINAPI pw_main(void *arg) {           /* arg: the worker's number (
         }
         EnterCriticalSection(&g_sh_lock);
         /* session 10: a preparation job may be taken when nothing else waits; in a fight by at most g_prep_fight_cap workers */
-#define PQ_OK (g_pq_head && g_pq_running < (g_prep_urgent ? 64 : fight_recent() ? g_prep_fight_cap : g_prep_cap))
+#define PQ_OK (g_pq_head && g_pq_running < (g_prep_urgent || g_prep_only ? 64 : fight_recent() ? g_prep_fight_cap : g_prep_cap))
         while (!g_jq_head && !g_bq_head && !PQ_OK && !g_m4_quit) SleepConditionVariableCS(&g_jq_cv, &g_sh_lock, g_pq_head ? 50 : INFINITE);
         Job *j = g_jq_head;
         int bg = 0;
@@ -1501,7 +1502,7 @@ static DWORD WINAPI pw_main(void *arg) {           /* arg: the worker's number (
         LeaveCriticalSection(&g_sh_lock);
         if (!j) break;
         if (bg == 2) {                             /* the preparation runs BELOW everything of the game: below normal in menus, lowest in a fight */
-            int want = g_prep_urgent ? THREAD_PRIORITY_NORMAL : g_in_fight ? THREAD_PRIORITY_LOWEST : THREAD_PRIORITY_BELOW_NORMAL;
+            int want = g_prep_urgent || g_prep_only ? THREAD_PRIORITY_NORMAL : g_in_fight ? THREAD_PRIORITY_LOWEST : THREAD_PRIORITY_BELOW_NORMAL;
             SetThreadPriority(GetCurrentThread(), want); prio = -99;      /* set again at the next job (workers_boost may have changed it meanwhile) */
         }
         if (j->kind == 0) { if (j->prep == 2) job_prep(j); else job_prog(j); }
@@ -1607,7 +1608,9 @@ void nvn_vk_program_set(void *prog) {
     LeaveCriticalSection(&g_sh_lock);
 }
 static int piperec_cmp(const void *a, const void *b) { return memcmp(a, b, sizeof(PipeRec)); }
+static void cache_wipe_stale(void);                /* SSBU_PREPARE_ONLY: the records of an older shader version (below prep_start) */
 static void prewarm_start(void) {
+    if (getenv("SSBU_PREPARE_ONLY") && atoi(getenv("SSBU_PREPARE_ONLY"))) cache_wipe_stale();
     InitializeCriticalSection(&g_sh_lock); InitializeCriticalSection(&g_gpl_lock);
     InitializeConditionVariable(&g_sh_cv); InitializeConditionVariable(&g_jq_cv);
     CreateDirectoryA(vkc_dir(), NULL); CreateDirectoryA(vkc_file("spv"), NULL); CreateDirectoryA(vkc_file("stage"), NULL);
@@ -2327,7 +2330,8 @@ static void prep_line(const char *what) {
     printf("nvn_vk_prep: %s: %d of %d containers read, %lld variations, %lld of %lld done by the workers, %.1f s after its start (frame %lld, %s); stage variants in memory %lld, stage libraries %lld; process memory: %llu MB private, %llu MB working set\n",
            what, g_prep_read, g_prep_nfiles, (long long)g_prep_vars, d, q, (double)((g_prep_t1 ? g_prep_t1 : tk()) - g_prep_t0) / (double)fq.QuadPart, (long long)nvn_front_frame_next(), g_in_fight ? "IN A FIGHT" : "no fight",
            made, libs, (unsigned long long)(pm.PrivateUsage >> 20), (unsigned long long)(pm.WorkingSetSize >> 20));
-    fflush(stdout); { void display_title_note(const char *); char tn[200]; if (nvn_front_frame_next() <= 2 && g_prep_nfiles && g_prep_read < g_prep_nfiles) { snprintf(tn, sizeof tn, "first start: preparing the shaders, %d of %d (once; can take 10-30 min on a laptop GPU, the window stays black)", g_prep_read, g_prep_nfiles); display_title_note(tn); } else display_title_note(NULL); }      /* (issue #57 / testers: a black window for minutes) */
+    fflush(stdout); { void display_title_note(const char *); char tn[200]; if (nvn_front_frame_next() <= 2 && g_prep_nfiles && g_prep_read < g_prep_nfiles) { if (g_prep_marked) snprintf(tn, sizeof tn, "loading the shaders, %d of %d", g_prep_read, g_prep_nfiles);      /* a prepared start (the marker): loading what an earlier run made, not preparing */
+        else snprintf(tn, sizeof tn, "first start: preparing the shaders, %d of %d (once; can take 10-30 min on a laptop GPU, the window stays black)", g_prep_read, g_prep_nfiles); display_title_note(tn); } else display_title_note(NULL); }      /* (issue #57 / testers: a black window for minutes) */
 }
 static int prep_list(const char *dir) {
     char pat[300];
@@ -2538,8 +2542,34 @@ static DWORD WINAPI sweep_main(void *arg) {
     }
     return 0;
 }
+/* SSBU_PREPARE_ONLY: the launcher's progress, `##prep {json}` twice a second from the device's creation on (reading the
+ * game data comes before the game's first present, where prep_first_hold takes over the waiting); the same share as the
+ * first-run screen: reading data.arc is the first tenth, then jobs done of jobs known + about 90 a file not read yet */
+static DWORD WINAPI prep_only_progress(void *arg) {
+    LARGE_INTEGER fq; QueryPerformanceFrequency(&fq);
+    LONG64 t0 = tk();
+    (void)arg;
+    while (!g_m4_quit) {
+        int st = g_prep_state;
+        LONG64 dn = g_pq_done, qd = g_pq_queued, left = g_prep_nfiles - g_prep_read;
+        double el = (double)(tk() - t0) / (double)fq.QuadPart, f;
+        int data = st == 5 || !g_prep_nfiles;
+        if (data) f = 0.10 * (double)g_store_pct / 100.0;
+        else f = 0.10 + 0.90 * (qd > 0 ? (double)dn / (double)(qd + left * 90) : 0.0);
+        if (f > 0.999) f = 0.999;
+        int eta = f > 0.03 && el > 3 ? (int)(el * (1.0 - f) / f) : -1;
+        if (st != 2 && st != 3) {
+            printf("##prep {\"state\":\"running\",\"phase\":\"%s\",\"pct\":%d,\"eta\":%d,\"done\":%lld,\"total\":%lld,\"files\":%d,\"nfiles\":%d}\n", data ? "data" : "shaders", (int)(f * 100.0), eta,
+                   (long long)dn, (long long)(qd + left * 90), g_prep_read, g_prep_nfiles);
+            fflush(stdout);
+        }
+        Sleep(500);
+    }
+    return 0;
+}
 static void prep_start(void) {
     const char *e = getenv("SSBU_VK_PREP");
+    {   const char *o = getenv("SSBU_PREPARE_ONLY"); g_prep_only = o && atoi(o) != 0; }
     if (getenv("SSBU_VK_SWEEP_LOG") && atoi(getenv("SSBU_VK_SWEEP_LOG"))) CloseHandle(CreateThread(NULL, 0, sweep_main, NULL, 0, NULL));
     int on = e ? atoi(e) != 0 : (D.has_gpl && gpl_sep());
     if (getenv("SSBU_VK_PREP_FIGHT")) g_prep_fight_cap = atoi(getenv("SSBU_VK_PREP_FIGHT"));
@@ -2569,8 +2599,48 @@ static void prep_start(void) {
         /* session 11: the thread still runs: it makes the INDEX (hashing, under a second), so that a container is announced
          * whole at its loading screen on every start; it queues nothing (before: no thread, so no index, on a marked start) */
     }
-    if (!on || !g_m4_on) { printf("nvn_vk_prep: the preparation of every container is off (%s)\n", e ? "SSBU_VK_PREP=0" : "no stage libraries: SSBU_VK_GPL is not 2 or the driver lacks VK_EXT_graphics_pipeline_library"); return; }
+    if (!on || !g_m4_on) printf("nvn_vk_prep: the preparation of every container is off (%s)\n", e ? "SSBU_VK_PREP=0" : "no stage libraries: SSBU_VK_GPL is not 2 or the driver lacks VK_EXT_graphics_pipeline_library");
+    if (g_prep_only && (g_prep_marked || !on || !g_m4_on)) {      /* nothing to prepare: said at once, at the device's creation (the first present is about 30 s later) */
+        printf("##prep {\"state\":\"%s\"}\n", g_prep_marked && on && g_m4_on ? "already" : "unsupported");
+        fflush(stdout);
+        TerminateProcess(GetCurrentProcess(), g_prep_marked && on && g_m4_on ? 0 : 3);
+    }
+    if (!on || !g_m4_on) return;
     g_prep_thread = CreateThread(NULL, 0, prep_main, NULL, 0, NULL);
+    if (g_prep_only && !g_prep_marked) CloseHandle(CreateThread(NULL, 0, prep_only_progress, NULL, 0, NULL));
+}
+/* SSBU Arena, SSBU_PREPARE_ONLY (the launcher's preparation): when no marker of THIS shader version (MX_VK_VERSION and
+ * VK_KEYS_VERSION, any device) is in the cache, everything is prepared again anyway, and what older versions left is only
+ * weight: their pipeline cache (1.7 GB on the owner's PC after two versions), pipes.bin (pipelines of the old keys, made
+ * again at every start: a start with "LOADING SHADERS" took 9 min instead of 1) and the stage records. They are removed
+ * before the pipeline cache is opened. A preparation of the current version (a new exe or driver) keeps everything. */
+static int wipe_glob(const char *pattern) {
+    char pat[300], path[400]; WIN32_FIND_DATAA fd; int n = 0;
+    snprintf(pat, sizeof pat, "%s/%s", vkc_dir(), pattern);
+    HANDLE h = FindFirstFileA(pat, &fd);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    const char *slash = strrchr(pattern, '/');
+    do {
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        snprintf(path, sizeof path, "%s/%.*s%s", vkc_dir(), slash ? (int)(slash - pattern + 1) : 0, pattern, fd.cFileName);
+        if (DeleteFileA(path)) n++;
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+    return n;
+}
+static void cache_wipe_stale(void) {
+    char pat[64]; WIN32_FIND_DATAA fd;
+    char kv[16] = "";
+    if (VK_KEYS_VERSION > 1) snprintf(kv, sizeof kv, "_k%d", VK_KEYS_VERSION);
+    snprintf(pat, sizeof pat, "prepared_v%u%s_s*", MX_VK_VERSION, kv);
+    char full[300]; snprintf(full, sizeof full, "%s/%s", vkc_dir(), pat);
+    HANDLE h = FindFirstFileA(full, &fd);
+    if (h != INVALID_HANDLE_VALUE) { FindClose(h); return; }          /* this version was prepared here before: keep it all */
+    int a = wipe_glob("pipelines_*.bin"), b = wipe_glob("pipes.bin") + wipe_glob("pipes_novi.bin"), c = wipe_glob("prepared_*.txt"),
+        d = wipe_glob("stage/*"), e = wipe_glob("spv/*");
+    printf("nvn_vk_prep: no marker of shader version %u%s here: older records removed before the preparation (%d pipeline caches, %d pipeline lists, %d markers, %d stage records, %d SPIR-V files)\n",
+           MX_VK_VERSION, kv, a, b, c, d, e);
+    fflush(stdout);
 }
 /* `ssbu_vk1.exe --prepare-shaders [folder]` (boot.c): no game, no window, no Vulkan device. Every *.bnsh file of the folder
  * (tools_vk/bnsh_extract.py writes them from data.arc) is walked as the scan above walks a container in the game's memory

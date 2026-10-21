@@ -21,10 +21,14 @@ void os_signal_event(uint64_t key);
 
 static HWND g_hwnd;
 #ifdef _WIN32
-static HICON g_icon_small, g_icon_big;                /* the title bar's small icon (opensmash.ico), set after the window is made */
+static HICON g_icon_small, g_icon_big;                /* Arena's multi-resolution window/taskbar icon */
 #endif
 static volatile LONG g_ready;
 static volatile LONG64 g_frames;
+static int title_stats(void) {
+    const char *stats = getenv("SSBU_TITLE_STATS");
+    return gfx_options()->overlay || (stats && atoi(stats));
+}
 volatile LONG64 g_prof15_frame;                       /* presented frames, read by prof15.c (SSBU_PROF15, test only; included by boot.c) */
 void nvn_gl_start(void *hwnd);                        /* nvn_gl.c */
 void nvn_gl_report(FILE *out);
@@ -275,8 +279,10 @@ static DWORD g_splash_t0;
  * screen is up it shows the preparation here (percentage, the bar, time left) instead of presenting its own screen,
  * which drawn over this one put the two texts on top of each other. */
 static volatile int g_splash_prep_pct = -1, g_splash_prep_eta = -1, g_splash_prep_load;
+static void la_hold(int on);                           /* loading_anim.c: Kirby again during the shader hold of the first present */
 int display_splash_prep(int pct, int eta_s, int loading) {      /* 1: the loading screen shows it (the caller presents nothing); pct < 0 ends it; loading: the shaders are loaded at start (not the first-run preparation) */
     g_splash_prep_pct = pct; g_splash_prep_eta = eta_s; g_splash_prep_load = loading;
+    la_hold(pct >= 0 && g_frames == 0);
     if (pct >= 0 && g_hwnd && g_frames == 0) { InvalidateRect(g_hwnd, NULL, FALSE); return 1; }
     return 0;
 }
@@ -513,11 +519,11 @@ static DWORD WINAPI window_thread(LPVOID arg) {
     wc.lpszClassName = "ssbu_native_window";
     wc.style = CS_OWNDC;
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
-    {   /* the project's logo (media/opensmash.ico, copied beside the exe by scripts/setup.py): the window's and taskbar's icon */
+    {   /* Arena's logo (media/arena.ico), shared with the launcher */
         char ico[MAX_PATH]; DWORD n = GetModuleFileNameA(NULL, ico, MAX_PATH);
         while (n && ico[n - 1] != '\\' && ico[n - 1] != '/') n--;
         if (n && n + 16 < MAX_PATH) {
-            strcpy(ico + n, "opensmash.ico");
+            strcpy(ico + n, "arena.ico");
             wc.hIcon = (HICON)LoadImageA(NULL, ico, IMAGE_ICON, 0, 0, LR_LOADFROMFILE | LR_DEFAULTSIZE);
             g_icon_small = (HICON)LoadImageA(NULL, ico, IMAGE_ICON, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_LOADFROMFILE);
             g_icon_big = (HICON)LoadImageA(NULL, ico, IMAGE_ICON, 256, 256, LR_LOADFROMFILE);
@@ -546,7 +552,7 @@ static DWORD WINAPI window_thread(LPVOID arg) {
     GetModuleFileNameA(NULL, exe, sizeof exe);
     const char *base = strrchr(exe, '\\') ? strrchr(exe, '\\') + 1 : exe, *show = getenv("SSBU_SHOW");
     int visible = show ? atoi(show) != 0 : (!_stricmp(base, "ssbu_native.exe") || !_stricmp(base, "ssbu_user.exe") || !_stricmp(base, "ssbu_native_rb.exe"));      /* (_rb: the rollback pair a player starts) */
-    snprintf(g_title, sizeof g_title, "%s", getenv("SSBU_TITLE") ? getenv("SSBU_TITLE") : "SSBU native (study build)");
+    snprintf(g_title, sizeof g_title, "%s", getenv("SSBU_TITLE") ? getenv("SSBU_TITLE") : "SSBU Arena");
     int maxed = 0;
     if (visible && !go->window_mode) {
         /* windowed: the last place (window.ini) when its title bar is still on a monitor; else centred on the primary
@@ -655,7 +661,7 @@ static DWORD WINAPI window_thread(LPVOID arg) {
         flags |= go->window_mode == 2 ? SDL_WINDOW_FULLSCREEN : SDL_WINDOW_BORDERLESS;
     }
     printf("display: window %s, client %dx%d (graphics.ini), SDL video driver %s\n", go->window_mode == 2 ? "fullscreen" : go->window_mode ? "borderless" : "windowed", cw, ch, SDL_GetCurrentVideoDriver());
-    snprintf(g_title, sizeof g_title, "%s", getenv("SSBU_TITLE") ? getenv("SSBU_TITLE") : "SSBU native (study build)");
+    snprintf(g_title, sizeof g_title, "%s", getenv("SSBU_TITLE") ? getenv("SSBU_TITLE") : "SSBU Arena");
     SDL_Window *w = SDL_CreateWindow(g_title, cw, ch, flags);
     if (!w) { printf("display: SDL_CreateWindow failed: %s\n", SDL_GetError()); fflush(stdout); ExitProcess(5); }
     SDL_AddEventWatch(close_watch, NULL);
@@ -856,7 +862,7 @@ static void frame_queued(void) {
             snprintf(title, sizeof title, "%s - frame %lld - %lld fps - %.2f ms per frame", g_title, (long long)n, (long long)second_frames, ms);
         } else
         snprintf(title, sizeof title, "%s - frame %lld - %lld fps", g_title, (long long)n, (long long)second_frames);
-        SetWindowTextA(g_hwnd, title);
+        SetWindowTextA(g_hwnd, title_stats() ? title : g_title);
         second_frames = 0;
         second_start = now;
     }
@@ -1265,7 +1271,7 @@ void display_pace(void) {
         if (gfx_options()->overlay && second_frames) snprintf(title, sizeof title, "%s - frame %lld - %lld fps - %.2f ms per frame", g_title, (long long)n, (long long)second_frames, (double)(now.QuadPart - second_start.QuadPart) * 1000.0 / (double)g_freq.QuadPart / (double)second_frames);
         else
         snprintf(title, sizeof title, "%s - frame %lld - %lld fps", g_title, (long long)n, (long long)second_frames);
-        SetWindowTextA(g_hwnd, title);
+        SetWindowTextA(g_hwnd, title_stats() ? title : g_title);
         second_frames = 0;
         second_start = now;
     }
@@ -1326,7 +1332,7 @@ void display_title_note(const char *note) {
     if (!g_hwnd) return;
     char t[400];
     if (note && note[0]) snprintf(t, sizeof t, "%s - %s", g_title, note); else snprintf(t, sizeof t, "%s", g_title);
-    SetWindowTextA(g_hwnd, t);
+    SetWindowTextA(g_hwnd, title_stats() ? t : g_title);
 #else
     (void)note;
 #endif
