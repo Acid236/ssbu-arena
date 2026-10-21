@@ -2327,7 +2327,7 @@ static void prep_line(const char *what) {
     printf("nvn_vk_prep: %s: %d of %d containers read, %lld variations, %lld of %lld done by the workers, %.1f s after its start (frame %lld, %s); stage variants in memory %lld, stage libraries %lld; process memory: %llu MB private, %llu MB working set\n",
            what, g_prep_read, g_prep_nfiles, (long long)g_prep_vars, d, q, (double)((g_prep_t1 ? g_prep_t1 : tk()) - g_prep_t0) / (double)fq.QuadPart, (long long)nvn_front_frame_next(), g_in_fight ? "IN A FIGHT" : "no fight",
            made, libs, (unsigned long long)(pm.PrivateUsage >> 20), (unsigned long long)(pm.WorkingSetSize >> 20));
-    fflush(stdout);
+    fflush(stdout); { void display_title_note(const char *); char tn[200]; if (nvn_front_frame_next() <= 2 && g_prep_nfiles && g_prep_read < g_prep_nfiles) { snprintf(tn, sizeof tn, "first start: preparing the shaders, %d of %d (once; can take 10-30 min on a laptop GPU, the window stays black)", g_prep_read, g_prep_nfiles); display_title_note(tn); } else display_title_note(NULL); }      /* (issue #57 / testers: a black window for minutes) */
 }
 static int prep_list(const char *dir) {
     char pat[300];
