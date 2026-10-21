@@ -76,7 +76,18 @@ static void vkd_fail(const char *fmt, ...) {
 #ifndef VK_GPL_DEFAULT
 #define VK_GPL_DEFAULT 2                           /* session 11: on by default where the driver has the extension (validation run s11v3 and the first-run table of V1_vulkan.md "Session 11"); -DVK_GPL_DEFAULT=0 or SSBU_VK_GPL=0 for the old path */
 #endif
-static int vk_gpl_mode(void) { static int m = -1; if (m < 0) { const char *e = getenv("SSBU_VK_GPL"); m = e && e[0] ? atoi(e) : VK_GPL_DEFAULT; } return m; }
+static int vk_gpl_mode(void) {
+    static int m = -1;
+    if (m < 0) {
+        const char *e = getenv("SSBU_VK_GPL");
+        m = e && e[0] ? atoi(e) : VK_GPL_DEFAULT;
+        if (!(e && e[0]) && GetFileAttributesA("../cache/vk/no_stage_libraries.txt") != INVALID_FILE_ATTRIBUTES) {     /* nvn_vk_m4.c stagelib_ensure: the driver refused one */
+            m = 0;
+            printf("nvn_vk: ../cache/vk/no_stage_libraries.txt: this driver refused a stage library in an earlier run: whole pipelines\n");
+        }
+    }
+    return m;
+}
 
 /* ---------------------------------------------------------------- device features */
 static void vkd_device_info(VkDeviceCreateInfo *di, const VkExtensionProperties *dext, uint32_t ndext) {
