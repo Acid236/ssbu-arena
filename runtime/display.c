@@ -353,9 +353,20 @@ void display_set_window_mode(int mode) { if (g_hwnd_menu) PostMessageA(g_hwnd_me
 void display_set_client_size(int w, int h) { if (g_hwnd_menu) PostMessageA(g_hwnd_menu, WM_APP + 0x52, (WPARAM)w, (LPARAM)h); }
 int display_window_mode(void) { return g_full ? (g_topmost ? 2 : 1) : 0; }
 #include "loading_anim.c"                            /* U3: the loading animation until the game's first present */
+/* closing the window: a game that does not end within 4 s (an exit handler or a thread that never returns: testers saw the
+ * window freeze after the X while closing the console window worked) is ended here, its log flushed first */
+static DWORD WINAPI close_watchdog(LPVOID arg) {
+    (void)arg;
+    Sleep(4000);
+    printf("\nwindow closed but the game did not end within 4 s: ended now\n");
+    fflush(stdout);
+    TerminateProcess(GetCurrentProcess(), 0);
+    return 0;
+}
 static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
     if (la_wndproc(h, m, w)) return 0;
     if (m == WM_CLOSE) {                             /* the exit request: nn::oe decides (nnmisc.c oe_exit_request) whether the game ends now or after its exit-request handling section */
+        { static LONG once; if (!InterlockedExchange(&once, 1)) CloseHandle(CreateThread(NULL, 0, close_watchdog, NULL, 0, NULL)); }
         printf("\nwindow closed by the user after %lld frames\n", (long long)g_frames);
         { extern volatile LONG g_display_close; InterlockedExchange(&g_display_close, 1); }      /* session 14: a hold of ours (the first-run shader preparation) ends at once */
         if (!oe_exit_request()) report_and_exit(0);

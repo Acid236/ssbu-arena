@@ -1029,7 +1029,7 @@ static void sec_experimental(void) {
     tag(1, S.runahead != S0.runahead);
     ImGui::SameLine();
     if (ra_build()) ImGui::TextDisabled("one frame less input delay in fights; costs a second pass of each frame on the CPU");
-    else ImGui::TextDisabled("needs the run-ahead build (the game DLL with write marks); this build cannot run it");
+    else ImGui::TextDisabled("not ready yet: it is being moved onto the normal build (like rollback)");
     ImGui::Separator();
     /* (2) your name: the console user's nickname (nnfs.c) and the name the lobby shows (net_relay.c); graphics.ini player_name */
     static char pname[33], pname0[33];
@@ -1527,6 +1527,14 @@ static void draw_overlay(void) {
     ImGui::End();
 }
 
+static void exit_game(void) {                              /* F1 -> Exit game: the exit handlers run, then a hard end if one hangs */
+    static volatile LONG once;
+    if (InterlockedExchange(&once, 1)) return;
+    printf("menu: exit game\n");
+    fflush(stdout);
+    CreateThread(NULL, 0, restart_thread, NULL, 0, NULL);
+    CreateThread(NULL, 0, [](LPVOID) -> DWORD { Sleep(4000); fflush(stdout); _Exit(0); return 0; }, NULL, 0, NULL);
+}
 static void draw_menu(int cw, int ch) {
     if (ImGui::BeginMainMenuBar()) {
         ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.2f, 1.0f), "SSBU native");
@@ -1562,7 +1570,16 @@ static void draw_menu(int cw, int ch) {
     if (restart_pending()) ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1.0f), "Saved. The settings marked [restart: changed] take effect at the next start.");
     if (ImGui::Button("Close")) menu_request_toggle();
     ImGui::SameLine();
+    if (ImGui::Button("Exit game")) ImGui::OpenPopup("Exit the game?");
+    ImGui::SameLine();
     ImGui::TextDisabled("Settings are saved at once (config\\graphics.ini)");
+    if (ImGui::BeginPopupModal("Exit the game?", NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::Text("Are you sure? Progress not saved by the game is lost.");
+        if (ImGui::Button("Yes, exit")) { exit_game(); ImGui::CloseCurrentPopup(); }
+        ImGui::SameLine();
+        if (ImGui::Button("No") || ImGui::IsKeyPressed(ImGuiKey_Escape)) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
     ImGui::End();
 }
 
