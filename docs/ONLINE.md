@@ -150,8 +150,7 @@ game back a few frames and replays them, instead of slowing both players down.
 
 **Local Wireless rooms use rollback** when the room has exactly 2 players and both have rollback on: the room's match
 (started by the room maker) is played with rollback; the room maker is player 1. The fighters, colours, stage and rules are
-the room's. Both players play with the game's default controls in these matches (a player's own name-tag controls exist
-only on his own PC). The room's waiting stage, rooms with more than 2 players, and a room where one player has rollback
+the room's. Each player plays with his own name-tag controls (button layout and options), sent to the other game. The room's waiting stage, rooms with more than 2 players, and a room where one player has rollback
 off use the game's own online netcode as before (a short message says so once), so players with different settings can
 still play together in a room.
 

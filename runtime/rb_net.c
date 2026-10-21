@@ -170,7 +170,7 @@ static int g_setup_waiting, g_hs_lwr;
 void rbn_set_setup_waiting(int waiting) { g_setup_waiting = waiting; }
 int rbn_room_rollback(void) { return g_hs_lwr; }       /* (R3 lwr) the last agreed match is a Local Wireless room's match played with rollback */
 static int rbn_peer_heard_ms(void);                     /* (R3 lwr) ms since the other game's rollback session was last heard, -1 = never */
-static volatile LONG g_lay_have_mine, g_lay_have_peer; static uint8_t g_lay_peer_has; static uint16_t g_lay_peer[11];
+static volatile LONG g_lay_have_mine, g_lay_have_peer; static uint8_t g_lay_peer_has; static uint16_t g_lay_peer[11]; static uint8_t g_lay_peer_ctl[0x2c];
 static RbhMsg g_lay_mine;
 const char *rbn_hs_why(void) { return g_hs_why; }      /* (R3 pub1) why the last handshake failed (rb_rollback.c's notice) */
 static void rtt_reset(void);                            /* (R3 net3) a new opponent: its round trip is measured afresh */
@@ -189,9 +189,12 @@ static void hs_refuse(uint32_t echo, const char *why) {
  * records). At player 2's record (both games are at the same set-up) each sends its own and waits for the other's
  * (at most SSBU_RB_NET_ROOM_WAIT s / 2; sent again every 50 ms, a received one is answered once). 1 = *other is the other
  * player's layout (*other_has: it had one); 0 = not received (each game keeps what it has: the match may differ, logged). */
-int rbn_room_layout(const uint16_t mine[11], int has, uint16_t other[11], int *other_has) {
+/* (owner 2026-10-22) the message also carries the player's own name-tag controls: 0x2b bytes (profile + 0x24 .. + 0x4e) and the
+ * option byte of its controller kind (debug_mode.c lwr_own_controls), in RbhMatch.ctx_hist (not used by a LAYOUT otherwise). */
+int rbn_room_layout(const uint16_t mine[11], int has, const uint8_t mine_ctl[0x2c], uint16_t other[11], int *other_has, uint8_t other_ctl[0x2c]) {
     AcquireSRWLockExclusive(&g_hs_lock);
     hs_head(&g_lay_mine, RBH_LAYOUT); g_lay_mine.nonce = g_match_id; memcpy(g_lay_mine.m.layout[0], mine, sizeof g_lay_mine.m.layout[0]); g_lay_mine.m.has_layout[0] = (uint8_t)(has != 0);
+    memcpy(g_lay_mine.m.ctx_hist, mine_ctl, 0x2c);
     g_lay_have_mine = 1;
     RbhMsg ans = g_lay_mine; ans.echo = 1;
     ReleaseSRWLockExclusive(&g_hs_lock);
@@ -203,8 +206,8 @@ int rbn_room_layout(const uint16_t mine[11], int has, uint16_t other[11], int *o
     }
     for (int k = 0; k < 3; k++) hs_send(&ans, sizeof ans);          /* (the other game may still wait: answers that do not ask for one back) */
     int ok = g_lay_have_peer != 0;
-    if (ok) { memcpy(other, g_lay_peer, sizeof g_lay_peer); *other_has = g_lay_peer_has; }
-    printf("[rbnet] room match: player text fields (name tag, state + 0x54): this game's player's sent, the other player's %s after %llu ms\n", ok ? "received" : "NOT RECEIVED (the match may differ)", (unsigned long long)(GetTickCount64() - t0));
+    if (ok) { memcpy(other, g_lay_peer, sizeof g_lay_peer); *other_has = g_lay_peer_has; memcpy(other_ctl, g_lay_peer_ctl, sizeof g_lay_peer_ctl); }
+    printf("[rbnet] room match: player name and controls (name tag text, profile controls): this game's player's sent, the other player's %s after %llu ms\n", ok ? "received" : "NOT RECEIVED (the match may differ)", (unsigned long long)(GetTickCount64() - t0));
     fflush(stdout);
     return ok;
 }
@@ -243,7 +246,7 @@ static int hs_rx(const uint8_t *p, int n) {
         break;
     case RBH_LAYOUT:                                    /* (R3 lwr) the other game's own player's control layout for this match; answered once with ours */
         if (m.nonce != g_match_id || !g_match_id || m.proto != RBH_PROTO) break;
-        memcpy(g_lay_peer, m.m.layout[0], sizeof g_lay_peer); g_lay_peer_has = m.m.has_layout[0]; g_lay_have_peer = 1;
+        memcpy(g_lay_peer, m.m.layout[0], sizeof g_lay_peer); g_lay_peer_has = m.m.has_layout[0]; memcpy(g_lay_peer_ctl, m.m.ctx_hist, sizeof g_lay_peer_ctl); g_lay_have_peer = 1;
         if (g_lay_have_mine && !m.echo) hs_send(&g_lay_mine, sizeof g_lay_mine);
         break;
     case RBH_REFUSE:                                    /* about our wait, or from the other game's wait we deal with */
@@ -327,6 +330,7 @@ int rbn_handshake(const RbhMatch *mine, RbhMatch *out) {
      * player with rollback off is never held. SSBU_RB_NET_ROOM_ROLLBACK=0: the pub2 way for every room fight. */
     int lwr = 0;
     g_hs_lwr = 0;
+    InterlockedExchange(&g_lay_have_peer, 0); InterlockedExchange(&g_lay_have_mine, 0);      /* (a LAYOUT of an older match is not this one's) */
     {   int nnldn_role(void), nnldn_players(void); const char *e = getenv("SSBU_RB_NET_ROOM_MATCH"), *rr = getenv("SSBU_RB_NET_ROOM_ROLLBACK");
         if (nnldn_role() && !(e && e[0] == '1')) {
             int heard = rbn_peer_heard_ms(), players = nnldn_players(), want = !(rr && rr[0] == '0');
