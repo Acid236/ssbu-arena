@@ -34,12 +34,12 @@ namespace Arena
             RefreshOnline();
             SetPadState();
             StateChanged += (s, e) => Root.Margin = WindowState == WindowState.Maximized ? new Thickness(7) : new Thickness(0);
-            Closing += (s, e) => SaveQuiet();
+            Closing += (s, e) => { SaveQuiet(); if (prep != null) { prepCancelled = true; try { prep.Kill(); } catch { } } };
             var poll = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
             poll.Tick += (s, e) => { int n = Core.XInputCount(); if (n != xinput) { xinput = n; SetPadState(); } };
             poll.Start();
             xinput = Core.XInputCount();
-            Loaded += (s, e) => { RunChecks(); FindPads(); OpenFromArgs(); };
+            Loaded += (s, e) => { RunChecks(); FindPads(); OpenFromArgs(); ResumeAccount(); };
             Scaled.SizeChanged += (s, e) => Rescale();
             SizeChanged += (s, e) => Rescale();
         }
@@ -121,8 +121,14 @@ namespace Arena
         void RefreshPlayer()
         {
             string n = Core.Nickname.Trim();
-            PlayerName.Text = n == "" ? "NO NAME" : n.ToUpperInvariant();
-            PlayerTag.Text = Spaced(Core.Tag(n));
+            if (Account.SignedIn)
+            {
+                PlayerName.Text = Account.Me.Username.ToUpperInvariant();
+                PlayerTag.Text = Spaced("ARENA#" + Account.Me.Tag.ToString("0000"));
+                return;
+            }
+            PlayerName.Text = n == "" ? "OFFLINE" : n.ToUpperInvariant();
+            PlayerTag.Text = Spaced("NOT SIGNED IN");
             UidText.Text = n == "" ? "Write a name." : "Player id (from the name): " + Core.UidFromName(n).Substring(0, 16) + "...";
         }
 
@@ -166,17 +172,20 @@ namespace Arena
             {
                 checks = t.Result.Item1; missingCodecs = t.Result.Item2;
                 int bad = checks.Count(c => !c.Ok);
-                FilesSub.Text = bad == 0 ? "Verified" : bad + (bad == 1 ? " problem" : " problems");
+                bool shaders = Core.CanPrepare() ? !Core.NeedsPrepare() : !Core.FirstRun();
+                FilesSub.Text = bad > 0 ? bad + (bad == 1 ? " problem" : " problems") : shaders ? "Verified" : "Verified, shaders not prepared yet";
                 FilesMark.Content = Mark(bad == 0 ? "ok" : "bad");
-                CheckList.ItemsSource = checks.Select(c => CheckRow(c.Ok, c.Text)).ToList();
+                var rows = checks.Select(c => CheckRow(c.Ok, c.Text)).ToList();
+                rows.Add(CheckRow(shaders, shaders ? "Shaders prepared for this graphics card" : "Shaders not prepared yet: done before the first match (a few minutes, once)", shaders ? "ok" : "warn"));
+                CheckList.ItemsSource = rows;
                 SetState();
             }, TaskScheduler.FromCurrentSynchronizationContext());
         }
 
-        static UIElement CheckRow(bool ok, string text)
+        static UIElement CheckRow(bool ok, string text, string kind = null)
         {
             var sp = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 5, 0, 5) };
-            sp.Children.Add(Mark(ok ? "ok" : "bad", 22));
+            sp.Children.Add(Mark(kind ?? (ok ? "ok" : "bad"), 22));
             sp.Children.Add(new TextBlock { Text = text, FontSize = 15, Margin = new Thickness(14, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center, TextWrapping = TextWrapping.Wrap, MaxWidth = 560 });
             return sp;
         }
@@ -467,7 +476,96 @@ namespace Arena
                 else Show("The game is not ready", null, badFiles.Select(c => c.Text), ("Game files", () => OpenSettings(SecFiles), true), ("Cancel", null, false));
                 return;
             }
-            Start();
+            Action go = () =>
+            {
+                if (Core.CanPrepare() && Core.NeedsPrepare()) { StartPrep(true); return; }      // the shaders first, here, with progress: the game then starts without the long wait
+                Start();
+            };
+            Core.Ticket = null;
+            if (!(Core.Online && Core.HasOnline)) { go(); return; }
+            // online: a fresh lobby ticket for this start (the lobby refuses a game without one)
+            PlayButton.IsEnabled = false;
+            Status("Checking your account...", "busy");
+            Task.Run(() => Account.LobbyTicket()).ContinueWith(t =>
+            {
+                PlayButton.IsEnabled = true;
+                if (t.IsFaulted) { SetState(); Show("Online", "Could not get your online pass: " + t.Exception.GetBaseException().Message, null, ("Play offline", () => { Core.Online = false; OnlineBox.IsChecked = false; SaveQuiet(); RefreshOnline(); go(); }, false), ("OK", null, true)); return; }
+                Core.Ticket = t.Result;
+                SetState();
+                go();
+            }, TaskScheduler.FromCurrentSynchronizationContext());
+        }
+
+        // ---------------------------------------------------------------- account (Account.cs)
+        void ResumeAccount()
+        {
+            Status("Signing in...", "busy");
+            Task.Run(() => { bool ok = Account.Resume(out var err); return Tuple.Create(ok, err); }).ContinueWith(t =>
+            {
+                ApplyAccount();
+                SetState();
+                if (!t.Result.Item1) ShowLogin(t.Result.Item2 != null ? "Cannot reach the Arena server: " + t.Result.Item2 : null);
+            }, TaskScheduler.FromCurrentSynchronizationContext());
+        }
+
+        /// <summary>the account into the window: the player card, Settings > Player, the online state</summary>
+        void ApplyAccount()
+        {
+            bool on = Account.SignedIn;
+            AccountBox.Visibility = on ? Visibility.Visible : Visibility.Collapsed;
+            OfflineBox.Visibility = on ? Visibility.Collapsed : Visibility.Visible;
+            if (on)
+            {
+                AccountName.Text = Account.Me.Display.ToUpperInvariant();
+                AccountEmail.Text = Account.Me.Email;
+                Core.Nickname = Account.Me.Username;
+            }
+            RefreshPlayer();
+            RefreshOnline();
+        }
+
+        void ShowLogin(string error = null)
+        {
+            LoginError.Text = error ?? "";
+            LoginError.Visibility = string.IsNullOrEmpty(error) ? Visibility.Collapsed : Visibility.Visible;
+            LoginOverlay.Visibility = Visibility.Visible;
+            LoginEmail.Focus();
+        }
+
+        void Login_Click(object sender, RoutedEventArgs e)
+        {
+            string email = LoginEmail.Text.Trim(), pw = LoginPassword.Password;
+            if (email == "" || pw == "") { ShowLogin("Write your email and password."); return; }
+            LoginButton.IsEnabled = false; LoginButtonText.Text = "SIGNING IN...";
+            Task.Run(() => Account.SignIn(email, pw)).ContinueWith(t =>
+            {
+                LoginButton.IsEnabled = true; LoginButtonText.Text = "SIGN IN";
+                if (t.IsFaulted) { ShowLogin(t.Exception.GetBaseException().Message); return; }
+                LoginPassword.Clear();
+                LoginOverlay.Visibility = Visibility.Collapsed;
+                ApplyAccount();
+                SetState();
+                Status("Signed in as " + Account.Me.Display, "good");
+            }, TaskScheduler.FromCurrentSynchronizationContext());
+        }
+
+        void Login_KeyDown(object sender, System.Windows.Input.KeyEventArgs e) { if (e.Key == System.Windows.Input.Key.Enter) Login_Click(sender, e); }
+        void CreateAccount_Click(object sender, RoutedEventArgs e) { Core.Open(Account.SignUpPage); }
+        void ManageAccount_Click(object sender, RoutedEventArgs e) { Core.Open(Account.AccountPage); }
+        void ShowLogin_Click(object sender, RoutedEventArgs e) { ShowLogin(); }
+
+        void PlayOffline_Click(object sender, RoutedEventArgs e)
+        {
+            LoginOverlay.Visibility = Visibility.Collapsed;
+            Status("Offline: local play only", "warn");
+            RefreshOnline();
+        }
+
+        void SignOut_Click(object sender, RoutedEventArgs e)
+        {
+            Account.SignOut();
+            ApplyAccount();
+            ShowLogin();
         }
 
         void InstallCodecs()
@@ -475,6 +573,77 @@ namespace Arena
             Status("Installing video codecs...", "busy");
             var ids = missingCodecs.Select(m => m.Split('|')[0]).ToList();
             Task.Run(() => { foreach (var id in ids) Core.InstallCodec(id); }).ContinueWith(t => RunChecks(), TaskScheduler.FromCurrentSynchronizationContext());
+        }
+
+        // ---------------------------------------------------------------- shader preparation
+        Process prep;
+        bool prepThenPlay, prepCancelled;
+        static readonly System.Text.RegularExpressions.Regex PrepField = new System.Text.RegularExpressions.Regex("\"(\\w+)\":(?:\"([^\"]*)\"|(-?\\d+))");
+
+        /// <summary>the game prepares the shaders hidden (Core.StartPrepare); the hero shows the progress; thenPlay: the
+        /// match starts when it is done</summary>
+        void StartPrep(bool thenPlay)
+        {
+            if (prep != null || game != null) return;
+            if (Core.GameRunning()) { Show("Already running", "Close the game first.", null, ("OK", null, true)); return; }
+            prepThenPlay = thenPlay; prepCancelled = false;
+            TabHome.IsChecked = true;
+            PlayButtons.Visibility = Visibility.Collapsed; PrepPanel.Visibility = Visibility.Visible;
+            PrepTitle.Text = "PREPARING SHADERS"; PrepPct.Text = "0%"; SetPrepBar(0);
+            PrepDetail.Text = "Starting the game in the background..."; PrepEta.Text = "";
+            PrepNote.Text = thenPlay ? "Once per graphics card and driver: the game starts right after." : "Once per graphics card and driver.";
+            StateText.Text = Spaced("PREPARING SHADERS"); StateDot.Fill = Res("Accent");
+            Status("Preparing the shaders for this graphics card", "busy");
+            try { prep = Core.StartPrepare(l => Dispatcher.BeginInvoke(new Action(() => PrepLine(l))), c => Dispatcher.BeginInvoke(new Action(() => PrepEnded(c)))); }
+            catch (Exception ex) { prep = null; PrepPanel.Visibility = Visibility.Collapsed; PlayButtons.Visibility = Visibility.Visible; SetState(); Show("Could not prepare the shaders", ex.Message, null, ("OK", null, true)); }
+        }
+
+        void SetPrepBar(double f)
+        {
+            f = Math.Max(0, Math.Min(1, f));
+            PrepDone.Width = new GridLength(f, GridUnitType.Star);
+            PrepLeft.Width = new GridLength(1 - f, GridUnitType.Star);
+        }
+
+        void PrepLine(string l)
+        {
+            if (!l.StartsWith("##prep ")) return;
+            var v = new Dictionary<string, string>();
+            foreach (System.Text.RegularExpressions.Match m in PrepField.Matches(l)) v[m.Groups[1].Value] = m.Groups[2].Success && m.Groups[2].Value != "" ? m.Groups[2].Value : m.Groups[3].Value;
+            if (!v.TryGetValue("state", out var st) || st != "running") return;
+            int pct = v.TryGetValue("pct", out var p) && int.TryParse(p, out var pi) ? pi : 0;
+            int eta = v.TryGetValue("eta", out var e) && int.TryParse(e, out var ei) ? ei : -1;
+            PrepPct.Text = pct + "%";
+            SetPrepBar(pct / 100.0);
+            if (v.TryGetValue("phase", out var ph) && ph == "data") PrepDetail.Text = "Reading the game data";
+            else PrepDetail.Text = string.Format("{0:N0} of about {1:N0} shaders", long.Parse(v.ContainsKey("done") ? v["done"] : "0"), long.Parse(v.ContainsKey("total") ? v["total"] : "0"));
+            PrepEta.Text = eta >= 0 ? string.Format("about {0}:{1:00} left", eta / 60, eta % 60) : "";
+        }
+
+        void PrepEnded(int code)
+        {
+            prep = null;
+            PrepPanel.Visibility = Visibility.Collapsed; PlayButtons.Visibility = Visibility.Visible;
+            RunChecks();
+            if (prepCancelled) { Status("Shader preparation stopped: it goes on from where it was next time", "warn"); return; }
+            if (code == 0) { Core.ShaderStamp = Core.ShaderKey(); SaveQuiet(); Status("Shaders prepared", "good"); if (prepThenPlay) Start(); return; }
+            if (code == 3) { if (prepThenPlay) Start(); else Show("Shaders", "This graphics card prepares its shaders while you play (no stage libraries): nothing to do here.", null, ("OK", null, true)); return; }
+            Show("Shader preparation failed", "Exit code " + code + ". Last lines of build\\prepare.log:", Core.PrepareLogTail(8),
+                 ("Play anyway", () => Start(), false), ("OK", null, true));
+        }
+
+        void PrepCancel_Click(object sender, RoutedEventArgs e)
+        {
+            if (prep == null) return;
+            prepCancelled = true;
+            try { prep.Kill(); } catch { }
+        }
+
+        void PrepareNow_Click(object sender, RoutedEventArgs e)
+        {
+            if (!SaveQuiet()) return;
+            if (!Core.CanPrepare()) { Show("Shaders", "This build of the game cannot prepare its shaders outside the game yet: it prepares them itself at its first start.", null, ("OK", null, true)); return; }
+            StartPrep(false);
         }
 
         void Start()

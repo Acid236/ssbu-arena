@@ -155,6 +155,10 @@ static ModEntry g_mods[MODS_MAX];
 static int g_nmods;
 static uint32_t g_mods_hash;
 static uint8_t g_mods_wire[1 + MODS_MAX * (5 + MOD_NAME)];
+/* SSBU Arena: the signed-in player's lobby ticket (SSBU_ONLINE_TICKET, from the launcher: "<id>|<name>|<expiry>.<HMAC>");
+ * sent after the mod set as "TK" + u16 length + bytes. A lobby that requires tickets (rb_lobby.c --ticket-secret-file) refuses a
+ * game without a valid one and lists the player under the name in it. */
+static char g_ticket[320];
 static int g_mods_wire_len = 1;                        /* (count 0) */
 static char g_mods_text[512] = "none";
 #define FNV0 0xcbf29ce484222325ull
@@ -321,6 +325,7 @@ static void configure(void) {
     if (!g_host_port) g_host_port = VNET_DEFAULT_PORT;
     if (g_mode == NET_MODE_JOIN && !g_join[0]) { printf("[online] join mode without a room code (SSBU_ONLINE=join:<code> or online_join): online play off\n"); fflush(stdout); return; }
     if ((e = getenv("SSBU_ONLINE_NAME")) && *e) snprintf(g_name, sizeof g_name, "%s", e);
+    if ((e = getenv("SSBU_ONLINE_TICKET")) && *e) snprintf(g_ticket, sizeof g_ticket, "%s", e);
     else if (ini_value("online_name", v, sizeof v) && *v) snprintf(g_name, sizeof g_name, "%s", v);
     else if (ini_value("player_name", v, sizeof v) && *v) snprintf(g_name, sizeof g_name, "%s", v);    /* F1 > Experimental > Your name */
     else snprintf(g_name, sizeof g_name, "Player-%04x", (unsigned)(rnd64() & 0xffff));
@@ -1365,7 +1370,7 @@ static int setup(void) {                        /* (client thread) where the lob
 
 static void send_join(void) {
     enum { BASE = 4 + 8 + 2 * NAME_LEN + BUILD_LEN + 4 + 2 + 1 };
-    uint8_t p[BASE + 2 + sizeof g_mods_wire] = {0};
+    uint8_t p[BASE + 2 + sizeof g_mods_wire + 4 + sizeof g_ticket] = {0};
     hdr(p, T_JOIN);
     s64(p + 4, g_nonce);
     memcpy(p + 12, g_code, strlen(g_code));
@@ -1376,7 +1381,9 @@ static void send_join(void) {
     p[18 + 2 * NAME_LEN + BUILD_LEN] = (uint8_t)g_direct;
     p[BASE] = 'M'; p[BASE + 1] = 'S';                  /* O1: this game's mod set (an older lobby reads only BASE bytes) */
     memcpy(p + BASE + 2, g_mods_wire, (size_t)g_mods_wire_len);
-    tx(p, BASE + 2 + g_mods_wire_len, &g_lobby);
+    int n = BASE + 2 + g_mods_wire_len, tl = (int)strlen(g_ticket);
+    if (tl) { p[n] = 'T'; p[n + 1] = 'K'; s16(p + n + 2, (uint16_t)tl); memcpy(p + n + 4, g_ticket, (size_t)tl); n += 4 + tl; }
+    tx(p, n, &g_lobby);
 }
 
 static DWORD WINAPI client_thread(LPVOID unused) {

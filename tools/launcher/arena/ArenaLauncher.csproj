@@ -21,5 +21,9 @@
     <Resource Include="Assets\Fonts\*.ttf" />
     <Resource Include="Assets\arena.ico" />
     <None Remove="Assets\*.svg" />
+    <Reference Include="System.Management" />
+    <Reference Include="System.Web" />
+    <Reference Include="System.Web.Extensions" />
+    <Reference Include="System.Security" />
   </ItemGroup>
 </Project>

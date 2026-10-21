@@ -138,7 +138,30 @@
               <TextBlock Text="ULTIMATE." FontFamily="{StaticResource Display}" FontWeight="ExtraBold" FontStyle="Italic" FontSize="136" Margin="-6,22,0,0" LineHeight="112" LineStackingStrategy="BlockLineHeight"/>
               <TextBlock Text="ON PC." FontFamily="{StaticResource Display}" FontWeight="ExtraBold" FontStyle="Italic" FontSize="136" Foreground="{StaticResource Accent}" Margin="-6,6,0,0" LineHeight="112" LineStackingStrategy="BlockLineHeight"/>
               <TextBlock Text="Your next match starts here." FontSize="26" Foreground="#AEBBCA" Margin="0,30,0,0"/>
-              <StackPanel Orientation="Horizontal" Margin="0,44,0,0">
+              <Grid Margin="0,44,0,0">
+              <!-- the shader preparation (Core.StartPrepare): in place of the buttons while it runs -->
+              <StackPanel x:Name="PrepPanel" Visibility="Collapsed" Width="470" HorizontalAlignment="Left">
+                <StackPanel Orientation="Horizontal">
+                  <TextBlock x:Name="PrepTitle" Text="PREPARING SHADERS" FontFamily="{StaticResource Display}" FontWeight="ExtraBold" FontStyle="Italic" FontSize="34"/>
+                  <TextBlock x:Name="PrepPct" Text="0%" FontFamily="{StaticResource Display}" FontWeight="ExtraBold" FontStyle="Italic" FontSize="34" Foreground="{StaticResource Accent}" Margin="16,0,0,0"/>
+                </StackPanel>
+                <Grid Height="10" Margin="0,14,0,0">
+                  <Grid.ColumnDefinitions><ColumnDefinition x:Name="PrepDone" Width="0*"/><ColumnDefinition x:Name="PrepLeft" Width="1*"/></Grid.ColumnDefinitions>
+                  <Border Grid.ColumnSpan="2" CornerRadius="5" Background="#1E2A38"/>
+                  <Border CornerRadius="5" Background="{StaticResource Accent}">
+                    <Border.Effect><DropShadowEffect Color="#65C7FF" BlurRadius="14" ShadowDepth="0" Opacity="0.6"/></Border.Effect>
+                  </Border>
+                </Grid>
+                <Grid Margin="0,12,0,0">
+                  <TextBlock x:Name="PrepDetail" Text="Starting..." FontSize="16" Foreground="#C9D3DD"/>
+                  <TextBlock x:Name="PrepEta" HorizontalAlignment="Right" FontSize="16" Foreground="{StaticResource Muted}"/>
+                </Grid>
+                <Grid Margin="0,18,0,0">
+                  <TextBlock x:Name="PrepNote" Text="Once per graphics card and driver: the game starts right after." Style="{StaticResource Small}" FontSize="14" VerticalAlignment="Center"/>
+                  <Button Style="{StaticResource Link}" HorizontalAlignment="Right" Click="PrepCancel_Click" FontSize="15">Cancel</Button>
+                </Grid>
+              </StackPanel>
+              <StackPanel x:Name="PlayButtons" Orientation="Horizontal">
                 <Button x:Name="PlayButton" AutomationProperties.Name="Play" Style="{StaticResource Primary}" Width="256" Height="86" Click="Play_Click">
                   <StackPanel Orientation="Horizontal">
                     <Path Data="{StaticResource IcoPlay}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="30" Height="34" Stretch="Uniform" VerticalAlignment="Center"/>
@@ -153,6 +176,7 @@
                   </StackPanel>
                 </Button>
               </StackPanel>
+              </Grid>
             </StackPanel>
           </Grid>
         </Border>
@@ -398,10 +422,27 @@
               <!-- player -->
               <StackPanel x:Name="BoxPlayer">
                 <TextBlock Text="PLAYER" Style="{StaticResource SectionTitle}"/>
-                <TextBlock Style="{StaticResource Small}" FontSize="15" Margin="0,4,0,26" Text="The name other players see. Your Windows user name is never used."/>
-                <TextBlock Text="NAME" Style="{StaticResource FieldLabel}"/>
-                <TextBox x:Name="NameBox" Width="360" HorizontalAlignment="Left" MaxLength="32" TextChanged="Name_Changed"/>
-                <TextBlock x:Name="UidText" Style="{StaticResource Small}" Margin="0,10,0,0"/>
+                <TextBlock Style="{StaticResource Small}" FontSize="15" Margin="0,4,0,26" Text="Your SSBU Arena account: its name is the one other players see online."/>
+                <!-- signed in -->
+                <StackPanel x:Name="AccountBox">
+                  <TextBlock Text="SIGNED IN AS" Style="{StaticResource FieldLabel}"/>
+                  <TextBlock x:Name="AccountName" Style="{StaticResource SectionTitle}" FontSize="40" Foreground="{StaticResource Accent}"/>
+                  <TextBlock x:Name="AccountEmail" Style="{StaticResource Small}" FontSize="15" Margin="0,4,0,0"/>
+                  <WrapPanel Margin="0,22,0,0">
+                    <Button Style="{StaticResource Outline}" Height="42" Margin="0,0,10,10" Click="ManageAccount_Click" FontSize="15">Manage account</Button>
+                    <Button Style="{StaticResource Outline}" Height="42" Margin="0,0,10,10" Click="SignOut_Click" FontSize="15">Sign out</Button>
+                  </WrapPanel>
+                </StackPanel>
+                <!-- offline: a local name for local play only -->
+                <StackPanel x:Name="OfflineBox">
+                  <TextBlock Style="{StaticResource Small}" FontSize="15" Margin="0,0,0,14" Text="Not signed in: online play is off. This name is used for local play only."/>
+                  <TextBlock Text="LOCAL NAME" Style="{StaticResource FieldLabel}"/>
+                  <TextBox x:Name="NameBox" Width="360" HorizontalAlignment="Left" MaxLength="32" TextChanged="Name_Changed"/>
+                  <TextBlock x:Name="UidText" Style="{StaticResource Small}" Margin="0,10,0,0"/>
+                  <Button Style="{StaticResource Primary}" Height="46" HorizontalAlignment="Left" Margin="0,22,0,0" Click="ShowLogin_Click">
+                    <TextBlock Text="Sign in" FontSize="16" FontWeight="SemiBold" Margin="24,0" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+                  </Button>
+                </StackPanel>
               </StackPanel>
 
               <!-- online -->
@@ -509,6 +550,7 @@
                 <ItemsControl x:Name="CheckList"/>
                 <WrapPanel Margin="0,20,0,0">
                   <Button Style="{StaticResource Outline}" Height="42" Margin="0,0,10,10" Click="Recheck_Click" FontSize="15">Check again</Button>
+                  <Button Style="{StaticResource Outline}" Height="42" Margin="0,0,10,10" Click="PrepareNow_Click" FontSize="15">Prepare shaders now</Button>
                   <Button Style="{StaticResource Outline}" Height="42" Margin="0,0,10,10" Click="OpenLog_Click" FontSize="15">Open game log</Button>
                 </WrapPanel>
               </StackPanel>
@@ -532,6 +574,47 @@
     </Grid>
 
     <!-- dialog over everything -->
+    <!-- sign in (Account.cs): over everything until the player signs in or chooses to play offline -->
+    <Grid x:Name="LoginOverlay" Grid.RowSpan="3" Visibility="Collapsed">
+      <Grid.Background>
+        <RadialGradientBrush Center="0.5,0.35" GradientOrigin="0.5,0.35" RadiusX="0.8" RadiusY="0.9">
+          <GradientStop Color="#F2112236" Offset="0"/>
+          <GradientStop Color="#FA0B1018" Offset="0.7"/>
+        </RadialGradientBrush>
+      </Grid.Background>
+      <Path Data="{StaticResource BrandMarkGeometry}" Width="760" Stretch="Uniform" HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="0,0,-120,-140" Opacity="0.05" Fill="{StaticResource Accent}" IsHitTestVisible="False"/>
+      <Border Style="{StaticResource Panel}" Background="#F00F1620" Width="560" HorizontalAlignment="Center" VerticalAlignment="Center" Padding="48,42">
+        <Border.Effect><DropShadowEffect BlurRadius="60" ShadowDepth="0" Opacity="0.55" Color="Black"/></Border.Effect>
+        <StackPanel>
+          <StackPanel Orientation="Horizontal">
+            <Path Data="{StaticResource BrandMarkGeometry}" Fill="{StaticResource Accent}" Width="46" Height="40" Stretch="Uniform"/>
+            <TextBlock Text="SIGN IN" Style="{StaticResource SectionTitle}" FontSize="52" Margin="18,0,0,0" VerticalAlignment="Center"/>
+          </StackPanel>
+          <TextBlock Style="{StaticResource Small}" FontSize="16" Margin="0,10,0,28" Text="Your SSBU Arena account, the same as on ssbuarena.com. Online play needs it."/>
+          <TextBlock Text="EMAIL" Style="{StaticResource FieldLabel}"/>
+          <TextBox x:Name="LoginEmail" Height="46" FontSize="16" KeyDown="Login_KeyDown"/>
+          <TextBlock Text="PASSWORD" Style="{StaticResource FieldLabel}" Margin="0,18,0,6"/>
+          <PasswordBox x:Name="LoginPassword" Height="46" FontSize="16" KeyDown="Login_KeyDown"/>
+          <TextBlock x:Name="LoginError" Foreground="{StaticResource Bad}" FontSize="14" TextWrapping="Wrap" Margin="0,12,0,0" Visibility="Collapsed"/>
+          <Button x:Name="LoginButton" Style="{StaticResource Primary}" Height="58" Margin="0,24,0,0" Click="Login_Click" AutomationProperties.Name="Sign in">
+            <TextBlock x:Name="LoginButtonText" Text="SIGN IN" FontFamily="{StaticResource Display}" FontWeight="ExtraBold" FontStyle="Italic" FontSize="28"
+                       Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+          </Button>
+          <Grid Margin="0,20,0,0">
+            <Button Style="{StaticResource Link}" HorizontalAlignment="Left" Click="CreateAccount_Click" FontSize="15">
+              <StackPanel Orientation="Horizontal">
+                <TextBlock Text="Create account" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+                <Path Data="{StaticResource IcoExternal}" Style="{StaticResource Ico}" Width="14" Height="14" Margin="8,1,0,0"/>
+              </StackPanel>
+            </Button>
+            <Button Style="{StaticResource Bare}" HorizontalAlignment="Right" Click="PlayOffline_Click" Foreground="{StaticResource Muted}">
+              <TextBlock Text="Play offline" FontSize="15" Foreground="{StaticResource Muted}" TextDecorations="Underline"/>
+            </Button>
+          </Grid>
+        </StackPanel>
+      </Border>
+    </Grid>
+
     <Grid x:Name="Dialog" Grid.RowSpan="3" Visibility="Collapsed" Background="#B3050810">
       <Border Style="{StaticResource Panel}" Background="#101824" BorderBrush="#2E4057" MinWidth="460" MaxWidth="680" HorizontalAlignment="Center" VerticalAlignment="Center" Padding="34,28">
         <Border.Effect><DropShadowEffect BlurRadius="40" ShadowDepth="0" Opacity="0.6" Color="Black"/></Border.Effect>

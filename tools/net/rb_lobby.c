@@ -284,11 +284,89 @@ static int mods_block(const uint8_t *raw, int n, uint8_t *out) {
     return o;
 }
 
+/* ---- SSBU Arena accounts: lobby tickets. With --ticket-secret-file, a new player is let in only with a ticket made by the
+ * accounts database (Supabase, public.lobby_ticket): "<user id>|<name>|<expiry, unix s>.<HMAC-SHA256 hex>" after the JOIN's
+ * mod set as "TK" + u16 length + bytes (runtime/net_relay.c send_join). The name in the ticket is the one listed. SHA-256 per
+ * FIPS 180-4, HMAC per RFC 2104; no library. */
+typedef struct { uint32_t h[8]; uint64_t len; uint8_t buf[64]; int nb; } Sha;
+static const uint32_t K256[64] = {
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+    0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+    0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+    0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2};
+#define ROR(x, n) (((x) >> (n)) | ((x) << (32 - (n))))
+static void sha_block(Sha *s, const uint8_t *b) {
+    uint32_t w[64], a = s->h[0], bb = s->h[1], c = s->h[2], d = s->h[3], e = s->h[4], f = s->h[5], g = s->h[6], h = s->h[7];
+    for (int i = 0; i < 16; i++) w[i] = (uint32_t)b[4 * i] << 24 | (uint32_t)b[4 * i + 1] << 16 | (uint32_t)b[4 * i + 2] << 8 | b[4 * i + 3];
+    for (int i = 16; i < 64; i++) w[i] = w[i - 16] + (ROR(w[i - 15], 7) ^ ROR(w[i - 15], 18) ^ (w[i - 15] >> 3)) + w[i - 7] + (ROR(w[i - 2], 17) ^ ROR(w[i - 2], 19) ^ (w[i - 2] >> 10));
+    for (int i = 0; i < 64; i++) {
+        uint32_t t1 = h + (ROR(e, 6) ^ ROR(e, 11) ^ ROR(e, 25)) + ((e & f) ^ (~e & g)) + K256[i] + w[i];
+        uint32_t t2 = (ROR(a, 2) ^ ROR(a, 13) ^ ROR(a, 22)) + ((a & bb) ^ (a & c) ^ (bb & c));
+        h = g; g = f; f = e; e = d + t1; d = c; c = bb; bb = a; a = t1 + t2;
+    }
+    s->h[0] += a; s->h[1] += bb; s->h[2] += c; s->h[3] += d; s->h[4] += e; s->h[5] += f; s->h[6] += g; s->h[7] += h;
+}
+static void sha_init(Sha *s) {
+    static const uint32_t iv[8] = {0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19};
+    memcpy(s->h, iv, sizeof iv); s->len = 0; s->nb = 0;
+}
+static void sha_add(Sha *s, const uint8_t *p, size_t n) {
+    s->len += n;
+    while (n--) { s->buf[s->nb++] = *p++; if (s->nb == 64) { sha_block(s, s->buf); s->nb = 0; } }
+}
+static void sha_end(Sha *s, uint8_t out[32]) {
+    uint64_t bits = s->len * 8;
+    uint8_t z = 0x80; sha_add(s, &z, 1); z = 0;
+    while (s->nb != 56) sha_add(s, &z, 1);
+    uint8_t l[8]; for (int i = 0; i < 8; i++) l[i] = (uint8_t)(bits >> (56 - 8 * i));
+    sha_add(s, l, 8);
+    for (int i = 0; i < 8; i++) { out[4 * i] = (uint8_t)(s->h[i] >> 24); out[4 * i + 1] = (uint8_t)(s->h[i] >> 16); out[4 * i + 2] = (uint8_t)(s->h[i] >> 8); out[4 * i + 3] = (uint8_t)s->h[i]; }
+}
+static void hmac_sha256(const uint8_t *key, size_t kn, const uint8_t *msg, size_t mn, uint8_t out[32]) {
+    uint8_t k[64] = {0}, pad[64], inner[32]; Sha s;
+    if (kn > 64) { sha_init(&s); sha_add(&s, key, kn); sha_end(&s, k); } else memcpy(k, key, kn);
+    for (int i = 0; i < 64; i++) pad[i] = k[i] ^ 0x36;
+    sha_init(&s); sha_add(&s, pad, 64); sha_add(&s, msg, mn); sha_end(&s, inner);
+    for (int i = 0; i < 64; i++) pad[i] = k[i] ^ 0x5c;
+    sha_init(&s); sha_add(&s, pad, 64); sha_add(&s, inner, 32); sha_end(&s, out);
+}
+static char g_ticket_secret[129];                          /* the database's secret as text (64 hex characters), "" = tickets not required */
+/* 1 when the ticket is the database's and not expired; *name gets the name in it. why = the reason told to the game. */
+static int ticket_ok(const uint8_t *t, int tn, char *name, const char **why) {
+    char s[320]; const char *dot, *bar1, *bar2;
+    *why = "sign in to SSBU Arena (the launcher) to play online";
+    if (tn <= 0 || tn >= (int)sizeof s) return 0;
+    memcpy(s, t, (size_t)tn); s[tn] = 0;
+    if (!(dot = strrchr(s, '.')) || strlen(dot + 1) != 64 || !(bar1 = strchr(s, '|')) || !(bar2 = strchr(bar1 + 1, '|')) || bar2 > dot) return 0;
+    uint8_t mac[32]; char hex[65];
+    hmac_sha256((const uint8_t *)g_ticket_secret, strlen(g_ticket_secret), (const uint8_t *)s, (size_t)(dot - s), mac);
+    for (int i = 0; i < 32; i++) snprintf(hex + 2 * i, 3, "%02x", mac[i]);
+    unsigned diff = 0; for (int i = 0; i < 64; i++) diff |= (unsigned)(hex[i] ^ dot[1 + i]);
+    if (diff) return 0;
+    if (atoll(bar2 + 1) < (long long)time(NULL)) { *why = "your online pass expired: start the game again from the SSBU Arena launcher"; return 0; }
+    int nl = (int)(bar2 - bar1 - 1); if (nl > NAME_LEN) nl = NAME_LEN;
+    memcpy(name, bar1 + 1, (size_t)nl); name[nl] = 0;
+    return 1;
+}
+
 static void on_join(const uint8_t *p, int n, const struct sockaddr_in *at, Client *c) {
     if (n < JOIN_LEN) return;
     Client tmp; memset(&tmp, 0, sizeof tmp);
     text(tmp.code, p + 12, CODE_LEN, NULL);
     text(tmp.name, p + 44, NAME_LEN, "Player");
+    if (g_ticket_secret[0] && !c) {                         /* accounts: a new player needs the database's ticket; its name is the one listed */
+        static uint8_t mods[1 + MODS_MAX * (5 + MOD_NAME)];
+        int ml = n > JOIN_LEN + 2 && p[JOIN_LEN] == 'M' && p[JOIN_LEN + 1] == 'S' ? mods_block(p + JOIN_LEN + 2, n - JOIN_LEN - 2, mods) : -1;
+        int o = ml >= 0 ? JOIN_LEN + 2 + ml : n, tn = 0;
+        const char *why = "sign in to SSBU Arena (the launcher) to play online";
+        if (o + 4 <= n && p[o] == 'T' && p[o + 1] == 'K') tn = (int)(p[o + 2] << 8 | p[o + 3]);
+        if (!tn || o + 4 + tn > n || !ticket_ok(p + o + 4, tn, tmp.name, &why)) {
+            uint8_t b[4 + 8 + 64], *q = hdr(b, REJECT); q = wbytes(q, p + 4, 8);
+            wpad(q, why, strlen(why), 64); tsend(b, sizeof b, at); return;
+        }
+    }
     int bl = BUILD_LEN; while (bl > 0 && !p[76 + bl - 1]) bl--;
     memcpy(tmp.build, p + 76, (size_t)bl); tmp.build_len = bl;
     if (c && memcmp(c->nonce, p + 4, 8)) { drop(c, "restarted"); c = NULL; }
@@ -557,6 +635,13 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--search-secs")) g_search_for = atof(argv[i + 1]);
         else if (!strcmp(argv[i], "--match-secs")) g_match_for = atof(argv[i + 1]);
         else if (!strcmp(argv[i], "--stats")) stats = atof(argv[i + 1]);
+        else if (!strcmp(argv[i], "--ticket-secret-file")) {      /* SSBU Arena accounts: online needs a signed-in player */
+            FILE *f = fopen(argv[i + 1], "r");
+            if (!f || !fgets(g_ticket_secret, sizeof g_ticket_secret, f)) { fprintf(stderr, "cannot read the ticket secret %s\n", argv[i + 1]); return 2; }
+            fclose(f);
+            g_ticket_secret[strcspn(g_ticket_secret, "\r\n \t")] = 0;
+            if (strlen(g_ticket_secret) < 32) { fprintf(stderr, "the ticket secret in %s is too short\n", argv[i + 1]); return 2; }
+        }
         else { fprintf(stderr, "unknown option %s\n", argv[i]); return 2; }
     }
     signal(SIGPIPE, SIG_IGN);
@@ -564,7 +649,8 @@ int main(int argc, char **argv) {
     int big = 4 << 20; setsockopt(g_sock, SOL_SOCKET, SO_RCVBUF, &big, sizeof big); setsockopt(g_sock, SOL_SOCKET, SO_SNDBUF, &big, sizeof big);
     struct sockaddr_in sa = {0}; sa.sin_family = AF_INET; sa.sin_port = htons((uint16_t)port);
     if (inet_pton(AF_INET, bind_to, &sa.sin_addr) != 1 || bind(g_sock, (struct sockaddr *)&sa, sizeof sa) < 0) { perror("bind"); return 1; }
-    say("lobby on UDP %s:%d (protocol SU %d, lobby %s, relay only)", bind_to, port, PROTO, LOBBY_VERSION);
+    say("lobby on UDP %s:%d (protocol SU %d, lobby %s, relay only; %s)", bind_to, port, PROTO, LOBBY_VERSION,
+        g_ticket_secret[0] ? "SSBU Arena accounts: signed-in players only" : "no account check");
     static uint8_t buf[BATCH][PKT_MAX]; static struct sockaddr_in from[BATCH]; static struct iovec iov[BATCH]; static struct mmsghdr msg[BATCH];
     for (int i = 0; i < BATCH; i++) {
         iov[i].iov_base = buf[i]; iov[i].iov_len = PKT_MAX;

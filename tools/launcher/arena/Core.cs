@@ -56,6 +56,8 @@ namespace Arena
         // settings (launcher.ini and the game's ini files)
         public static string Nickname = "", Server = DefaultServer, Code = "", Saves;
         public static bool Online, Rollback = true, Ping = true, Competitive = true;
+        public static string ShaderStamp = "";
+        public static string Ticket;                // the lobby ticket of this start (Account.LobbyTicket), signed in only      // launcher.ini shaders: what the last preparation was made for (ShaderKey)
         public static int Aspect, WindowMode, Keyboard;
         public static string WindowSize = "1280x720";
         public static string Player1 = "auto", Player2 = "auto";
@@ -91,6 +93,7 @@ namespace Arena
             Code = Get(L, "code") ?? Get(O, "room") ?? "";
             Rollback = Get(L, "rollback") != "off";
             Ping = Get(L, "ping") != "off";
+            ShaderStamp = Get(L, "shaders") ?? "";
             Competitive = LightArc || (HasCompetitive && Get(L, "competitive") != "off");
             if (!HasOnline) Online = false;
             foreach (var old in new[] { "online.ini.off", "online.ini.old" })      // an older launcher's settings: code and name
@@ -116,7 +119,9 @@ namespace Arena
         public static void Save()
         {
             string n = Nickname.Trim();
-            if (Online && HasOnline && n != "") File.WriteAllText(Path.Combine(Cfg, "account.txt"), UidFromName(n) + "\r\n", Encoding.ASCII);
+            // the console account id the game uses (nnfs.c): from the Arena account when signed in (the same on every PC)
+            if (Online && HasOnline && Account.SignedIn) File.WriteAllText(Path.Combine(Cfg, "account.txt"), UidFromName("arena:" + Account.Me.Id) + "\r\n", Encoding.ASCII);
+            else if (Online && HasOnline && n != "") File.WriteAllText(Path.Combine(Cfg, "account.txt"), UidFromName(n) + "\r\n", Encoding.ASCII);
             // the old local wireless online (online.ini, a server that is gone) is never used again: kept aside
             if (File.Exists(OnlineIni))
             {
@@ -128,7 +133,7 @@ namespace Arena
                 "# written by the launcher", "saves = " + Saves, "nickname = " + n,
                 "competitive = " + (Competitive ? "on" : "off"), "online = " + (Online ? "on" : "off"),
                 "server = " + Server.Trim(), "code = " + Code.Trim(),
-                "rollback = " + (Rollback ? "on" : "off"), "ping = " + (Ping ? "on" : "off") }, Encoding.ASCII);
+                "rollback = " + (Rollback ? "on" : "off"), "ping = " + (Ping ? "on" : "off"), "shaders = " + ShaderStamp }, Encoding.ASCII);
             var gfx = new Dictionary<string, string> {
                 { "aspect", Aspect == 1 ? "stretch" : "keep" },
                 { "window", new[] { "windowed", "borderless", "fullscreen" }[Math.Max(0, Math.Min(2, WindowMode))] },
@@ -243,9 +248,8 @@ namespace Arena
         {
             var bad = new List<string>();
             if (!Online) return bad;
-            string n = Nickname.Trim(), code = Code.Trim();
-            if (n == "") bad.Add("Online: choose a player name");
-            else if (Encoding.UTF8.GetByteCount(n) > 32) bad.Add("Player name too long (32 bytes at most)");
+            string code = Code.Trim();
+            if (!Account.SignedIn) bad.Add("Online play needs your SSBU Arena account: sign in (Settings > Player), or turn online off");
             if (!Regex.IsMatch(Server.Trim(), @"^[^\s:]+:\d+$")) bad.Add("Online: server must be address:port");
             if (Regex.IsMatch(code, @"\s")) bad.Add("Online: the friend code cannot have spaces");
             else if (Encoding.UTF8.GetByteCount(code) > 31) bad.Add("Online: friend code too long (31 at most)");
@@ -393,7 +397,96 @@ namespace Arena
         public static void ClearDlc() { if (File.Exists(DlcFile)) File.Delete(DlcFile); }
 
         // ---------------------------------------------------------------- the game
-        public static bool FirstRun() { return !Directory.Exists(Path.Combine(Build, @"cache\vk")) || Directory.GetFiles(Path.Combine(Build, @"cache\vk"), "prepared_*.txt").Length == 0; }
+        /// <summary>no preparation marker yet (the game writes one per GPU, driver and translator version): the shaders
+        /// are not prepared on this PC. A new driver or game version makes a new marker name: then the game prepares them
+        /// itself at its first start, as before.</summary>
+        public static bool FirstRun() { return !Directory.Exists(VkCache) || Directory.GetFiles(VkCache, "prepared_*.txt").Length == 0; }
+
+        /// <summary>the game's shader cache folder (runtime vkc_dir: SSBU_VK_CACHE, relative to work\, else build\cache\vk)</summary>
+        public static string VkCache
+        {
+            get { string e = Environment.GetEnvironmentVariable("SSBU_VK_CACHE"); return !string.IsNullOrEmpty(e) ? Path.GetFullPath(Path.Combine(Work, e)) : Path.Combine(Build, @"cache\vk"); }
+        }
+
+        /// <summary>what a preparation is valid for: the game's exe (a new version may translate shaders differently: the
+        /// marker's name then changes) and the graphics drivers (the marker and the pipeline cache are per driver)</summary>
+        public static string ShaderKey()
+        {
+            string k = "";
+            try { var fi = new FileInfo(Exe); k = fi.Length + "-" + fi.LastWriteTimeUtc.Ticks; } catch { }
+            try
+            {
+                using (var q = new System.Management.ManagementObjectSearcher("SELECT DriverVersion FROM Win32_VideoController"))
+                    foreach (var o in q.Get()) k += "-" + o["DriverVersion"];
+            }
+            catch { }
+            return k;
+        }
+
+        /// <summary>the preparation should run before a match: never made, or made for another exe or driver (a run with
+        /// nothing to do ends in a few seconds with "already")</summary>
+        public static bool NeedsPrepare() { return FirstRun() || ShaderStamp != ShaderKey(); }
+
+        static string PrepExe()
+        {
+            string exe = Environment.GetEnvironmentVariable("SSBU_ARENA_PREP_EXE");
+            return !string.IsNullOrEmpty(exe) ? Path.Combine(Work, exe) : Exe;
+        }
+
+        static int canPrepare = -1;
+        /// <summary>the game's exe knows SSBU_PREPARE_ONLY (an older one would boot hidden and never end): else the game
+        /// prepares its shaders itself at its first start, as before</summary>
+        public static bool CanPrepare()
+        {
+            if (canPrepare < 0)
+                try { canPrepare = File.Exists(PrepExe()) && File.ReadAllText(PrepExe(), Encoding.ASCII).Contains("SSBU_PREPARE_ONLY") ? 1 : 0; } catch { canPrepare = 0; }
+            return canPrepare == 1;
+        }
+
+        /// <summary>what every start of the game gets, a match or the shader preparation</summary>
+        static void GameEnv(System.Collections.Specialized.StringDictionary env)
+        {
+            foreach (var v in new[] { "SSBU_ONLINE", "SSBU_ONLINE_CODE", "SSBU_ONLINE_NAME", "SSBU_ONLINE_DIRECT", "SSBU_NICKNAME", "SSBU_RB_NET", "SSBU_R1_GAMEDLL", "SSBU_NRO_BIN", "SSBU_NET_PING", "SSBU_COMPETITIVE_UI",
+                                      "SSBU_PREPARE_ONLY", "SSBU_SHOW", "SSBU_ONLINE_TICKET" })
+                env.Remove(v);
+            env["SSBU_ROMFS"] = RomFS ?? "";
+            env["SSBU_USERDATA"] = Saves;
+            env["SSBU_FONTS"] = Fonts;
+            env["SSBU_LOOSE_FILES"] = Competitive ? "1" : "0";      // build\characters\competitive (runtime/loose_files.c)
+            env["SSBU_LATENCY"] = "normal";                          // wins over a latency = low / lowest written by hand in graphics.ini
+            env["SSBU_COMPETITIVE"] = env["SSBU_LOOSE_FILES"];       // no FS meter, no random items (runtime/competitive.c)
+        }
+
+        /// <summary>the shader preparation without the game's window (runtime/nvn_vk_draw.c, SSBU_PREPARE_ONLY): the game
+        /// boots hidden, prepares as on a first start, prints "##prep {json}" lines and ends once the pipeline cache and the
+        /// marker are written. Every line also goes to build\prepare.log. SSBU_ARENA_PREP_EXE names another exe (tests).</summary>
+        public static Process StartPrepare(Action<string> line, Action<int> exited)
+        {
+            Directory.CreateDirectory(Path.Combine(Build, "cache"));
+            var psi = new ProcessStartInfo(PrepExe(), "\"" + MainElf + "\" 0") { WorkingDirectory = Work, UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
+            var env = psi.EnvironmentVariables;
+            GameEnv(env);
+            env["SSBU_ONLINE"] = "off";
+            env["SSBU_SHOW"] = "0";
+            env["SSBU_PREPARE_ONLY"] = "1";
+            var log = new StreamWriter(Path.Combine(Build, "prepare.log"), false, new UTF8Encoding(false)) { AutoFlush = true };
+            var p = new Process { StartInfo = psi };
+            DataReceivedEventHandler h = (s, e) => { if (e.Data == null) return; lock (log) { try { log.WriteLine(e.Data); } catch { } } line(e.Data); };
+            p.OutputDataReceived += h;
+            p.ErrorDataReceived += h;
+            p.Start();
+            p.BeginOutputReadLine();
+            p.BeginErrorReadLine();
+            System.Threading.Tasks.Task.Run(() =>
+            {
+                p.WaitForExit();                    // without a timeout: also waits for the last output lines
+                int code = -1;
+                try { code = p.ExitCode; } catch { }
+                lock (log) { try { log.Dispose(); } catch { } }
+                exited(code);
+            });
+            return p;
+        }
 
         /// <summary>starts the game with the environment of the settings; its output goes to game.log through a hidden
         /// cmd.exe (whose exit code is the game's)</summary>
@@ -403,19 +496,13 @@ namespace Arena
             Directory.CreateDirectory(Path.Combine(Build, "cache"));
             var psi = new ProcessStartInfo(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "cmd.exe")) { WorkingDirectory = Work, UseShellExecute = false, CreateNoWindow = true };
             var env = psi.EnvironmentVariables;
-            foreach (var v in new[] { "SSBU_ONLINE", "SSBU_ONLINE_CODE", "SSBU_ONLINE_NAME", "SSBU_ONLINE_DIRECT", "SSBU_NICKNAME", "SSBU_RB_NET", "SSBU_R1_GAMEDLL", "SSBU_NRO_BIN", "SSBU_NET_PING", "SSBU_COMPETITIVE_UI" })
-                env.Remove(v);
-            env["SSBU_ROMFS"] = RomFS ?? "";
-            env["SSBU_USERDATA"] = Saves;
-            env["SSBU_FONTS"] = Fonts;
-            env["SSBU_LOOSE_FILES"] = Competitive ? "1" : "0";      // build\characters\competitive (runtime/loose_files.c)
-            env["SSBU_LATENCY"] = "normal";                          // wins over a latency = low / lowest written by hand in graphics.ini
-            env["SSBU_COMPETITIVE"] = env["SSBU_LOOSE_FILES"];       // no FS meter, no random items (runtime/competitive.c)
+            GameEnv(env);
             string run = Exe;
             // online through the lobby server (runtime/net_relay.c), relay only; rollback (runtime/rb_net.c) in Smash > Versus
-            if (Online && HasOnline)
+            if (Online && HasOnline && Account.SignedIn)
             {
-                string n = Nickname.Trim(), code = Code.Trim();
+                string n = Account.Me.Username, code = Code.Trim();
+                env["SSBU_ONLINE_TICKET"] = Ticket ?? "";              // the lobby takes the player's name from it (rb_lobby.c)
                 env["SSBU_ONLINE"] = Server.Trim();
                 env["SSBU_ONLINE_NAME"] = n;
                 env["SSBU_NICKNAME"] = n;
@@ -443,11 +530,13 @@ namespace Arena
             return p;
         }
 
-        public static string[] LogTail(int n)
+        public static string[] PrepareLogTail(int n) { return LogTail(n, Path.Combine(Build, "prepare.log")); }
+
+        public static string[] LogTail(int n, string file = null)
         {
             try
             {
-                using (var fs = new FileStream(GameLog, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                using (var fs = new FileStream(file ?? GameLog, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
                 using (var sr = new StreamReader(fs))
                 {
                     var all = sr.ReadToEnd().Split('\n').Select(l => l.TrimEnd('\r')).Where(l => l != "").ToArray();
