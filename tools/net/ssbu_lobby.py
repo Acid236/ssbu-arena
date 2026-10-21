@@ -29,6 +29,13 @@ both are in the same room (TOGETHER), when one cancels or leaves (PEER_LEFT), or
 with the number of players searching and the players of every build of this lobby code. An older game never sends
 MATCH: it is never matched.
 
+Rollback matchmaking (R3 net3, lobby 1.4): MATCH op 2 is a search for a ROLLBACK match (Smash versus with online
+rollback, rb_net.c): such searches are paired only with each other (never with a Local Wireless search, op 1), the one
+that waited longer is player 1 (ROLE_HOST); there is no room: both games are held at their match set-up and agree on the
+match over RB messages (16) addressed to each other. The lobby counts the pair TOGETHER once it relayed RB both ways
+between them. On the public lobby code an RB message to one player is relayed only to the player matched with the
+sender (or a player of its Local Wireless room). An older lobby ignores op 2 (the game then says "older lobby").
+
 Python 3.8+, standard library only. No authentication or encryption yet: run it for people you know."""
 import argparse
 import json
@@ -43,7 +50,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PROTO = 1
-LOBBY_VERSION = "1.3"
+LOBBY_VERSION = "1.4"
 (JOIN, WELCOME, REJECT, PING, PONG, DATA, LEAVE, LIST, LISTING, LIST_END,
  PEERS, PUNCH, DIRECT, BCAST) = range(1, 15)
 RB = 16          # online rollback messages between two games (recomp-study/net_relay.c T_RB, rb_net.c)
@@ -51,6 +58,7 @@ ROOMS, ROOM_INFO, ROOMS_END = 17, 18, 19     # O1 room browser (net_relay.c): ev
 MATCH, MATCH_STATE = 20, 21                  # O2 matchmaking (net_relay.c): find an opponent of the same build and code
 (MS_IDLE, MS_SEARCHING, MS_MATCHED, MS_TIMEOUT, MS_PEER_LEFT, MS_TOGETHER, MS_EXPIRED) = range(7)
 ROLE_HOST, ROLE_JOIN = 1, 2
+KIND_ROOM, KIND_ROLLBACK = 1, 2              # MATCH op 1 / op 2: a Local Wireless search, a rollback-match search (1.4)
 SEARCH_FOR, MATCH_FOR = 120.0, 180.0         # seconds (--search-secs, --match-secs)
 MODS_MAX, MOD_NAME, ROOMS_MAX = 32, 31, 32
 NAME_LEN, BUILD_LEN = 32, 40
@@ -127,12 +135,15 @@ class Client:
         self.search_since = None  # searching since (None: not searching)
         self.match = None         # the Match it is in
         self.final = None         # (search id, state, role, peer ip, peer name): how its last search ended (sent again if asked)
+        self.kind = KIND_ROOM     # 1.4: what it searches (KIND_ROOM / KIND_ROLLBACK)
+        self.rb_peer = 0          # 1.4: the player of its last rollback match (RB to it is relayed on the public code)
 
 
 class Match:
     def __init__(self, host, guest, now):
         self.host, self.guest, self.at = host, guest, now
         self.room_said = False    # the guest was told the host's room is open
+        self.rb_seen = set()      # (rollback matches) the players whose RB to the other one the lobby relayed
 
     def other(self, c):
         return self.guest if c is self.host else self.host
@@ -273,13 +284,26 @@ class Lobby:
             self.on_match(c, p[12], struct.unpack_from(">I", p, 13)[0], now)
         elif kind == RB and 16 < len(p) <= 1500 and struct.unpack_from(">Q", p, 4)[0] == c.cookie:
             # online rollback message: to one player of the same lobby code (destination 0 = all others, only with a private code)
+            # (1.4) on the public code only to its matched rollback opponent or a player of its Local Wireless room
             dst = struct.unpack_from(">I", p, 12)[0]
             if dst == 0 and c.part[1] == "public":
                 return
+            if dst and c.part[1] == "public" and dst != c.rb_peer:
+                room = self.room_of(c)
+                if room is None or dst not in [m.ip for m in self.members(room)]:
+                    self.stats["dropped"] += 1
+                    return
             out = hdr(RB) + struct.pack(">I", c.ip) + p[16:]
             for x in list(self.by_at.values()):
                 if x is not c and x.part == c.part and (dst == 0 or x.ip == dst):
                     self.send(out, x.at)
+            m = c.match
+            if dst and m is not None and c.kind == KIND_ROLLBACK and m.other(c).ip == dst:
+                m.rb_seen.add(c.ip)
+                if len(m.rb_seen) == 2:
+                    h, g = m.host, m.guest
+                    self.match_end(h, MS_TOGETHER, "playing a rollback match with %s" % g.name)
+                    self.match_end(g, MS_TOGETHER, "playing a rollback match with %s" % h.name)
         elif kind == DATA and len(p) >= 16:
             self.on_data(c, p, 4, now, ())
         elif kind == BCAST and len(p) >= 5:
@@ -437,7 +461,7 @@ class Lobby:
         for m in set(before) | set(after):
             if m is not c:
                 self.send(p, m.at)
-        if c.match is not None and c.match.host is c:
+        if c.match is not None and c.match.host is c and c.kind == KIND_ROOM:
             self.match_room(c.match, room, now)
 
     # ---- O2 matchmaking
@@ -474,7 +498,9 @@ class Lobby:
         self.say("match: %s: %s" % (c.name, why))
 
     def on_match(self, c, op, sid, now):
-        """MATCH from a game: op 1 = search (sent again every 2 s while it waits: the answer says how it stands), 0 = cancel."""
+        """MATCH from a game: op 1 = search (sent again every 2 s while it waits: the answer says how it stands), 0 = cancel,
+        2 = (1.4) search for a rollback match (paired only with another op 2 search; no room: the one that waited longer is
+        player 1, ROLE_HOST)."""
         if op == 0:
             if c.match is not None:
                 other = c.match.other(c)
@@ -484,7 +510,7 @@ class Lobby:
                 self.say("match: %s stopped searching" % c.name)
             c.search_since, c.search_id, c.final = None, sid, (sid, MS_IDLE, 0, 0, b"")
             return self.match_send(c, now)
-        if op != 1:
+        if op not in (KIND_ROOM, KIND_ROLLBACK):
             return
         if c.search_id == sid and (c.match is not None or c.search_since is not None or c.final is not None):
             return self.match_send(c, now)          # the same search: how it stands (or how it ended)
@@ -492,23 +518,25 @@ class Lobby:
             other = c.match.other(c)
             c.match = None
             self.match_end(other, MS_PEER_LEFT, "%s searches again" % c.name)
-        c.search_id, c.search_since, c.final = sid, now, None
-        self.say("match: %s searches an opponent (build %s)" % (c.name, c.part[0].decode("ascii", "replace")))
-        waiting = [x for x in self.by_at.values() if x is not c and x.part == c.part and x.search_since is not None and x.match is None]
+        c.search_id, c.search_since, c.final, c.kind = sid, now, None, op
+        self.say("match: %s searches an opponent%s (build %s)" % (c.name, " for a rollback match" if op == KIND_ROLLBACK else "", c.part[0].decode("ascii", "replace")))
+        waiting = [x for x in self.by_at.values() if x is not c and x.part == c.part and x.search_since is not None and x.match is None and x.kind == op]
         if not waiting:
             return self.match_send(c, now)
         o = min(waiting, key=lambda x: x.search_since)
 
         def hosts_open(x):
-            return x.room is not None and x.room.is_open()
+            return op == KIND_ROOM and x.room is not None and x.room.is_open()
         host = c if hosts_open(c) and not hosts_open(o) else o   # the one with an open room hosts, else the one that waited longer
         m = Match(host, o if host is c else c, now)
         for x in (c, o):
             x.match, x.search_since = m, None
-        self.say("match: %s hosts, %s joins" % (m.host.name, m.guest.name))
+        if op == KIND_ROLLBACK:
+            c.rb_peer, o.rb_peer = o.ip, c.ip
+        self.say("match: %s hosts, %s joins%s" % (m.host.name, m.guest.name, " (rollback match)" if op == KIND_ROLLBACK else ""))
         self.match_send(m.host, now)
         self.match_send(m.guest, now)
-        if m.host.room is not None:
+        if m.host.room is not None and op == KIND_ROOM:
             self.match_room(m, m.host.room, now)
 
     def match_room(self, m, room, now):

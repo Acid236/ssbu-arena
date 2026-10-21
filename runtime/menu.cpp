@@ -1387,6 +1387,12 @@ static uint32_t sec_match(void) {
         else ImGui::TextDisabled("Searching for an opponent: not known (an older lobby server)");
     }
     float bw = ImGui::GetFontSize() * 11;
+    if (m.kind == 2 && (m.state == MM_ASKING || m.state == MM_SEARCHING || m.state == MM_MATCHED || m.state == MM_TOGETHER)) {   /* (R3 net3) rb_net.c's search */
+        if (m.state == MM_ASKING || m.state == MM_SEARCHING) ImGui::TextColored(amber, "Rollback match (Smash versus): finding an opponent... %d s", m.waited_s);
+        else ImGui::TextColored(green, "Rollback match (Smash versus) with %s", m.peer_name);
+        help("Started by a Smash (versus) match with rollback on and no room code; the box over the game shows each step (Esc or B held stops waiting).");
+        return 0;
+    }
     switch (m.state) {
     case MM_ASKING:
     case MM_SEARCHING:

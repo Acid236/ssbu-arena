@@ -1164,7 +1164,13 @@ static HANDLE g_cp_go[8], g_cp_done[8];
 static void cp_add(uint8_t *d, const uint8_t *s) { if (g_ncj >= g_cjcap) { g_cjcap = g_cjcap ? g_cjcap * 2 : 65536; g_cj = realloc(g_cj, g_cjcap * sizeof *g_cj); } g_cj[g_ncj].d = d; g_cj[g_ncj].s = s; g_ncj++; }
 static void cp_add_range(uint8_t *d, const uint8_t *s, size_t n) { for (size_t o = 0; o < n; o += PG) cp_add(d + o, s + o); }
 static uint8_t *g_cp_cmp;                             /* (R2 round 3) set: the queued jobs are COMPARED (g_cp_cmp[i] = 1 if they differ), not copied */
-static void cp_part(int k) { size_t a = g_ncj * (size_t)k / (size_t)(g_ncp + 1), b = g_ncj * (size_t)(k + 1) / (size_t)(g_ncp + 1); if (g_cp_cmp) { for (size_t i = a; i < b; i++) g_cp_cmp[i] = memcmp(g_cj[i].d, g_cj[i].s, PG) != 0; } else for (size_t i = a; i < b; i++) memcpy(g_cj[i].d, g_cj[i].s, PG); }
+/* (R3 net3) g_cp_cond set: each queued page is copied only if it differs from its source (a ring load: most learned pages
+ * already hold the value being loaded; reading both is cheaper than writing the page); g_cp_wrote[k] counts the copies */
+static int g_cp_cond; static volatile long long g_cp_wrote[9];
+static void cp_part(int k) { size_t a = g_ncj * (size_t)k / (size_t)(g_ncp + 1), b = g_ncj * (size_t)(k + 1) / (size_t)(g_ncp + 1);
+    if (g_cp_cmp) { for (size_t i = a; i < b; i++) g_cp_cmp[i] = memcmp(g_cj[i].d, g_cj[i].s, PG) != 0; }
+    else if (g_cp_cond) { long long w = 0; for (size_t i = a; i < b; i++) if (memcmp(g_cj[i].d, g_cj[i].s, PG)) { memcpy(g_cj[i].d, g_cj[i].s, PG); w++; } g_cp_wrote[k < 9 ? k : 8] += w; }
+    else for (size_t i = a; i < b; i++) memcpy(g_cj[i].d, g_cj[i].s, PG); }
 static DWORD WINAPI cp_thread(void *p) { int k = (int)(intptr_t)p; for (;;) { WaitForSingleObject(g_cp_go[k], INFINITE); cp_part(k + 1); SetEvent(g_cp_done[k]); } return 0; }
 static void cp_init(void) {
     if (g_ncp >= 0) return;

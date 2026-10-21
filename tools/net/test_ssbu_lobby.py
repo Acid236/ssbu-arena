@@ -8,6 +8,8 @@ names host, players, build and mods; a join across builds never reaches the othe
 O2 matchmaking: only players of the same build and lobby code are paired, the one that waited longer (or the one with an
 open room) hosts, the guest is told when the host's room opens and sees it first in its list, both are told when they
 are in one room; cancel, leaving, timeout and expiry; an older game is never matched; PONG counts the searching players.
+Rollback matchmaking (1.4, MATCH op 2): paired only with another rollback search, the one that waited longer is player 1,
+RB between the pair is relayed and makes both TOGETHER, on the public code a stranger's RB never reaches them.
     python test_ssbu_lobby.py        (starts the lobby itself on a free port; standard library only)
     LOBBY_EXE=<minilobby.exe> python test_ssbu_lobby.py   (the same against net_minilobby.c built standalone:
         clang -DMINILOBBY_MAIN -x c net_minilobby.c -o minilobby.exe -lws2_32 -ladvapi32; no status endpoint there)"""
@@ -310,6 +312,46 @@ def matchmaking(lob):
     time.sleep(0.2)
 
 
+def rb(f, dst, body):
+    f.tx(L.RB, struct.pack(">QI", f.cookie, dst) + body)
+
+
+def rollback_matchmaking(lob):
+    """1.4: MATCH op 2 (a rollback match from Smash versus, rb_net.c), on the public lobby code."""
+    X, P = b"ssbu-recomp-ldn1-13.0.5", b"public"
+    r1, r2, r3, s = Fake(lob, "R1", X, mods(), P), Fake(lob, "R2", X, mods(), P), Fake(lob, "R3", X, mods(), P), Fake(lob, "RS", X, mods(), P)
+    i1, i2, i3, i_s = r1.join(), r2.join(), r3.join(), s.join()
+    r1.match(2, 401)
+    assert r1.state()[:2] == (401, L.MS_SEARCHING)
+    time.sleep(0.2)
+    r2.match(1, 402)                                 # a Local Wireless search: never paired with a rollback search
+    assert r2.state()[:2] == (402, L.MS_SEARCHING) and none_of(r1, L.MATCH_STATE, 0.3)
+    r3.match(2, 403)
+    a, b = r1.until(L.MS_MATCHED), r3.until(L.MS_MATCHED)
+    assert a[:6] == (401, L.MS_MATCHED, L.ROLE_HOST, 0, i3, b"R3") and b[:6] == (403, L.MS_MATCHED, L.ROLE_JOIN, 0, i1, b"R1"), (a, b)
+    r3.match(2, 403)                                 # asked again: the same match
+    assert r3.state()[:3] == (403, L.MS_MATCHED, L.ROLE_JOIN)
+    if not os.environ.get("LOBBY_EXE"):              # (the C lobby inside a host's game has no public-code rule: its players came on purpose)
+        rb(s, i1, b"Hstranger")                   # a stranger on the public code: dropped
+        rb(r2, 0, b"Hall")                        # destination 0 on the public code: dropped
+        assert none_of(r1, L.RB, 0.3), "a stranger's rollback message reached a matched player"
+    rb(r1, i3, b"Hchoice-from-r1")
+    got = r3.rx(L.RB)
+    assert struct.unpack_from(">I", got)[0] == i1 and got[4:] == b"Hchoice-from-r1", got
+    assert none_of(s, L.RB, 0.2) and none_of(r2, L.RB, 0.2)
+    rb(r3, i1, b"Ipropose-from-r3")
+    assert r1.rx(L.RB)[4:] == b"Ipropose-from-r3"
+    ta, tb = r1.until(L.MS_TOGETHER), r3.until(L.MS_TOGETHER)
+    assert ta[:5] == (401, L.MS_TOGETHER, L.ROLE_HOST, 0, i3) and tb[:5] == (403, L.MS_TOGETHER, L.ROLE_JOIN, 0, i1), (ta, tb)
+    rb(r1, i3, b"pads")                          # after TOGETHER: still relayed (the match goes on)
+    assert r3.rx(L.RB)[4:] == b"pads"
+    r2.match(0, 402)
+    assert r2.until(L.MS_IDLE)[0] == 402
+    for x in (r1, r2, r3, s):
+        x.tx(L.LEAVE, struct.pack(">Q", x.cookie))
+    time.sleep(0.2)
+
+
 def main():
     port, sport = free_port(), free_tcp_port()
     exe = os.environ.get("LOBBY_EXE")
@@ -331,9 +373,10 @@ def main():
         lob = ("127.0.0.1", port)
         room_browser(lob)
         matchmaking(lob)
+        rollback_matchmaking(lob)
         if exe:
             print("lobby self-test (%s): ok (room browser: builds parted, LIST flag, ROOMS, older game, cross-build join dropped; "
-                  "matchmaking: same build and code only, host choice, room open, list order, together, cancel, leave, timeout, expiry, older game)" % os.path.basename(exe))
+                  "matchmaking: same build and code only, host choice, room open, list order, together, cancel, leave, timeout, expiry, older game; rollback matchmaking: op 2 only with op 2, roles, RB relay, together)" % os.path.basename(exe))
             return 0
         code, _, body = get_status(sport)
         st = json.loads(body)
@@ -391,7 +434,8 @@ def main():
         time.sleep(0.2)
         assert json.loads(get_status(sport)[2])["rooms"] == 0
         print("lobby self-test: ok (room browser: builds parted, LIST flag, ROOMS, older game, cross-build join dropped; "
-              "matchmaking: same build and code only, host choice, room open, list order, together, cancel, leave, timeout, expiry, older game; join, list, room join, PEERS, "
+              "matchmaking: same build and code only, host choice, room open, list order, together, cancel, leave, timeout, expiry, older game; "
+              "rollback matchmaking: op 2 only with op 2, roles, RB relay, together, stranger dropped; join, list, room join, PEERS, "
               "broadcast + unicast relay, outsider refused, room closed, status endpoint)")
         return 0
     finally:

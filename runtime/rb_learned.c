@@ -21,7 +21,7 @@
  *     outside the game code (CRT memcpy, libopus, the exe's helpers, nnldn.c receives) fault like the game code and are served;
  *   - at the end of the fight every page still read-only is made writable again (menus, loads: no protection); the next
  *     match's base (r1_ring_rebase) protects everything again with an empty learned set.
- *   SSBU_LS_CMP=1: a capture compares each learned page with its newest value first (in parallel, the ring's copy threads)
+ *   SSBU_LS_CMP (default ON since R3 net3; =0 off): a capture compares each learned page with its newest value first (in parallel, the ring's copy threads)
  *   and copies only the pages that changed (less ring memory, smaller loads; the compare reads both copies).
  *   SSBU_LS_DECAY=<n> (implies CMP; default off): every n captures the pages unchanged for n captures go read-only again.
  * THE PRESENTATION POOL (on with the learned set): the blocks the game's jemalloc would make for three allocation sites proven
@@ -142,7 +142,7 @@ static void ls_after_setup(void) {                       /* mark_setup done, thr
         g_ls_list = VirtualAlloc(NULL, (size_t)g_ls_cap * 4, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
         g_ls_lc = VirtualAlloc(NULL, (size_t)g_ls_cap * 4, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
         if (!g_ls_st || !g_ls_list || !g_ls_lc) { LOG("r1: LS: allocation FAILED: off\n"); g_ls_st = NULL; g_ls_on = 0; return; }
-        g_ls_cmp = getenv("SSBU_LS_CMP") && atoi(getenv("SSBU_LS_CMP"));
+        g_ls_cmp = !(getenv("SSBU_LS_CMP") && getenv("SSBU_LS_CMP")[0] == '0');      /* (R3 net3) default ON: the same tick time, a quarter of the ring memory (SSBU_LS_CMP=0: every learned page copied) */
         if (getenv("SSBU_LS_DECAY")) { g_ls_decay = atoi(getenv("SSBU_LS_DECAY")); if (g_ls_decay > 0) g_ls_cmp = 1; }
         g_ls_mod_exe = GetModuleHandleA(NULL);
         {   const char *names[] = {getenv("SSBU_R1_GAMEDLL"), "ssbu_game.dll", "ssbu_game_p15n3.dll", "ssbu_game_eh_o1.dll", "ssbu_game_1305x.dll"};

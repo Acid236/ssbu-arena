@@ -49,10 +49,15 @@ typedef struct {
     int waited_s;                           /* seconds searching, or since the match */
     int players, searching, code_players;   /* lobby counts: players of this build and code, of them searching, players of
                                                every build of this code; -1 = not known (an older lobby / not joined yet) */
+    int kind;                               /* (R3 net3) 1 = a Local Wireless search (F1 > Online), 2 = a rollback-match search (rb_net.c) */
 } NetMatch;
 void net_match_find(void);                  /* start searching (again) */
 void net_match_cancel(void);                /* stop searching, or leave the match (the other player is told) */
 void net_match_get(NetMatch *out);          /* never blocks */
+/* (R3 net3, lobby 1.4) a search for a ROLLBACK match (rb_net.c: Smash versus with rollback on, in lobby / LAN mode, outside
+ * a Local Wireless room): paired only with another such search; MM_MATCHED / MM_TOGETHER = the opponent is known, its
+ * address is where the rollback messages go (net_rb_send) until the next search. */
+void net_match_find_rb(void);
 #ifdef __cplusplus
 }
 #endif

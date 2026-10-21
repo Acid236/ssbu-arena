@@ -25,6 +25,7 @@ enum { ML_PROTO = 1, ML_JOIN = 1, ML_WELCOME, ML_REJECT, ML_PING, ML_PONG, ML_DA
 enum { ML_ROOMS = 17, ML_ROOM_INFO, ML_ROOMS_END };     /* O1 room browser (net_relay.c head, ssbu_lobby.py on_rooms) */
 enum { ML_MATCH = 20, ML_MATCH_STATE };                 /* O2 matchmaking (net_relay.c head, ssbu_lobby.py on_match) */
 enum { ML_MS_IDLE, ML_MS_SEARCHING, ML_MS_MATCHED, ML_MS_TIMEOUT, ML_MS_PEER_LEFT, ML_MS_TOGETHER, ML_MS_EXPIRED };
+enum { ML_KIND_ROOM = 1, ML_KIND_ROLLBACK = 2 };        /* (R3 net3, lobby 1.4) MATCH op 1 / op 2: a Local Wireless search, a rollback-match search */
 #define ML_SEARCH_FOR 120000                            /* ms; SSBU_LOBBY_SEARCH_SECS / SSBU_LOBBY_MATCH_SECS change them */
 #define ML_MATCH_FOR 180000
 #define ML_MODS_MAX 32
@@ -86,6 +87,9 @@ typedef struct ml_client {
     uint32_t final_id, final_peer;
     int final_state, final_role;
     char final_name[ML_NAME_LEN + 1];
+    int kind;                 /* (1.4) what it searches: ML_KIND_ROOM / ML_KIND_ROLLBACK */
+    uint32_t rb_peer;         /* (1.4) the player of its last rollback match (RB to it relayed on the public code) */
+    int rb_seen;              /* (1.4, rollback match) 1 = this one's RB to its peer was relayed */
 } ml_client;
 
 struct ml_room {
@@ -486,7 +490,7 @@ static void ml_on_match(ml_client *c, int op, uint32_t sid, ULONGLONG now) {
         ml_match_send(c, now);
         return;
     }
-    if (op != 1) return;
+    if (op != ML_KIND_ROOM && op != ML_KIND_ROLLBACK) return;
     if (c->has_search && c->search_id == sid && (c->mpeer || c->searching || c->has_final)) { ml_match_send(c, now); return; }
     if (c->mpeer) {
         ml_client *o = c->mpeer;
@@ -494,25 +498,27 @@ static void ml_on_match(ml_client *c, int op, uint32_t sid, ULONGLONG now) {
         snprintf(w, sizeof w, "%s searches again", c->name);
         ml_match_end(o, ML_MS_PEER_LEFT, o->mrole, c, w, now);
     }
-    c->has_search = 1; c->search_id = sid; c->searching = 1; c->search_since = now; c->has_final = 0;
-    ml_log("match: %s searches an opponent (build %s)", c->name, c->build);
+    c->has_search = 1; c->search_id = sid; c->searching = 1; c->search_since = now; c->has_final = 0; c->kind = op;
+    ml_log("match: %s searches an opponent%s (build %s)", c->name, op == ML_KIND_ROLLBACK ? " for a rollback match" : "", c->build);
     ml_client *o = NULL;
     for (int i = 0; i < ML_MAX_CLIENTS; i++) {
         ml_client *x = &ml_clients[i];
-        if (x->used && x != c && x->searching && !x->mpeer && ml_same_part(x, c) && (!o || x->search_since < o->search_since)) o = x;
+        if (x->used && x != c && x->searching && !x->mpeer && x->kind == op && ml_same_part(x, c) && (!o || x->search_since < o->search_since)) o = x;
     }
     if (!o) { ml_match_send(c, now); return; }
-    int c_open = ml_room_open(c->room, now), o_open = ml_room_open(o->room, now);
+    int c_open = op == ML_KIND_ROOM && ml_room_open(c->room, now), o_open = op == ML_KIND_ROOM && ml_room_open(o->room, now);
     ml_client *host = c_open && !o_open ? c : o, *guest = host == c ? o : c;     /* an open room hosts, else the one that waited longer */
     host->mpeer = guest; guest->mpeer = host;
     host->mrole = 1; guest->mrole = 2;
     host->match_at = guest->match_at = now;
     host->searching = guest->searching = 0;
     host->room_said = 0;
-    ml_log("match: %s hosts, %s joins", host->name, guest->name);
+    host->rb_seen = guest->rb_seen = 0;
+    if (op == ML_KIND_ROLLBACK) { host->rb_peer = guest->ip; guest->rb_peer = host->ip; }
+    ml_log("match: %s hosts, %s joins%s", host->name, guest->name, op == ML_KIND_ROLLBACK ? " (rollback match)" : "");
     ml_match_send(host, now);
     ml_match_send(guest, now);
-    if (host->room) ml_match_room(host, host->room, now);
+    if (host->room && op == ML_KIND_ROOM) ml_match_room(host, host->room, now);
 }
 
 /* NetworkInfo's station addresses (node 0 = owner) into out[]; -1 if it is not one a game makes */
@@ -582,7 +588,7 @@ static void ml_on_advertise(ml_client *c, const uint8_t *p, int len, const uint8
         for (int k = 0; k < i; k++) dup |= m == (k < nb ? before[k] : after[k - nb]);
         if (m != c && !dup) ml_send(p, len, &m->at);
     }
-    if (c->mpeer && c->mrole == 1) ml_match_room(c, room, now);
+    if (c->mpeer && c->mrole == 1 && c->kind == ML_KIND_ROOM) ml_match_room(c, room, now);
 }
 
 static void ml_on_ldn(ml_client *c, const uint8_t *p, int len, uint32_t dst, unsigned sport, unsigned dport, ULONGLONG now) {
@@ -671,6 +677,8 @@ static void ml_packet(const uint8_t *p, int len, const struct sockaddr_in *at, U
         uint32_t dst = ml_get32(p + 12);
         static uint8_t out[1600];   /* (only used under ml_lock) */
         int on = len - 16 + 8, sent = 0;
+        /* (no "public code" restriction here, unlike ssbu_lobby.py: this lobby runs inside a host's game (HOST / JOIN / LAN modes), its
+         * players connected on purpose, and the joiner of a room code sends to destination 0 = the host: R3 net3 run pd3) */
         memcpy(out, "SU\1\x10", 4); ml_put32(out + 4, c->ip); memcpy(out + 8, p + 16, len - 16);
         for (int i = 0; i < ML_MAX_CLIENTS; i++) {
             ml_client *o = &ml_clients[i];
@@ -679,6 +687,15 @@ static void ml_packet(const uint8_t *p, int len, const struct sockaddr_in *at, U
         }
         ml_relayed += sent;
         if (!sent) ml_dropped++;
+        if (dst && c->mpeer && c->kind == ML_KIND_ROLLBACK && c->mpeer->ip == dst) {   /* (1.4) RB both ways between a rollback pair: together */
+            c->rb_seen = 1;
+            if (c->mpeer->rb_seen) {
+                char wa[96], wb[96]; ml_client *h = c->mrole == 1 ? c : c->mpeer;
+                snprintf(wa, sizeof wa, "playing a rollback match with %s", h->mpeer->name);
+                snprintf(wb, sizeof wb, "playing a rollback match with %s", h->name);
+                ml_match_end_pair(h, ML_MS_TOGETHER, wa, wb, now);
+            }
+        }
     } else if (kind == ML_DATA && len >= 16) {
         ml_on_data(c, p, len, NULL, 0, now);
     } else if (kind == ML_BCAST && len >= 5) {
