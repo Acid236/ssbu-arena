@@ -28,9 +28,7 @@ static int have_targets_live(void);
 VKD(X)
 #undef X
 static PFN_vkCmdSetVertexInputEXT vkCmdSetVertexInputEXT;
-#ifdef __APPLE__
-static PFN_vkCmdBindVertexBuffers2 vkCmdBindVertexBuffers2;  /* MAC2: the strides of the bindings without dynamic vertex input */
-#endif
+static PFN_vkCmdBindVertexBuffers2 vkCmdBindVertexBuffers2;  /* MAC2 / V_novids: the strides of the bindings without dynamic vertex input */
 static PFN_vkCmdPushDescriptorSetKHR vkCmdPushDescriptorSetKHR;
 static PFN_vkGetPhysicalDeviceFeatures2 vkGetPhysicalDeviceFeatures2;
 static PFN_vkGetPhysicalDeviceFormatProperties vkGetPhysicalDeviceFormatProperties;
@@ -55,6 +53,17 @@ static struct {
     int has_gpl, ext_gpl, ext_so, has_fault, has_ckpt;
     VkPhysicalDeviceMemoryProperties mp;
 } D;
+/* V_novids (2026-10-21): a GPU without VK_EXT_vertex_input_dynamic_state keeps its own pipeline list: its keys name a
+ * vertex layout (nvk_vl_*), those of the other GPUs do not (the layout of pipes.bin and its keys are unchanged there).
+ * macOS keeps the layout inside the key (MAC2) and its pipes.bin. */
+#ifdef __APPLE__
+#define VK_PIPES_NOVI "pipes.bin"
+#define VK_VL_FILE "the keys themselves"
+#else
+#define VK_PIPES_NOVI "pipes_novi.bin"
+#define VK_VL_FILE "vi_layouts.bin"
+#endif
+#define VK_PIPES_BIN (D.has_vids ? "pipes.bin" : VK_PIPES_NOVI)
 static PFN_vkGetDeviceFaultInfoEXT vkGetDeviceFaultInfoEXT;
 static PFN_vkCmdSetCheckpointNV vkCmdSetCheckpointNV;
 static PFN_vkGetQueueCheckpointDataNV vkGetQueueCheckpointDataNV;
@@ -82,7 +91,10 @@ static void vkd_device_info(VkDeviceCreateInfo *di, const VkExtensionProperties 
     D.f2.pNext = &D.f11; D.f11.pNext = &D.f12; D.f12.pNext = &D.f13; tail = &D.f13.pNext;
     D.exts[D.next++] = "VK_KHR_swapchain";
 #define EXT(flag, name, st, stype) if (has_name(dext, ndext, name)) { D.flag = 1; D.exts[D.next++] = name; D.st.sType = stype; *tail = &D.st; tail = &D.st.pNext; }
-    EXT(has_vids, "VK_EXT_vertex_input_dynamic_state", vids, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_INPUT_DYNAMIC_STATE_FEATURES_EXT)
+    /* V_novids, TEST ONLY: SSBU_VK_TEST bit 512 = the device is taken as one without VK_EXT_vertex_input_dynamic_state
+     * (an RX 550 / Polaris case on a GPU that has it): the extension is not enabled, the vertex layout goes into the key */
+    if (getenv("SSBU_VK_TEST") && (atoi(getenv("SSBU_VK_TEST")) & 512)) printf("nvn_vk: TEST (SSBU_VK_TEST bit 512): VK_EXT_vertex_input_dynamic_state taken as missing\n");
+    else { EXT(has_vids, "VK_EXT_vertex_input_dynamic_state", vids, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_INPUT_DYNAMIC_STATE_FEATURES_EXT) }
     EXT(has_cbc, "VK_EXT_custom_border_color", cbc, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CUSTOM_BORDER_COLOR_FEATURES_EXT)
     EXT(has_pv, "VK_EXT_provoking_vertex", pv, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROVOKING_VERTEX_FEATURES_EXT)
     EXT(has_iu8, "VK_EXT_index_type_uint8", iu8, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_INDEX_TYPE_UINT8_FEATURES_EXT)
@@ -132,10 +144,11 @@ static void vkd_device_info(VkDeviceCreateInfo *di, const VkExtensionProperties 
                (int)D.port.imageView2DOn3DImage, (int)D.port.vertexAttributeAccessBeyondStride);
 #endif
     if (!D.f13.dynamicRendering || !D.f13.synchronization2) vkd_fail("the device lacks dynamicRendering / synchronization2");
-#ifdef __APPLE__
-    if (!D.has_vids) printf("nvn_vk: no VK_EXT_vertex_input_dynamic_state (MoltenVK): the vertex layout is part of the pipeline key, strides dynamic\n"); else
-#endif
-    if (!D.has_vids) nvn_vk_missing("a GPU without VK_EXT_vertex_input_dynamic_state (the vertex layout is not yet part of the pipeline key)");
+    /* MAC2 / V_novids (2026-10-21): every platform now draws without the extension (an RX 550 / Polaris on AMD's Windows
+     * driver lacks it): the vertex layout is part of the pipeline (nvk_vi_pipe), the strides stay dynamic */
+    if (!D.has_vids) printf("nvn_vk: no VK_EXT_vertex_input_dynamic_state: the vertex layout is part of the pipeline key, strides dynamic; instance divisors above 1: %s; "
+                            "the pipeline list of this GPU is ../cache/vk/" VK_PIPES_NOVI " (layouts in " VK_VL_FILE ")\n",
+                            D.has_vad && D.vad.vertexAttributeInstanceRateDivisor ? "yes (VK_EXT_vertex_attribute_divisor)" : "NO (a draw with one stops the game)");
     if (!D.f2.features.textureCompressionBC) nvn_vk_missing("a GPU without BC texture compression");
     di->enabledExtensionCount = D.next; di->ppEnabledExtensionNames = D.exts; di->pNext = &D.f2;
     printf("nvn_vk: features: vertex input dynamic %d, custom border colour %d, provoking vertex last %d, 8-bit indices %d, list restart %d, ASTC %d, depth clamp %d, wide lines %d, robust buffers %d\n",
@@ -996,13 +1009,22 @@ static VkSampler sampler_get(const SamplerParams *p) {
     return s;
 }
 
+/* MAC2 / V_novids (2026-10-21). A GPU without VK_EXT_vertex_input_dynamic_state (MoltenVK; an RX 550 / Polaris on AMD's
+ * Windows driver): the vertex layout of a draw (per location: format, binding, offset; per binding: instance rate,
+ * divisor) is part of the pipeline, the strides stay dynamic (VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE, Vulkan 1.3).
+ * Where the layout lives in the key:
+ *   - macOS: inside it (PKEY_VI = NvkVl vi: the MAC2 fields under one name, the same bytes), in pipes.bin as before;
+ *   - elsewhere: the three pad bytes of the key hold the NUMBER of the layout (nvk_vl_id: 24 bits of a hash of the
+ *     layout, the next free number on a collision), the layouts are in ../cache/vk/vi_layouts.bin, the keys in
+ *     pipes_novi.bin. On a GPU that has the extension the pad bytes stay zero: PKey, pipes.bin and the prepared markers
+ *     are those of before, to the byte. nvn_vk_m4.c only names PKEY_VI / NVK_VI_PIPE / VK_PIPES_BIN / nvk_vl_rec_ok on
+ *     lines it already had (its WD_SLEEP uses __LINE__). */
+typedef struct { uint32_t na, nb, rate; uint32_t loc[16], fmt[16], bind[16], off[16], div[17]; } NvkVl;
 #ifdef __APPLE__
-/* MAC2: MoltenVK has no VK_EXT_vertex_input_dynamic_state. There the vertex layout of a draw (per location: format,
- * binding, offset; per binding: instance rate, divisor) is part of the pipeline key (PKEY_VI, set by vi_key), the strides
- * stay dynamic (VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE, Vulkan 1.3). All zero on a device that has the extension.
- * nvn_vk_m4.c only names PKEY_VI and NVK_VI_PIPE on lines it already had: its WD_SLEEP uses __LINE__, and the Windows
- * build must stay the same to the byte. */
-#define PKEY_VI uint32_t vi_na, vi_nb, vi_rate; uint32_t vi_loc[16], vi_fmt[16], vi_bind[16], vi_off[16], vi_div[17];
+#define PKEY_VI NvkVl vi;
+#else
+#define PKEY_VI
+#endif
 typedef struct {
     VkVertexInputBindingDescription b[17];
     VkVertexInputAttributeDescription a[16];
@@ -1011,36 +1033,94 @@ typedef struct {
     VkPipelineVertexInputStateCreateInfo vi;
 } NvkVi;
 static void nvk_vi_pipe(const void *key, VkDynamicState *dyn, VkGraphicsPipelineCreateInfo *gi, NvkVi *s);
+static int nvk_vl_rec_ok(const void *key);         /* a key of the pipeline list whose layout is known (else it is not prewarmed) */
 #define NVK_VI_PIPE(k, dyn, gi) NvkVi nvk_vi_; nvk_vi_pipe(k, dyn, gi, &nvk_vi_);
-#else
-#define PKEY_VI
-#define NVK_VI_PIPE(k, dyn, gi)
-#endif
 #include "nvn_vk_m4.c"                             /* session 4: stages, pipelines, workers (M4) */
-#ifdef __APPLE__
+#ifndef __APPLE__
+/* The layout table: 8192 slots, open addressing by number. Filled only by the render thread (vi_key) and at start
+ * (nvk_vl_load); the workers read it (nvk_vi_pipe): a layout is written before its number, and a number reaches a worker
+ * only inside a key queued under g_sh_lock. */
+#define NVK_VL_SLOTS 8192
+#define NVK_VL_MAGIC 0x31594C56u                   /* "VLY1" */
+typedef struct { volatile LONG id; NvkVl l; } NvkVlEnt;
+typedef struct { uint32_t magic, id; NvkVl l; } NvkVlRec;
+static NvkVlEnt *g_vlt;
+static int g_nvl, g_vl_coll;
+static uint32_t nvk_vl_get(const void *key) { const PKey *k = key; return (uint32_t)k->pad[0] | (uint32_t)k->pad[1] << 8 | (uint32_t)k->pad[2] << 16; }
+static void nvk_vl_set(PKey *k, uint32_t id) { k->pad[0] = (uint8_t)id; k->pad[1] = (uint8_t)(id >> 8); k->pad[2] = (uint8_t)(id >> 16); }
+static NvkVlEnt *nvk_vl_slot(uint32_t id) {        /* the slot of number id, or the empty slot where it would go */
+    for (uint32_t i = id & (NVK_VL_SLOTS - 1), n = 0; n < NVK_VL_SLOTS; n++, i = (i + 1) & (NVK_VL_SLOTS - 1))
+        if ((uint32_t)g_vlt[i].id == id || !g_vlt[i].id) return &g_vlt[i];
+    return NULL;
+}
+static const NvkVl *nvk_vl_find(uint32_t id) { NvkVlEnt *e = id && g_vlt ? nvk_vl_slot(id) : NULL; return e && (uint32_t)e->id == id ? &e->l : NULL; }
+static void nvk_vl_put(NvkVlEnt *e, uint32_t id, const NvkVl *l) { e->l = *l; InterlockedExchange(&e->id, (LONG)id); g_nvl++; }      /* a full barrier: the layout is visible before its number */
+static void nvk_vl_load(void) {                    /* start, before the prewarm reads pipes_novi.bin */
+    g_vlt = calloc(NVK_VL_SLOTS, sizeof *g_vlt);
+    if (!g_vlt) vkd_fail("no memory for the vertex layout table");
+    FILE *fp = fopen(vkc_file(VK_VL_FILE), "rb");
+    NvkVlRec r;
+    int bad = 0;
+    if (fp) {
+        while (fread(&r, sizeof r, 1, fp) == 1) {
+            NvkVlEnt *e;
+            if (r.magic != NVK_VL_MAGIC || !r.id || r.id > 0xffffffu || g_nvl > NVK_VL_SLOTS * 3 / 4 || !(e = nvk_vl_slot(r.id))) { bad = 1; break; }
+            if (!e->id) nvk_vl_put(e, r.id, &r.l);
+        }
+        fclose(fp);
+    }
+    printf("nvn_vk: vertex layouts of earlier runs (../cache/vk/" VK_VL_FILE "): %d%s\n", g_nvl, bad ? " (the file ends in a bad record: read up to it)" : "");
+}
+static uint32_t nvk_vl_id(const NvkVl *l) {        /* render thread: the number of this layout; a new one is written to the file */
+    uint32_t id = (uint32_t)fnv(0xcbf29ce484222325ULL, l, sizeof *l) & 0xffffffu;
+    if (!id) id = 1;
+    for (int n = 0; n < NVK_VL_SLOTS; n++, id = id >= 0xffffffu ? 1 : id + 1) {
+        NvkVlEnt *e = nvk_vl_slot(id);
+        if (!e) break;
+        if (e->id) { if (!memcmp(&e->l, l, sizeof *l)) return id; g_vl_coll++; continue; }      /* the number of another layout: the next one */
+        if (g_nvl > NVK_VL_SLOTS * 3 / 4) break;
+        nvk_vl_put(e, id, l);
+        NvkVlRec r; memset(&r, 0, sizeof r); r.magic = NVK_VL_MAGIC; r.id = id; r.l = *l;
+        FILE *fp = fopen(vkc_file(VK_VL_FILE), "ab");
+        if (fp) { fwrite(&r, 1, sizeof r, fp); fclose(fp); }
+        return id;
+    }
+    nvn_vk_missing("more than 6144 distinct vertex layouts without VK_EXT_vertex_input_dynamic_state");
+    return 0;
+}
+static int nvk_vl_rec_ok(const void *key) { uint32_t id = nvk_vl_get(key); return D.has_vids || !id || nvk_vl_find(id) != NULL; }
+#else
+static int nvk_vl_rec_ok(const void *key) { (void)key; return 1; }
+#endif
 /* pipe_make without dynamic vertex input: the key's layout becomes the pipeline's; the strides come with the buffers */
 static void nvk_vi_pipe(const void *key, VkDynamicState *dyn, VkGraphicsPipelineCreateInfo *gi, NvkVi *s) {
-    const PKey *k = key;
+    static const NvkVl empty;
     uint32_t nvdd = 0;
     if (D.has_vids) return;
+#ifdef __APPLE__
+    const NvkVl *l = &((const PKey *)key)->vi;
+#else
+    const NvkVl *l = nvk_vl_find(nvk_vl_get(key));
+    if (!l) l = &empty;                            /* number 0: a pipeline without vertex input (the stencil clear) */
+#endif
     memset(s, 0, sizeof *s);
     s->di.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_DIVISOR_STATE_CREATE_INFO_EXT;
     s->vi.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
     dyn[19] = VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE;         /* in place of VK_DYNAMIC_STATE_VERTEX_INPUT_EXT */
-    for (uint32_t b = 0; b < k->vi_nb && b < 17; b++) {
-        int inst = k->vi_rate >> b & 1;
+    for (uint32_t b = 0; b < l->nb && b < 17; b++) {
+        int inst = l->rate >> b & 1;
         s->b[b].binding = b; s->b[b].stride = 0; s->b[b].inputRate = inst ? VK_VERTEX_INPUT_RATE_INSTANCE : VK_VERTEX_INPUT_RATE_VERTEX;
-        if (inst && k->vi_div[b] > 1) {
-            if (D.has_vad && D.vad.vertexAttributeInstanceRateDivisor) { s->dd[nvdd].binding = b; s->dd[nvdd].divisor = k->vi_div[b]; nvdd++; }
+        if (inst && l->div[b] > 1) {
+            if (D.has_vad && D.vad.vertexAttributeInstanceRateDivisor) { s->dd[nvdd].binding = b; s->dd[nvdd].divisor = l->div[b]; nvdd++; }
             else nvn_vk_missing("an instance divisor above 1 without VK_EXT_vertex_attribute_divisor");
         }
     }
-    for (uint32_t a = 0; a < k->vi_na && a < 16; a++) { s->a[a].location = k->vi_loc[a]; s->a[a].binding = k->vi_bind[a]; s->a[a].format = (VkFormat)k->vi_fmt[a]; s->a[a].offset = k->vi_off[a]; }
-    s->vi.vertexBindingDescriptionCount = k->vi_nb; s->vi.pVertexBindingDescriptions = s->b; s->vi.vertexAttributeDescriptionCount = k->vi_na; s->vi.pVertexAttributeDescriptions = s->a;
+    for (uint32_t a = 0; a < l->na && a < 16; a++) { s->a[a].location = l->loc[a]; s->a[a].binding = l->bind[a]; s->a[a].format = (VkFormat)l->fmt[a]; s->a[a].offset = l->off[a]; }
+    s->vi.vertexBindingDescriptionCount = l->nb < 17 ? l->nb : 17; s->vi.pVertexBindingDescriptions = s->b;
+    s->vi.vertexAttributeDescriptionCount = l->na < 16 ? l->na : 16; s->vi.pVertexAttributeDescriptions = s->a;
     if (nvdd) { s->di.vertexBindingDivisorCount = nvdd; s->di.pVertexBindingDivisors = s->dd; s->vi.pNext = &s->di; }
     gi->pVertexInputState = &s->vi;
 }
-#endif
 #if 0   /* SUPERSEDED by nvn_vk_m4.c (session 3's stages and pipelines made at the draw); kept only until someone deletes the block */
 /* ---------------------------------------------------------------- stages: machine code -> Vulkan GLSL -> SPIR-V -> module */
 typedef struct { uint8_t unit, dim, shadow; uint16_t binding; } VSmp;
@@ -2409,37 +2489,44 @@ static void compute_dispatch_run(Prog *p, Stage *st, VStage *v, uint32_t gx, uin
 }
 /* Everything of a draw up to the draw call. topo: NVN primitive. Returns 0 when the draw cannot be done (counted as skipped). */
 static uint64_t g_dt_voff[16]; static VkBuffer g_dt_vb[16]; int nvn_front_draw_tag(void);      /* round 17, test (SSBU_DRAWTAG): see dt_vk */
-#ifdef __APPLE__
-/* MAC2: the vertex layout of the draw into the pipeline key, without VK_EXT_vertex_input_dynamic_state. The same bindings,
- * in the same order, as step 4 of draw_prepare gives vkCmdSetVertexInputEXT on other devices. */
+/* MAC2 / V_novids: the vertex layout of the draw into the pipeline key, without VK_EXT_vertex_input_dynamic_state. The
+ * same bindings, in the same order, with the same formats, as step 4 of draw_prepare gives vkCmdSetVertexInputEXT on the
+ * other devices (2026-10-21: the constant binding's integer format also for ints bit 16 + i, as step 4 does). */
 static void vi_key(PKey *k, const uint64_t *voff, uint32_t ints, uint32_t sints) {
+    NvkVl l;
     uint32_t bmap[32], nb = 0, na = 0, need_const = 0;
+    memset(&l, 0, sizeof l);
     memset(bmap, 0xff, sizeof bmap);
     for (int i = 0; i < 16; i++) {
         uint32_t a = i < R.nattr ? R.vattr[i] : 0;
         int nf = (int)(a & 0xff), stream = (int)((a >> 8) & 31);
         VkFormat f = nf ? vertex_vkfmt(nf) : VK_FORMAT_UNDEFINED;
-        k->vi_loc[na] = (uint32_t)i;
+        l.loc[na] = (uint32_t)i;
         if (f && stream < 16 && voff[stream] != ~0ull) {
             if (bmap[stream] == 0xffffffffu) {
                 bmap[stream] = nb;
-                if (R.vstream[stream].divisor) { k->vi_rate |= 1u << nb; k->vi_div[nb] = R.vstream[stream].divisor; }
+                if (R.vstream[stream].divisor) { l.rate |= 1u << nb; l.div[nb] = R.vstream[stream].divisor; }
                 nb++;
             }
-            k->vi_bind[na] = bmap[stream]; k->vi_fmt[na] = (uint32_t)f; k->vi_off[na] = a >> 14; na++;
+            l.bind[na] = bmap[stream]; l.fmt[na] = (uint32_t)f; l.off[na] = a >> 14; na++;
         } else {                                   /* not supplied: the constant binding, as in step 4 */
-            k->vi_bind[na] = 16; k->vi_fmt[na] = (ints >> i & 1) ? ((sints >> i & 1) ? VK_FORMAT_R32G32B32A32_SINT : VK_FORMAT_R32G32B32A32_UINT) : VK_FORMAT_R32G32B32A32_SFLOAT;
-            k->vi_off[na] = (ints >> i & 1) ? 16 : 0;
+            int in = (ints >> i & 1) || (ints >> (16 + i) & 1);
+            l.bind[na] = 16; l.fmt[na] = in ? ((sints >> i & 1) ? VK_FORMAT_R32G32B32A32_SINT : VK_FORMAT_R32G32B32A32_UINT) : VK_FORMAT_R32G32B32A32_SFLOAT;
+            l.off[na] = in ? 16 : 0;
             need_const = 1; na++;
         }
     }
     if (need_const) {
-        for (uint32_t i = 0; i < na; i++) if (k->vi_bind[i] == 16) k->vi_bind[i] = nb;
-        k->vi_rate |= 1u << nb; k->vi_div[nb] = 1; nb++;
+        for (uint32_t i = 0; i < na; i++) if (l.bind[i] == 16) l.bind[i] = nb;
+        l.rate |= 1u << nb; l.div[nb] = 1; nb++;
     }
-    k->vi_na = na; k->vi_nb = nb;
-}
+    l.na = na; l.nb = nb;
+#ifdef __APPLE__
+    k->vi = l;
+#else
+    nvk_vl_set(k, nvk_vl_id(&l));
 #endif
+}
 static int draw_prepare(unsigned prim) {
     static const int8_t topo[7] = {VK_PRIMITIVE_TOPOLOGY_POINT_LIST, VK_PRIMITIVE_TOPOLOGY_LINE_LIST, -1, VK_PRIMITIVE_TOPOLOGY_LINE_STRIP, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN};
     static const uint8_t tclass[7] = {0, 1, 1, 1, 2, 2, 2};
@@ -2519,9 +2606,7 @@ static int draw_prepare(unsigned prim) {
         k.a2c = R.ms[1] != 0; k.dclamp = R.depth_clamp && D.f2.features.depthClamp; k.blend_on = R.blend_on;
         memcpy(k.blend, R.blend, sizeof k.blend);
     }
-#ifdef __APPLE__
-    if (!D.has_vids) vi_key(&k, voff, ints, sints);
-#endif
+    if (!D.has_vids) vi_key(&k, voff, ints, sints);      /* MAC2 / V_novids */
     pkey_targets(&k);
     Pipe *p = pipe_get(&k, vs, fs);
     if (!p) return 0;                              /* shader_wait = skip: the pipeline is being made by a worker, the draw is left out (counted in pipe_get) */
@@ -2571,18 +2656,14 @@ static int draw_prepare(unsigned prim) {
             for (uint32_t i = 0; i < na; i++) if (ad[i].binding == 16) ad[i].binding = nb;
             vb[nb] = R.zero; vo[nb] = 65536; nb++;
         }
-#ifdef __APPLE__
-        if (!D.has_vids) {                         /* the layout is the pipeline's (vi_key); only the strides are given here */
+        if (!D.has_vids) {                         /* MAC2 / V_novids: the layout is the pipeline's (vi_key); only the strides are given here */
             VkDeviceSize vst[17];
             for (uint32_t i = 0; i < nb; i++) vst[i] = bd[i].stride;
             if (nb) vkCmdBindVertexBuffers2(R.cmd, 0, nb, vb, vo, NULL, vst);
         } else {
-#endif
         vkCmdSetVertexInputEXT(R.cmd, nb, bd, na, ad);
         if (nb) vkCmdBindVertexBuffers(R.cmd, 0, nb, vb, vo);
-#ifdef __APPLE__
         }
-#endif
     }
     /* 5. descriptors */
     {
@@ -2716,9 +2797,7 @@ static void stencil_clear_masked(uint32_t mask, uint32_t value, int sx, int sy, 
     vkCmdSetDepthTestEnable(R.cmd, VK_FALSE); vkCmdSetDepthWriteEnable(R.cmd, VK_FALSE); vkCmdSetDepthCompareOp(R.cmd, VK_COMPARE_OP_ALWAYS); vkCmdSetStencilTestEnable(R.cmd, VK_TRUE);
     vkCmdSetStencilOp(R.cmd, VK_STENCIL_FACE_FRONT_AND_BACK, VK_STENCIL_OP_REPLACE, VK_STENCIL_OP_REPLACE, VK_STENCIL_OP_REPLACE, VK_COMPARE_OP_ALWAYS);
     vkCmdSetDepthBiasEnable(R.cmd, VK_FALSE); vkCmdSetPrimitiveRestartEnable(R.cmd, VK_FALSE); vkCmdSetRasterizerDiscardEnable(R.cmd, VK_FALSE);
-#ifdef __APPLE__
-    if (D.has_vids)                                /* without it the pipeline has no vertex input (an all-zero layout in the key) */
-#endif
+    if (D.has_vids)                                /* without it the pipeline has no vertex input (layout number 0 / an all-zero layout in the key) */
     vkCmdSetVertexInputEXT(R.cmd, 0, NULL, 0, NULL);
     vkCmdDraw(R.cmd, 3, 1, 0, 0);
     R.pipe_bound = NULL; R.dyn_dirty = 1;
@@ -4017,10 +4096,8 @@ static void vkd_init(void) {
     VKD(X)
 #undef X
     vkCmdSetVertexInputEXT = (PFN_vkCmdSetVertexInputEXT)vkGetDeviceProcAddr(V.device, "vkCmdSetVertexInputEXT");
-#ifdef __APPLE__
     vkCmdBindVertexBuffers2 = (PFN_vkCmdBindVertexBuffers2)vkGetDeviceProcAddr(V.device, "vkCmdBindVertexBuffers2");
     if (!D.has_vids && !vkCmdBindVertexBuffers2) vkd_fail("the device has neither VK_EXT_vertex_input_dynamic_state nor vkCmdBindVertexBuffers2");
-#endif
     if (D.has_push) { vkCmdPushDescriptorSetKHR = (PFN_vkCmdPushDescriptorSetKHR)vkGetDeviceProcAddr(V.device, "vkCmdPushDescriptorSetKHR"); if (!vkCmdPushDescriptorSetKHR) D.has_push = 0; }
     if (D.has_fault) { vkGetDeviceFaultInfoEXT = (PFN_vkGetDeviceFaultInfoEXT)vkGetDeviceProcAddr(V.device, "vkGetDeviceFaultInfoEXT"); D.has_fault = vkGetDeviceFaultInfoEXT != NULL; }
     if (D.has_ckpt) {
@@ -4065,6 +4142,9 @@ static void vkd_init(void) {
     }
     cmd_wait_all();
     CreateDirectoryA("../cache/vk", NULL);
+#ifndef __APPLE__
+    if (!D.has_vids) nvk_vl_load();                /* V_novids: the layout numbers of pipes_novi.bin, before the prewarm reads it */
+#endif
     prewarm_start();
     /* PR #33, SSBU_VK_PREWARM_BENCH=1 (a measurement, tests\prewarm_bench.py): the prewarm of pipes.bin alone, read-only; the
      * process ends here, before the watchdog, the preparation and the game: no cache is written */
