@@ -1,0 +1,295 @@
+<!-- written by make_art.py: do not edit -->
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <DrawingImage x:Key="ArenaArt"><DrawingImage.Drawing>
+    <DrawingGroup ClipGeometry="M30,70 h650 v480 h-650 Z">
+      <GeometryDrawing Brush="Transparent"><GeometryDrawing.Geometry><RectangleGeometry Rect="30,70,650,480"/></GeometryDrawing.Geometry></GeometryDrawing>
+      <GeometryDrawing><GeometryDrawing.Brush><RadialGradientBrush><GradientStop Color="#1A1689E8" Offset="0"/><GradientStop Color="#001689E8" Offset="1"/></RadialGradientBrush></GeometryDrawing.Brush><GeometryDrawing.Geometry><EllipseGeometry Center="382,292" RadiusX="262" RadiusY="220"/></GeometryDrawing.Geometry></GeometryDrawing>
+      <DrawingGroup>
+        <DrawingGroup.Transform><TransformGroup><ScaleTransform ScaleX="0.55" ScaleY="0.55"/><TranslateTransform X="32" Y="63"/></TransformGroup></DrawingGroup.Transform>
+        <DrawingGroup>
+          <DrawingGroup.Transform><TransformGroup><RotateTransform Angle="-64.29"/><TranslateTransform X="358" Y="497"/></TransformGroup></DrawingGroup.Transform>
+          <GeometryDrawing><GeometryDrawing.Brush><SolidColorBrush Color="#0A9FC6DD"/></GeometryDrawing.Brush><GeometryDrawing.Pen><Pen Thickness="1.8" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#80B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><RectangleGeometry Rect="-31,-31,91.9666,62" RadiusX="31" RadiusY="31"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><EllipseGeometry Center="0,0" RadiusX="10.54" RadiusY="31"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><EllipseGeometry Center="29.9666,0" RadiusX="10.54" RadiusY="31"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33C6EAFF"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><PathGeometry FillRule="Nonzero" Figures="M0 0H29.966648127543394"/></GeometryDrawing.Geometry></GeometryDrawing>
+        </DrawingGroup>
+        <DrawingGroup>
+          <DrawingGroup.Transform><TransformGroup><RotateTransform Angle="48.9005"/><TranslateTransform X="395" Y="452"/></TransformGroup></DrawingGroup.Transform>
+          <GeometryDrawing><GeometryDrawing.Brush><SolidColorBrush Color="#0A9FC6DD"/></GeometryDrawing.Brush><GeometryDrawing.Pen><Pen Thickness="1.8" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#80B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><RectangleGeometry Rect="-39,-39,140.37,78" RadiusX="39" RadiusY="39"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><EllipseGeometry Center="0,0" RadiusX="13.26" RadiusY="39"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><EllipseGeometry Center="62.3699,0" RadiusX="13.26" RadiusY="39"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33C6EAFF"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><PathGeometry FillRule="Nonzero" Figures="M0 0H62.36986451805071"/></GeometryDrawing.Geometry></GeometryDrawing>
+        </DrawingGroup>
+        <DrawingGroup>
+          <DrawingGroup.Transform><TransformGroup><RotateTransform Angle="43.0908"/><TranslateTransform X="433" Y="498"/></TransformGroup></DrawingGroup.Transform>
+          <GeometryDrawing><GeometryDrawing.Brush><SolidColorBrush Color="#0A9FC6DD"/></GeometryDrawing.Brush><GeometryDrawing.Pen><Pen Thickness="1.8" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#80B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><RectangleGeometry Rect="-37,-37,116.45,74" RadiusX="37" RadiusY="37"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><EllipseGeometry Center="0,0" RadiusX="12.58" RadiusY="37"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><EllipseGeometry Center="42.45,0" RadiusX="12.58" RadiusY="37"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33C6EAFF"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><PathGeometry FillRule="Nonzero" Figures="M0 0H42.44997055358225"/></GeometryDrawing.Geometry></GeometryDrawing>
+        </DrawingGroup>
+        <DrawingGroup>
+          <DrawingGroup.Transform><TransformGroup><RotateTransform Angle="-124.778"/><TranslateTransform X="371" Y="448"/></TransformGroup></DrawingGroup.Transform>
+          <GeometryDrawing><GeometryDrawing.Brush><SolidColorBrush Color="#0A9FC6DD"/></GeometryDrawing.Brush><GeometryDrawing.Pen><Pen Thickness="1.8" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#80B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><RectangleGeometry Rect="-22,-22,87.8292,44" RadiusX="22" RadiusY="22"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><EllipseGeometry Center="0,0" RadiusX="7.48" RadiusY="22"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><EllipseGeometry Center="43.8292,0" RadiusX="7.48" RadiusY="22"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33C6EAFF"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><PathGeometry FillRule="Nonzero" Figures="M0 0H43.82921400162225"/></GeometryDrawing.Geometry></GeometryDrawing>
+        </DrawingGroup>
+        <DrawingGroup>
+          <DrawingGroup.Transform><TransformGroup><RotateTransform Angle="-114.444"/><TranslateTransform X="346" Y="411"/></TransformGroup></DrawingGroup.Transform>
+          <GeometryDrawing><GeometryDrawing.Brush><SolidColorBrush Color="#0A9FC6DD"/></GeometryDrawing.Brush><GeometryDrawing.Pen><Pen Thickness="1.8" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#80B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><RectangleGeometry Rect="-18,-18,60.1661,36" RadiusX="18" RadiusY="18"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><EllipseGeometry Center="0,0" RadiusX="6.12" RadiusY="18"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><EllipseGeometry Center="24.1661,0" RadiusX="6.12" RadiusY="18"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33C6EAFF"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><PathGeometry FillRule="Nonzero" Figures="M0 0H24.16609194718914"/></GeometryDrawing.Geometry></GeometryDrawing>
+        </DrawingGroup>
+        <DrawingGroup>
+          <DrawingGroup.Transform><TransformGroup><RotateTransform Angle="-82.4054"/><TranslateTransform X="405" Y="459"/></TransformGroup></DrawingGroup.Transform>
+          <GeometryDrawing><GeometryDrawing.Brush><SolidColorBrush Color="#0A9FC6DD"/></GeometryDrawing.Brush><GeometryDrawing.Pen><Pen Thickness="1.8" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#80B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><RectangleGeometry Rect="-23,-23,91.3982,46" RadiusX="23" RadiusY="23"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><EllipseGeometry Center="0,0" RadiusX="7.82" RadiusY="23"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><EllipseGeometry Center="45.3982,0" RadiusX="7.82" RadiusY="23"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33C6EAFF"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><PathGeometry FillRule="Nonzero" Figures="M0 0H45.39823785126466"/></GeometryDrawing.Geometry></GeometryDrawing>
+        </DrawingGroup>
+        <DrawingGroup>
+          <DrawingGroup.Transform><TransformGroup><RotateTransform Angle="-25.9065"/><TranslateTransform X="412" Y="414"/></TransformGroup></DrawingGroup.Transform>
+          <GeometryDrawing><GeometryDrawing.Brush><SolidColorBrush Color="#0A9FC6DD"/></GeometryDrawing.Brush><GeometryDrawing.Pen><Pen Thickness="1.8" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#80B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><RectangleGeometry Rect="-19,-19,76.9102,38" RadiusX="19" RadiusY="19"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><EllipseGeometry Center="0,0" RadiusX="6.46" RadiusY="19"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><EllipseGeometry Center="38.9102,0" RadiusX="6.46" RadiusY="19"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33C6EAFF"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><PathGeometry FillRule="Nonzero" Figures="M0 0H38.91015291668744"/></GeometryDrawing.Geometry></GeometryDrawing>
+        </DrawingGroup>
+        <DrawingGroup>
+          <DrawingGroup.Transform><TransformGroup><RotateTransform Angle="129.536"/><TranslateTransform X="462" Y="520"/></TransformGroup></DrawingGroup.Transform>
+          <GeometryDrawing><GeometryDrawing.Brush><SolidColorBrush Color="#0A9FC6DD"/></GeometryDrawing.Brush><GeometryDrawing.Pen><Pen Thickness="1.8" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#80B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><RectangleGeometry Rect="-28,-28,137.688,56" RadiusX="28" RadiusY="28"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><EllipseGeometry Center="0,0" RadiusX="9.52" RadiusY="28"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><EllipseGeometry Center="81.6884,0" RadiusX="9.52" RadiusY="28"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33C6EAFF"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><PathGeometry FillRule="Nonzero" Figures="M0 0H81.68843247363729"/></GeometryDrawing.Geometry></GeometryDrawing>
+        </DrawingGroup>
+        <DrawingGroup>
+          <DrawingGroup.Transform><TransformGroup><RotateTransform Angle="-11.8887"/><TranslateTransform X="410" Y="583"/></TransformGroup></DrawingGroup.Transform>
+          <GeometryDrawing><GeometryDrawing.Brush><SolidColorBrush Color="#0A9FC6DD"/></GeometryDrawing.Brush><GeometryDrawing.Pen><Pen Thickness="1.8" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#80B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><RectangleGeometry Rect="-23,-23,104.249,46" RadiusX="23" RadiusY="23"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><EllipseGeometry Center="0,0" RadiusX="7.82" RadiusY="23"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><EllipseGeometry Center="58.2495,0" RadiusX="7.82" RadiusY="23"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33C6EAFF"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><PathGeometry FillRule="Nonzero" Figures="M0 0H58.249463516842795"/></GeometryDrawing.Geometry></GeometryDrawing>
+        </DrawingGroup>
+        <DrawingGroup>
+          <DrawingGroup.Transform><TransformGroup><RotateTransform Angle="-37.3039"/><TranslateTransform X="465" Y="574"/></TransformGroup></DrawingGroup.Transform>
+          <GeometryDrawing><GeometryDrawing.Brush><SolidColorBrush Color="#0A9FC6DD"/></GeometryDrawing.Brush><GeometryDrawing.Pen><Pen Thickness="1.8" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#80B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><RectangleGeometry Rect="-19,-19,64.4008,38" RadiusX="19" RadiusY="19"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><EllipseGeometry Center="0,0" RadiusX="6.46" RadiusY="19"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><EllipseGeometry Center="26.4008,0" RadiusX="6.46" RadiusY="19"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33C6EAFF"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><PathGeometry FillRule="Nonzero" Figures="M0 0H26.400757564888174"/></GeometryDrawing.Geometry></GeometryDrawing>
+        </DrawingGroup>
+        <DrawingGroup>
+          <DrawingGroup.Transform><TransformGroup><RotateTransform Angle="-35.9868"/><TranslateTransform X="466" Y="510"/></TransformGroup></DrawingGroup.Transform>
+          <GeometryDrawing><GeometryDrawing.Brush><SolidColorBrush Color="#0A9FC6DD"/></GeometryDrawing.Brush><GeometryDrawing.Pen><Pen Thickness="1.8" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#80B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><RectangleGeometry Rect="-29,-29,161.812,58" RadiusX="29" RadiusY="29"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><EllipseGeometry Center="0,0" RadiusX="9.86" RadiusY="29"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><EllipseGeometry Center="103.812,0" RadiusX="9.86" RadiusY="29"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33C6EAFF"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><PathGeometry FillRule="Nonzero" Figures="M0 0H103.8123306741545"/></GeometryDrawing.Geometry></GeometryDrawing>
+        </DrawingGroup>
+        <DrawingGroup>
+          <DrawingGroup.Transform><TransformGroup><RotateTransform Angle="-25.8368"/><TranslateTransform X="550" Y="449"/></TransformGroup></DrawingGroup.Transform>
+          <GeometryDrawing><GeometryDrawing.Brush><SolidColorBrush Color="#0A9FC6DD"/></GeometryDrawing.Brush><GeometryDrawing.Pen><Pen Thickness="1.8" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#80B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><RectangleGeometry Rect="-25,-25,155.551,50" RadiusX="25" RadiusY="25"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><EllipseGeometry Center="0,0" RadiusX="8.5" RadiusY="25"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><EllipseGeometry Center="105.551,0" RadiusX="8.5" RadiusY="25"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33C6EAFF"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><PathGeometry FillRule="Nonzero" Figures="M0 0H105.55093557141026"/></GeometryDrawing.Geometry></GeometryDrawing>
+        </DrawingGroup>
+        <DrawingGroup>
+          <DrawingGroup.Transform><TransformGroup><RotateTransform Angle="-9.13018"/><TranslateTransform X="645" Y="403"/></TransformGroup></DrawingGroup.Transform>
+          <GeometryDrawing><GeometryDrawing.Brush><SolidColorBrush Color="#0A9FC6DD"/></GeometryDrawing.Brush><GeometryDrawing.Pen><Pen Thickness="1.8" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#80B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><RectangleGeometry Rect="-20,-20,96.7186,40" RadiusX="20" RadiusY="20"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><EllipseGeometry Center="0,0" RadiusX="6.8" RadiusY="20"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><EllipseGeometry Center="56.7186,0" RadiusX="6.8" RadiusY="20"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33C6EAFF"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><PathGeometry FillRule="Nonzero" Figures="M0 0H56.718603649948925"/></GeometryDrawing.Geometry></GeometryDrawing>
+        </DrawingGroup>
+        <DrawingGroup>
+          <DrawingGroup.Transform><TranslateTransform X="552" Y="451"/></DrawingGroup.Transform>
+          <GeometryDrawing><GeometryDrawing.Brush><SolidColorBrush Color="#1AC6EAFF"/></GeometryDrawing.Brush><GeometryDrawing.Pen><Pen Thickness="2.4" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#F2C6EAFF"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><EllipseGeometry Center="0,0" RadiusX="92" RadiusY="92"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <DrawingGroup>
+            <DrawingGroup.Transform><RotateTransform Angle="20"/></DrawingGroup.Transform>
+            <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1.6" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#7AC6EAFF"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><EllipseGeometry Center="0,0" RadiusX="33.12" RadiusY="92"/></GeometryDrawing.Geometry></GeometryDrawing>
+          </DrawingGroup>
+          <DrawingGroup>
+            <DrawingGroup.Transform><RotateTransform Angle="-15"/></DrawingGroup.Transform>
+            <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1.6" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#66C6EAFF"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><EllipseGeometry Center="0,0" RadiusX="92" RadiusY="27.6"/></GeometryDrawing.Geometry></GeometryDrawing>
+          </DrawingGroup>
+          <DrawingGroup>
+            <DrawingGroup.Transform><RotateTransform Angle="20"/></DrawingGroup.Transform>
+            <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#2EC6EAFF"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><PathGeometry FillRule="Nonzero" Figures="M0 -92V92"/></GeometryDrawing.Geometry></GeometryDrawing>
+          </DrawingGroup>
+          <GeometryDrawing><GeometryDrawing.Brush><SolidColorBrush Color="#FFC6EAFF"/></GeometryDrawing.Brush><GeometryDrawing.Geometry><EllipseGeometry Center="0,0" RadiusX="2.2" RadiusY="2.2"/></GeometryDrawing.Geometry></GeometryDrawing>
+        </DrawingGroup>
+        <DrawingGroup>
+          <DrawingGroup.Transform><TranslateTransform X="699" Y="421"/></DrawingGroup.Transform>
+          <GeometryDrawing><GeometryDrawing.Brush><SolidColorBrush Color="#1AC6EAFF"/></GeometryDrawing.Brush><GeometryDrawing.Pen><Pen Thickness="2.4" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#F2C6EAFF"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><EllipseGeometry Center="0,0" RadiusX="104" RadiusY="104"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <DrawingGroup>
+            <DrawingGroup.Transform><RotateTransform Angle="20"/></DrawingGroup.Transform>
+            <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1.6" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#7AC6EAFF"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><EllipseGeometry Center="0,0" RadiusX="37.44" RadiusY="104"/></GeometryDrawing.Geometry></GeometryDrawing>
+          </DrawingGroup>
+          <DrawingGroup>
+            <DrawingGroup.Transform><RotateTransform Angle="-15"/></DrawingGroup.Transform>
+            <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1.6" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#66C6EAFF"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><EllipseGeometry Center="0,0" RadiusX="104" RadiusY="31.2"/></GeometryDrawing.Geometry></GeometryDrawing>
+          </DrawingGroup>
+          <DrawingGroup>
+            <DrawingGroup.Transform><RotateTransform Angle="20"/></DrawingGroup.Transform>
+            <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#2EC6EAFF"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><PathGeometry FillRule="Nonzero" Figures="M0 -104V104"/></GeometryDrawing.Geometry></GeometryDrawing>
+          </DrawingGroup>
+          <GeometryDrawing><GeometryDrawing.Brush><SolidColorBrush Color="#FFC6EAFF"/></GeometryDrawing.Brush><GeometryDrawing.Geometry><EllipseGeometry Center="0,0" RadiusX="2.2" RadiusY="2.2"/></GeometryDrawing.Geometry></GeometryDrawing>
+        </DrawingGroup>
+      </DrawingGroup>
+      <DrawingGroup>
+        <DrawingGroup.Transform><TransformGroup><ScaleTransform ScaleX="0.49" ScaleY="0.49"/><TranslateTransform X="344" Y="78"/></TransformGroup></DrawingGroup.Transform>
+        <DrawingGroup>
+          <DrawingGroup.Transform><TransformGroup><RotateTransform Angle="-83.6598"/><TranslateTransform X="225" Y="447"/></TransformGroup></DrawingGroup.Transform>
+          <GeometryDrawing><GeometryDrawing.Brush><SolidColorBrush Color="#0A9FC6DD"/></GeometryDrawing.Brush><GeometryDrawing.Pen><Pen Thickness="1.8" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#80B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><RectangleGeometry Rect="-35,-35,88.1108,70" RadiusX="35" RadiusY="35"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><EllipseGeometry Center="0,0" RadiusX="11.9" RadiusY="35"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><EllipseGeometry Center="18.1108,0" RadiusX="11.9" RadiusY="35"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33C6EAFF"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><PathGeometry FillRule="Nonzero" Figures="M0 0H18.110770276274835"/></GeometryDrawing.Geometry></GeometryDrawing>
+        </DrawingGroup>
+        <DrawingGroup>
+          <DrawingGroup.Transform><TransformGroup><RotateTransform Angle="-77.4712"/><TranslateTransform X="228" Y="389"/></TransformGroup></DrawingGroup.Transform>
+          <GeometryDrawing><GeometryDrawing.Brush><SolidColorBrush Color="#0A9FC6DD"/></GeometryDrawing.Brush><GeometryDrawing.Pen><Pen Thickness="1.8" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#80B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><RectangleGeometry Rect="-37,-37,110.878,74" RadiusX="37" RadiusY="37"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><EllipseGeometry Center="0,0" RadiusX="12.58" RadiusY="37"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><EllipseGeometry Center="36.8782,0" RadiusX="12.58" RadiusY="37"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33C6EAFF"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><PathGeometry FillRule="Nonzero" Figures="M0 0H36.878177829171555"/></GeometryDrawing.Geometry></GeometryDrawing>
+        </DrawingGroup>
+        <DrawingGroup>
+          <DrawingGroup.Transform><TransformGroup><RotateTransform Angle="-90"/><TranslateTransform X="236" Y="350"/></TransformGroup></DrawingGroup.Transform>
+          <GeometryDrawing><GeometryDrawing.Brush><SolidColorBrush Color="#0A9FC6DD"/></GeometryDrawing.Brush><GeometryDrawing.Pen><Pen Thickness="1.8" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#80B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><RectangleGeometry Rect="-31,-31,94,62" RadiusX="31" RadiusY="31"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><EllipseGeometry Center="0,0" RadiusX="10.54" RadiusY="31"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><EllipseGeometry Center="32,0" RadiusX="10.54" RadiusY="31"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33C6EAFF"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><PathGeometry FillRule="Nonzero" Figures="M0 0H32"/></GeometryDrawing.Geometry></GeometryDrawing>
+        </DrawingGroup>
+        <DrawingGroup>
+          <DrawingGroup.Transform><TransformGroup><RotateTransform Angle="138.366"/><TranslateTransform X="194" Y="391"/></TransformGroup></DrawingGroup.Transform>
+          <GeometryDrawing><GeometryDrawing.Brush><SolidColorBrush Color="#0A9FC6DD"/></GeometryDrawing.Brush><GeometryDrawing.Pen><Pen Thickness="1.8" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#80B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><RectangleGeometry Rect="-20,-20,76.1248,40" RadiusX="20" RadiusY="20"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><EllipseGeometry Center="0,0" RadiusX="6.8" RadiusY="20"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><EllipseGeometry Center="36.1248,0" RadiusX="6.8" RadiusY="20"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33C6EAFF"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><PathGeometry FillRule="Nonzero" Figures="M0 0H36.124783736376884"/></GeometryDrawing.Geometry></GeometryDrawing>
+        </DrawingGroup>
+        <DrawingGroup>
+          <DrawingGroup.Transform><TransformGroup><RotateTransform Angle="118.811"/><TranslateTransform X="167" Y="415"/></TransformGroup></DrawingGroup.Transform>
+          <GeometryDrawing><GeometryDrawing.Brush><SolidColorBrush Color="#0A9FC6DD"/></GeometryDrawing.Brush><GeometryDrawing.Pen><Pen Thickness="1.8" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#80B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><RectangleGeometry Rect="-19,-19,60.8254,38" RadiusX="19" RadiusY="19"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><EllipseGeometry Center="0,0" RadiusX="6.46" RadiusY="19"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><EllipseGeometry Center="22.8254,0" RadiusX="6.46" RadiusY="19"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33C6EAFF"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><PathGeometry FillRule="Nonzero" Figures="M0 0H22.825424421026653"/></GeometryDrawing.Geometry></GeometryDrawing>
+        </DrawingGroup>
+        <DrawingGroup>
+          <DrawingGroup.Transform><TransformGroup><RotateTransform Angle="43.8309"/><TranslateTransform X="267" Y="391"/></TransformGroup></DrawingGroup.Transform>
+          <GeometryDrawing><GeometryDrawing.Brush><SolidColorBrush Color="#0A9FC6DD"/></GeometryDrawing.Brush><GeometryDrawing.Pen><Pen Thickness="1.8" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#80B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><RectangleGeometry Rect="-20,-20,74.6554,40" RadiusX="20" RadiusY="20"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><EllipseGeometry Center="0,0" RadiusX="6.8" RadiusY="20"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><EllipseGeometry Center="34.6554,0" RadiusX="6.8" RadiusY="20"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33C6EAFF"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><PathGeometry FillRule="Nonzero" Figures="M0 0H34.655446902326915"/></GeometryDrawing.Geometry></GeometryDrawing>
+        </DrawingGroup>
+        <DrawingGroup>
+          <DrawingGroup.Transform><TransformGroup><RotateTransform Angle="62.2415"/><TranslateTransform X="292" Y="415"/></TransformGroup></DrawingGroup.Transform>
+          <GeometryDrawing><GeometryDrawing.Brush><SolidColorBrush Color="#0A9FC6DD"/></GeometryDrawing.Brush><GeometryDrawing.Pen><Pen Thickness="1.8" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#80B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><RectangleGeometry Rect="-19,-19,59.4709,38" RadiusX="19" RadiusY="19"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><EllipseGeometry Center="0,0" RadiusX="6.46" RadiusY="19"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><EllipseGeometry Center="21.4709,0" RadiusX="6.46" RadiusY="19"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33C6EAFF"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><PathGeometry FillRule="Nonzero" Figures="M0 0H21.470910553583888"/></GeometryDrawing.Geometry></GeometryDrawing>
+        </DrawingGroup>
+        <DrawingGroup>
+          <DrawingGroup.Transform><TransformGroup><RotateTransform Angle="-98.5691"/><TranslateTransform X="222" Y="315"/></TransformGroup></DrawingGroup.Transform>
+          <GeometryDrawing><GeometryDrawing.Brush><SolidColorBrush Color="#0A9FC6DD"/></GeometryDrawing.Brush><GeometryDrawing.Pen><Pen Thickness="1.8" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#80B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><RectangleGeometry Rect="-24,-24,121.824,48" RadiusX="24" RadiusY="24"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><EllipseGeometry Center="0,0" RadiusX="8.16" RadiusY="24"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><EllipseGeometry Center="73.8241,0" RadiusX="8.16" RadiusY="24"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33C6EAFF"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><PathGeometry FillRule="Nonzero" Figures="M0 0H73.82411530116701"/></GeometryDrawing.Geometry></GeometryDrawing>
+        </DrawingGroup>
+        <DrawingGroup>
+          <DrawingGroup.Transform><TransformGroup><RotateTransform Angle="-97.8831"/><TranslateTransform X="211" Y="242"/></TransformGroup></DrawingGroup.Transform>
+          <GeometryDrawing><GeometryDrawing.Brush><SolidColorBrush Color="#0A9FC6DD"/></GeometryDrawing.Brush><GeometryDrawing.Pen><Pen Thickness="1.8" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#80B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><RectangleGeometry Rect="-21,-21,107.62,42" RadiusX="21" RadiusY="21"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><EllipseGeometry Center="0,0" RadiusX="7.14" RadiusY="21"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><EllipseGeometry Center="65.6201,0" RadiusX="7.14" RadiusY="21"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33C6EAFF"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><PathGeometry FillRule="Nonzero" Figures="M0 0H65.62011886609167"/></GeometryDrawing.Geometry></GeometryDrawing>
+        </DrawingGroup>
+        <DrawingGroup>
+          <DrawingGroup.Transform><TransformGroup><RotateTransform Angle="-84.6442"/><TranslateTransform X="202" Y="177"/></TransformGroup></DrawingGroup.Transform>
+          <GeometryDrawing><GeometryDrawing.Brush><SolidColorBrush Color="#0A9FC6DD"/></GeometryDrawing.Brush><GeometryDrawing.Pen><Pen Thickness="1.8" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#80B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><RectangleGeometry Rect="-17,-17,66.1403,34" RadiusX="17" RadiusY="17"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><EllipseGeometry Center="0,0" RadiusX="5.78" RadiusY="17"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><EllipseGeometry Center="32.1403,0" RadiusX="5.78" RadiusY="17"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33C6EAFF"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><PathGeometry FillRule="Nonzero" Figures="M0 0H32.14031735997639"/></GeometryDrawing.Geometry></GeometryDrawing>
+        </DrawingGroup>
+        <DrawingGroup>
+          <DrawingGroup.Transform><TransformGroup><RotateTransform Angle="-80.6764"/><TranslateTransform X="248" Y="315"/></TransformGroup></DrawingGroup.Transform>
+          <GeometryDrawing><GeometryDrawing.Brush><SolidColorBrush Color="#0A9FC6DD"/></GeometryDrawing.Brush><GeometryDrawing.Pen><Pen Thickness="1.8" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#80B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><RectangleGeometry Rect="-24,-24,115.897,48" RadiusX="24" RadiusY="24"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><EllipseGeometry Center="0,0" RadiusX="8.16" RadiusY="24"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><EllipseGeometry Center="67.897,0" RadiusX="8.16" RadiusY="24"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33C6EAFF"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><PathGeometry FillRule="Nonzero" Figures="M0 0H67.89698078707183"/></GeometryDrawing.Geometry></GeometryDrawing>
+        </DrawingGroup>
+        <DrawingGroup>
+          <DrawingGroup.Transform><TransformGroup><RotateTransform Angle="-80.8698"/><TranslateTransform X="259" Y="248"/></TransformGroup></DrawingGroup.Transform>
+          <GeometryDrawing><GeometryDrawing.Brush><SolidColorBrush Color="#0A9FC6DD"/></GeometryDrawing.Brush><GeometryDrawing.Pen><Pen Thickness="1.8" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#80B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><RectangleGeometry Rect="-21,-21,98.7186,42" RadiusX="21" RadiusY="21"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><EllipseGeometry Center="0,0" RadiusX="7.14" RadiusY="21"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><EllipseGeometry Center="56.7186,0" RadiusX="7.14" RadiusY="21"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33C6EAFF"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><PathGeometry FillRule="Nonzero" Figures="M0 0H56.718603649948925"/></GeometryDrawing.Geometry></GeometryDrawing>
+        </DrawingGroup>
+        <DrawingGroup>
+          <DrawingGroup.Transform><TransformGroup><RotateTransform Angle="-63.4349"/><TranslateTransform X="268" Y="192"/></TransformGroup></DrawingGroup.Transform>
+          <GeometryDrawing><GeometryDrawing.Brush><SolidColorBrush Color="#0A9FC6DD"/></GeometryDrawing.Brush><GeometryDrawing.Pen><Pen Thickness="1.8" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#80B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><RectangleGeometry Rect="-17,-17,56.3607,34" RadiusX="17" RadiusY="17"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><EllipseGeometry Center="0,0" RadiusX="5.78" RadiusY="17"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33B6D4E8"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><EllipseGeometry Center="22.3607,0" RadiusX="5.78" RadiusY="17"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#33C6EAFF"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><PathGeometry FillRule="Nonzero" Figures="M0 0H22.360679774997898"/></GeometryDrawing.Geometry></GeometryDrawing>
+        </DrawingGroup>
+        <DrawingGroup>
+          <DrawingGroup.Transform><TranslateTransform X="217" Y="175"/></DrawingGroup.Transform>
+          <GeometryDrawing><GeometryDrawing.Brush><SolidColorBrush Color="#1A65C7FF"/></GeometryDrawing.Brush><GeometryDrawing.Pen><Pen Thickness="2.4" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#F265C7FF"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><EllipseGeometry Center="0,0" RadiusX="125" RadiusY="125"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <DrawingGroup>
+            <DrawingGroup.Transform><RotateTransform Angle="20"/></DrawingGroup.Transform>
+            <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1.6" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#7A65C7FF"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><EllipseGeometry Center="0,0" RadiusX="45" RadiusY="125"/></GeometryDrawing.Geometry></GeometryDrawing>
+          </DrawingGroup>
+          <DrawingGroup>
+            <DrawingGroup.Transform><RotateTransform Angle="-15"/></DrawingGroup.Transform>
+            <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1.6" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#6665C7FF"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><EllipseGeometry Center="0,0" RadiusX="125" RadiusY="37.5"/></GeometryDrawing.Geometry></GeometryDrawing>
+          </DrawingGroup>
+          <DrawingGroup>
+            <DrawingGroup.Transform><RotateTransform Angle="20"/></DrawingGroup.Transform>
+            <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#2E65C7FF"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><PathGeometry FillRule="Nonzero" Figures="M0 -125V125"/></GeometryDrawing.Geometry></GeometryDrawing>
+          </DrawingGroup>
+          <GeometryDrawing><GeometryDrawing.Brush><SolidColorBrush Color="#FF65C7FF"/></GeometryDrawing.Brush><GeometryDrawing.Geometry><EllipseGeometry Center="0,0" RadiusX="2.2" RadiusY="2.2"/></GeometryDrawing.Geometry></GeometryDrawing>
+        </DrawingGroup>
+        <DrawingGroup>
+          <DrawingGroup.Transform><TranslateTransform X="241" Y="241"/></DrawingGroup.Transform>
+          <GeometryDrawing><GeometryDrawing.Brush><SolidColorBrush Color="#1A65C7FF"/></GeometryDrawing.Brush><GeometryDrawing.Pen><Pen Thickness="2.4" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#F265C7FF"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><EllipseGeometry Center="0,0" RadiusX="92" RadiusY="92"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <DrawingGroup>
+            <DrawingGroup.Transform><RotateTransform Angle="20"/></DrawingGroup.Transform>
+            <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1.6" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#7A65C7FF"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><EllipseGeometry Center="0,0" RadiusX="33.12" RadiusY="92"/></GeometryDrawing.Geometry></GeometryDrawing>
+          </DrawingGroup>
+          <DrawingGroup>
+            <DrawingGroup.Transform><RotateTransform Angle="-15"/></DrawingGroup.Transform>
+            <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1.6" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#6665C7FF"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><EllipseGeometry Center="0,0" RadiusX="92" RadiusY="27.6"/></GeometryDrawing.Geometry></GeometryDrawing>
+          </DrawingGroup>
+          <DrawingGroup>
+            <DrawingGroup.Transform><RotateTransform Angle="20"/></DrawingGroup.Transform>
+            <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#2E65C7FF"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><PathGeometry FillRule="Nonzero" Figures="M0 -92V92"/></GeometryDrawing.Geometry></GeometryDrawing>
+          </DrawingGroup>
+          <GeometryDrawing><GeometryDrawing.Brush><SolidColorBrush Color="#FF65C7FF"/></GeometryDrawing.Brush><GeometryDrawing.Geometry><EllipseGeometry Center="0,0" RadiusX="2.2" RadiusY="2.2"/></GeometryDrawing.Geometry></GeometryDrawing>
+        </DrawingGroup>
+        <DrawingGroup>
+          <DrawingGroup.Transform><TranslateTransform X="232" Y="312"/></DrawingGroup.Transform>
+          <GeometryDrawing><GeometryDrawing.Brush><SolidColorBrush Color="#1A65C7FF"/></GeometryDrawing.Brush><GeometryDrawing.Pen><Pen Thickness="2.4" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#F265C7FF"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><EllipseGeometry Center="0,0" RadiusX="125" RadiusY="125"/></GeometryDrawing.Geometry></GeometryDrawing>
+          <DrawingGroup>
+            <DrawingGroup.Transform><RotateTransform Angle="20"/></DrawingGroup.Transform>
+            <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1.6" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#7A65C7FF"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><EllipseGeometry Center="0,0" RadiusX="45" RadiusY="125"/></GeometryDrawing.Geometry></GeometryDrawing>
+          </DrawingGroup>
+          <DrawingGroup>
+            <DrawingGroup.Transform><RotateTransform Angle="-15"/></DrawingGroup.Transform>
+            <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1.6" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#6665C7FF"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><EllipseGeometry Center="0,0" RadiusX="125" RadiusY="37.5"/></GeometryDrawing.Geometry></GeometryDrawing>
+          </DrawingGroup>
+          <DrawingGroup>
+            <DrawingGroup.Transform><RotateTransform Angle="20"/></DrawingGroup.Transform>
+            <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#2E65C7FF"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><PathGeometry FillRule="Nonzero" Figures="M0 -125V125"/></GeometryDrawing.Geometry></GeometryDrawing>
+          </DrawingGroup>
+          <GeometryDrawing><GeometryDrawing.Brush><SolidColorBrush Color="#FF65C7FF"/></GeometryDrawing.Brush><GeometryDrawing.Geometry><EllipseGeometry Center="0,0" RadiusX="2.2" RadiusY="2.2"/></GeometryDrawing.Geometry></GeometryDrawing>
+        </DrawingGroup>
+      </DrawingGroup>
+      <DrawingGroup Opacity="0.035">
+        <GeometryDrawing><GeometryDrawing.Brush><SolidColorBrush Color="#FF2BA8FF"/></GeometryDrawing.Brush><GeometryDrawing.Geometry><EllipseGeometry Center="337,477" RadiusX="226" RadiusY="10"/></GeometryDrawing.Geometry></GeometryDrawing>
+      </DrawingGroup>
+      <GeometryDrawing><GeometryDrawing.Brush><LinearGradientBrush MappingMode="Absolute" StartPoint="93,447" EndPoint="597,480"><GradientStop Color="#FF233C56" Offset="0"/><GradientStop Color="#FF102235" Offset="0.6"/><GradientStop Color="#FF172D42" Offset="1"/></LinearGradientBrush></GeometryDrawing.Brush><GeometryDrawing.Pen><Pen Thickness="0.8" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#FF294359"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><PathGeometry FillRule="Nonzero" Figures="M93 447h504l-28 22H121l-28-22Z"/></GeometryDrawing.Geometry></GeometryDrawing>
+      <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="0.8" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#FF274158"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><PathGeometry FillRule="Nonzero" Figures="m121 469 18 9h412l18-9"/></GeometryDrawing.Geometry></GeometryDrawing>
+      <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="2.5" StartLineCap="Round" EndLineCap="Round"><Pen.Brush><LinearGradientBrush MappingMode="Absolute" StartPoint="93,446" EndPoint="597,446"><GradientStop Color="#FF0F4B80" Offset="0"/><GradientStop Color="#FF83DBFF" Offset="0.45"/><GradientStop Color="#FF2878BC" Offset="1"/></LinearGradientBrush></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><PathGeometry FillRule="Nonzero" Figures="M93 446h504"/></GeometryDrawing.Geometry></GeometryDrawing>
+      <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#1A6FCFFF"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><PathGeometry FillRule="Nonzero" Figures="M111 454h468"/></GeometryDrawing.Geometry></GeometryDrawing>
+      <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="1" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#FF427496"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><PathGeometry FillRule="Nonzero" Figures="M151 460h24m5 0h7m319 0h24"/></GeometryDrawing.Geometry></GeometryDrawing>
+      <GeometryDrawing><GeometryDrawing.Pen><Pen Thickness="0.8" StartLineCap="Flat" EndLineCap="Flat"><Pen.Brush><SolidColorBrush Color="#597698B5"/></Pen.Brush></Pen></GeometryDrawing.Pen><GeometryDrawing.Geometry><PathGeometry FillRule="Nonzero" Figures="M189 398h30m-30 0v-18M513 340h-27m27 0v-17"/></GeometryDrawing.Geometry></GeometryDrawing>
+    </DrawingGroup>
+  </DrawingImage.Drawing></DrawingImage>
+  <Geometry x:Key="BrandMarkGeometry">F1 M22 3h11L11 45H0L22 3Zm13 6 19 36H42L29 20l6-11Z M22 31h10l5 9H17l5-9Z</Geometry>
+  <GeometryGroup x:Key="WordmarkGeometry" FillRule="EvenOdd"><PathGeometry FillRule="EvenOdd" Figures="M0 30 11 2h9l11 28h-9l-2-6H10l-2 6H0Zm13-13h5l-2.5-8-2.5 8ZM36 2h18c8 0 12 4 12 10 0 5-3 8-7 9l9 9H57l-8-9h-4v9h-9V2Zm9 7v6h8c3 0 4-1 4-3s-1-3-4-3h-8Z"/><PathGeometry FillRule="Nonzero" Figures="M74 2h26v7H83v4h15v7H83v4h17v6H74V2Zm33 28V2h9l12 16V2h9v28h-9l-12-16v16h-9Z"/><PathGeometry FillRule="EvenOdd" Figures="m144 30 11-28h9l11 28h-9l-2-6h-10l-2 6h-8Zm13-13h5l-2.5-8-2.5 8Z"/></GeometryGroup>
+  <Geometry x:Key="GearGeometry">F0 M20.35,9.93 L22.89,10.45 L22.89,13.55 L20.35,14.07 L19.37,16.44 L20.80,18.60 L18.60,20.80 L16.44,19.37 L14.07,20.35 L13.55,22.89 L10.45,22.89 L9.93,20.35 L7.56,19.37 L5.40,20.80 L3.20,18.60 L4.63,16.44 L3.65,14.07 L1.11,13.55 L1.11,10.45 L3.65,9.93 L4.63,7.56 L3.20,5.40 L5.40,3.20 L7.56,4.63 L9.93,3.65 L10.45,1.11 L13.55,1.11 L14.07,3.65 L16.44,4.63 L18.60,3.20 L20.80,5.40 L19.37,7.56 Z M15.60,12 A3.60,3.60 0 1 0 8.40,12 A3.60,3.60 0 1 0 15.60,12 Z</Geometry>
+</ResourceDictionary>

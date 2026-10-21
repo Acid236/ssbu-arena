@@ -217,13 +217,16 @@ input sequence reached its last step, 12,613 frames presented, 0 Vulkan call fai
 
 ## Running
 
-**The simple way: `build\Avvia SSBU.bat`** (copied there by the link step). A small window, nothing to install: the
-player name (the account id is made from it), local wireless over the internet (server, room password, ping on screen;
-only with a `--ldn-online on` build), the save folder (open it, import a save from Ryujinx automatically or from any
+**The simple way: `build\Avvia SSBU.bat`** (copied there by the link step). It starts `build\SSBU Arena.exe`, the
+launcher of `tools/launcher/arena` (WPF on .NET Framework 4.8, already in Windows 10 / 11), which the link step builds
+when the .NET SDK is installed (`dotnet build tools/launcher/arena -c Release`); without it, the older PowerShell window
+`Launcher.ps1` with the same settings. Home: Play, the player, controller and game files state. Settings: the
+player name (the account id is made from it), online through the Arena server (friend code, rollback, ping on screen,
+server), the save folder (open it, import a save from Ryujinx automatically or from any
 folder holding `save_data`, the save that was there is kept as `save-backup-<date>`), the DLC list from a folder of your
 own DLC dumps, video (16:9 with black bars or stretched, window mode and size), the controller of players 1 and 2 and
 the keyboard's player, a check of what the game needs (files, Vulkan, the Store codecs of the opening movie, offered for
-installation), **Salva** and **GIOCA** to start. Settings go to `build\config\launcher.ini`, `online.ini`, `account.txt`,
+installation), then **Play**. Settings go to `build\config\launcher.ini`, `online.ini`, `account.txt`,
 `dlc.txt`, and a few keys of `graphics.ini` (`aspect`, `window`, `width`, `height`) and `controllers.ini` (`[players]`, `[keyboard]`).
 
 From a shell, as before:

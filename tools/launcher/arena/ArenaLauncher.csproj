@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- SSBU Arena launcher: WPF on .NET Framework 4.8 (in every Windows 10 / 11: nothing to install), one exe.
+       dotnet build tools/launcher/arena -c Release   ->   bin/Release/net48/SSBU Arena.exe (setup.py link copies it to build\) -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>SSBU Arena</AssemblyName>
+    <RootNamespace>Arena</RootNamespace>
+    <ApplicationIcon>Assets\arena.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <DebugType>none</DebugType>
+    <Product>SSBU Arena</Product>
+    <Description>SSBU Arena launcher</Description>
+    <Version>0.1.0</Version>
+  </PropertyGroup>
+  <ItemGroup>
+    <Resource Include="Assets\Fonts\*.ttf" />
+    <Resource Include="Assets\arena.ico" />
+    <None Remove="Assets\*.svg" />
+  </ItemGroup>
+</Project>

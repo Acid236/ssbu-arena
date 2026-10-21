@@ -5,7 +5,7 @@
     "recomp",
     "decomp"
   ],
-  "project": "OpenSmash-Ultimate (ssbu-recomp)",
+  "project": "SSBU Arena (based on OpenSmash-Ultimate / ssbu-recomp)",
   "status": "playable",
   "targets": [
     "Windows"
@@ -28,7 +28,7 @@
     }
   ],
   "approach": "Static recompilation of the whole game (AArch64 to C, built natively, no emulation); NVN graphics on Vulkan; the fighters' script code as C++ source.",
-  "notes": "Native Windows build made on your PC from your own dump by a one-click installer (no Visual Studio, no firmware: prebuilt runtime release and open-source system fonts). In-game settings menu (F1) with full remapping, on-screen keyboard, Vulkan renderer, 13.0.4 and 13.0.5. Online play over Local Wireless is experimental; rollback netcode in progress.",
+  "notes": "Native Windows build made on your PC from your own dump by a one-click installer (no firmware: open-source system fonts). In-game settings menu (F1) with full remapping, on-screen keyboard, Vulkan renderer, 13.0.4 and 13.0.5. Online play over Local Wireless is experimental; rollback netcode in progress.",
   "help": [
     "Rollback netcode (savestate ring, logic-only frames)",
     "Testing on AMD and Intel GPUs",
@@ -43,26 +43,26 @@
   ],
   "maintainers": [
     {
-      "name": "Denkishi",
-      "link": "https://github.com/Denkishi"
+      "name": "Acid236",
+      "link": "https://github.com/Acid236"
     }
   ],
   "links": [
     {
       "label": "Source",
-      "url": "https://github.com/Denkishi/ssbu-recomp"
+      "url": "https://github.com/Acid236/ssbu-arena"
     },
     {
       "label": "Website",
-      "url": "https://denkishi.github.io/opensmash-site/"
-    },
-    {
-      "label": "Discord",
-      "url": "https://discord.gg/RyZpx3u2t4"
+      "url": "https://ssbuarena.com/"
     },
     {
       "label": "How to build",
-      "url": "https://github.com/Denkishi/ssbu-recomp/blob/main/BUILDING.md"
+      "url": "https://github.com/Acid236/ssbu-arena/blob/main/BUILDING.md"
+    },
+    {
+      "label": "Based on",
+      "url": "https://github.com/Denkishi/ssbu-recomp"
     }
   ]
 }

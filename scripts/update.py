@@ -38,13 +38,13 @@ import urllib.request
 import zipfile
 
 REPO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DEFAULT_REPO = 'Denkishi/ssbu-recomp'
+DEFAULT_REPO = 'Acid236/ssbu-arena'
 DEFAULT_BRANCH = 'main'
 MANIFEST = os.path.join('build', 'update_manifest.json')
 BACKUP = os.path.join('build', 'update_backup')
 # never written, never deleted (first path component, lower case; a trailing * is a prefix)
 PROTECTED = ('.git', 'build', 'deps', 'config', 'saves', 'userdata*', 'build_location.txt')   # build_location.txt: the install location chosen in the window
-UA = {'User-Agent': 'ssbu-recomp-update'}
+UA = {'User-Agent': 'ssbu-arena-update'}
 
 # changed path prefix -> the earliest setup.py step that has to run again (the list is in STEPS order of setup.py)
 STEPS = ['deps', 'stage', 'convert', 'modules', 'tables', 'lift', 'sdk', 'compile', 'nro', 'link', 'check']
