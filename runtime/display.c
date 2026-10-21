@@ -352,7 +352,9 @@ static HWND g_hwnd_menu;                               /* g_hwnd, for the functi
 void display_set_window_mode(int mode) { if (g_hwnd_menu) PostMessageA(g_hwnd_menu, WM_APP + 0x51, (WPARAM)mode, 0); }
 void display_set_client_size(int w, int h) { if (g_hwnd_menu) PostMessageA(g_hwnd_menu, WM_APP + 0x52, (WPARAM)w, (LPARAM)h); }
 int display_window_mode(void) { return g_full ? (g_topmost ? 2 : 1) : 0; }
+#include "loading_anim.c"                            /* U3: the loading animation until the game's first present */
 static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    if (la_wndproc(h, m, w)) return 0;
     if (m == WM_CLOSE) {                             /* the exit request: nn::oe decides (nnmisc.c oe_exit_request) whether the game ends now or after its exit-request handling section */
         printf("\nwindow closed by the user after %lld frames\n", (long long)g_frames);
         { extern volatile LONG g_display_close; InterlockedExchange(&g_display_close, 1); }      /* session 14: a hold of ours (the first-run shader preparation) ends at once */
@@ -440,6 +442,7 @@ static DWORD WINAPI window_thread(LPVOID arg) {
         ShowWindow(g_hwnd, SW_SHOWNOACTIVATE);
     }
     g_hwnd_menu = g_hwnd; g_topmost = go->window_mode == 2;      /* U1 (settings menu) */
+    la_start(g_hwnd, visible);                                   /* U3: the loading animation (loading_anim.c) */
     InterlockedExchange(&g_ready, 1);
     MSG msg;
     while (GetMessageA(&msg, NULL, 0, 0) > 0) { TranslateMessage(&msg); DispatchMessageA(&msg); }
@@ -452,6 +455,10 @@ static DWORD WINAPI window_thread(LPVOID arg) {
  * is SDL's, which this thread's event pumping keeps current; nnpad_sdl.c flushes the queue on its own thread, so the
  * close request is caught by an event watch rather than read from the queue. */
 #include <SDL3/SDL.h>
+/* U3: no loading animation in the SDL window yet (the Windows one is loading_anim.c) */
+static volatile LONG g_la_first = 1;
+static void la_stop(void) {}
+static void la_note(const char *note) { (void)note; }
 int oe_exit_request(void);                            /* nnmisc.c */
 static char g_title[96];
 static bool SDLCALL close_watch(void *user, SDL_Event *e) {
@@ -903,6 +910,7 @@ static void l1_report(FILE *out) {
  * the refresh that shows this frame, by the same rule as frame_queued, and whether the present is held for it. A frame
  * queued before the tick it is due at (on time) is held until that tick; a late one is presented at once. */
 void display_present_plan(int vulkan) {
+    if (!g_la_first) la_stop();                            /* U3: the first present: the loading animation stops before it (loading_anim.c) */
     if (!vulkan || old_pacing()) return;
     pace_options();
     LONG64 now_n = g_vsync_n, iv = g_interval, prev = g_latch, at = now_n + 1;
@@ -1073,6 +1081,7 @@ int display_wait_refresh(void) {
 /* Before a present: a frame queued earlier that nobody waited for (a caller that does not wait on the window sync). */
 void display_before_present(void) {
     static int said;
+    if (!g_la_first) la_stop();
     if (old_pacing() || !g_latch_pending) return;
     if (!said) { said = 1; printf("display: a present without a wait on the window texture's sync: held at the next present instead%c", 10); }
     display_wait_refresh();
@@ -1081,6 +1090,7 @@ void display_pace(void) {
     static LARGE_INTEGER next, second_start;
     static LONG64 second_frames;
     LARGE_INTEGER now;
+    if (!g_la_first) la_stop();                            /* (a present that came by neither call above) */
     if (!old_pacing()) { frame_queued(); return; }
     QueryPerformanceCounter(&now);
     if (!next.QuadPart) { next = now; second_start = now; }
@@ -1167,6 +1177,7 @@ void display_refresh_info(double *hz, int *lock_k) {
 /* nvn_vk_store.c: a note in the window's title while the first start reads the game data (minutes on a slow disk, before
  * the game shows any frame: issue #57 looked like a black screen); NULL puts the normal title back */
 void display_title_note(const char *note) {
+    la_note(note);                                         /* U3: the line beside the loading animation */
 #ifdef _WIN32
     if (!g_hwnd) return;
     char t[400];

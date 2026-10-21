@@ -1034,10 +1034,13 @@ def build_env(cx):
 
 
 def copy_logo(cx):
-    """media/opensmash.ico beside the exe: display.c loads it as the window's and taskbar's icon."""
-    src = os.path.join(REPO, 'media', 'opensmash.ico')
-    if os.path.isfile(src):
-        shutil.copy2(src, os.path.join(cx.work, 'opensmash.ico'))
+    """media/opensmash.ico beside the exe: display.c loads it as the window's and taskbar's icon; and the loading
+    animation's pictures (media/loading_kong.png, loading_kong_back.png, loading_arm.png: runtime/loading_anim.c paints
+    them in the window until the game's first frame)."""
+    for name in ('opensmash.ico', 'loading_kong.png', 'loading_kong_back.png', 'loading_arm.png'):
+        src = os.path.join(REPO, 'media', name)
+        if os.path.isfile(src):
+            shutil.copy2(src, os.path.join(cx.work, name))
 
 
 def copy_ffmpeg(cx):
