@@ -229,7 +229,7 @@ static Ctx *new_ctx(uint64_t stack_top) {
 }
 
 /* Every guest thread's context, so a report can say where each one is. */
-static struct { Obj *o; Ctx *c; } g_threads[256];
+static struct { Obj *o; Ctx *c; int stale; } g_threads[256];      /* (R3 lwr) stale: an older run of the same thread object (started again) */
 static volatile LONG g_threads_n;
 
 void dump_guest_threads(FILE *out) {
@@ -263,10 +263,15 @@ void os_wait_report(FILE *out) {
 }
 #endif
 
+/* (R3 lwr, runs lwr5..lwr13: "NetSystem" never at a wait for the rollback ring's base state) a ThreadType started again (the
+ * game's NetSystem thread, each time a Local Wireless session starts) is the same object: its older slot kept the finished
+ * run's context with the NEW run's thread handle, a context that never changes again (guest code, no import) paired with a
+ * live thread. The older slots of the object are stale from then on: no handle is given out for them. */
+static void thread_slots_stale(Obj *o, LONG slot) { for (LONG j = 0; j < slot && j < 256; j++) if (g_threads[j].o == o) g_threads[j].stale = 1; }
 /* hitch.c (SSBU_HITCH): guest thread i -> context, name, host handle; 0 past the end. */
 int guest_thread_info(int i, Ctx **c, const char **name, HANDLE *h) {
     if (i < 0 || i >= g_threads_n || i >= 256 || !g_threads[i].o || !g_threads[i].c) return 0;
-    *c = g_threads[i].c; *name = g_threads[i].o->name ? (const char *)(uintptr_t)g_threads[i].o->name : NULL; *h = g_threads[i].o->finished ? NULL : g_threads[i].o->thread;
+    *c = g_threads[i].c; *name = g_threads[i].o->name ? (const char *)(uintptr_t)g_threads[i].o->name : NULL; *h = g_threads[i].o->finished || g_threads[i].stale ? NULL : g_threads[i].o->thread;
     return 1;
 }
 void hitch_cur_ctx(Ctx *c);
@@ -287,6 +292,7 @@ static DWORD WINAPI thread_main(LPVOID arg) {
     wr64(c->tpidr + 0x1f8, o->key);                   /* Horizon thread-local region: the ThreadType pointer lives at +0x1f8 */
     LONG slot = InterlockedIncrement(&g_threads_n) - 1;
     if (slot < 256) { g_threads[slot].o = o; g_threads[slot].c = c; }
+    thread_slots_stale(o, slot);
     c->x[0] = o->arg;
     trace_printf("--- thread %llx started (entry %llx, name %s)\n", (unsigned long long)o->key, (unsigned long long)o->fn,
                  o->name ? (const char *)(uintptr_t)o->name : "?");
@@ -876,6 +882,7 @@ static DWORD WINAPI pthread_main(LPVOID arg) {
     wr64(c->tpidr + 0x1f8, o->key);                   /* the ThreadType pointer, as for nn::os threads */
     LONG slot = InterlockedIncrement(&g_threads_n) - 1;
     if (slot < 256) { g_threads[slot].o = o; g_threads[slot].c = c; }
+    thread_slots_stale(o, slot);
     c->x[0] = o->arg;
     trace_printf("--- pthread %llx started (entry %llx)\n", (unsigned long long)o->key, (unsigned long long)o->fn);
     call_guest(c, o->fn);

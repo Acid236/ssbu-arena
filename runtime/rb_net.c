@@ -71,6 +71,8 @@ static uint32_t mix32(uint32_t x) { x ^= x >> 16; x *= 0x7feb352du; x ^= x >> 15
 static RbPad bot_pad(unsigned seed, long long f) {
     /* segments of 6..29 frames; each segment one action. Walking alternates sides around the middle of the stage. */
     RbPad p; memset(&p, 0, sizeof p);
+    {   static long long off = -2; if (off == -2) { const char *e = getenv("SSBU_RB_NET_BOT_WALKOFF"); off = e && *e ? atoll(e) : -1; }      /* (R3 lwr, test) from that frame on: left held (the fighter walks off the stage: the match ends) */
+        if (off >= 0 && f >= off) { p.lx = -32767; return p; } }
     long long start = 1; uint32_t h = 0; int seg = 0;
     for (;; seg++) { h = mix32(seed * 0x9E3779B9u ^ (uint32_t)seg * 0x85EBCA6Bu); long long len = 6 + (h % 24); if (f < start + len) break; start += len; }
     int act = (int)((h >> 8) % 10);
@@ -107,8 +109,8 @@ int rbn_bot_on(void) { return g_bot; }
  * (seconds, default 120). No agreement = this match is played locally (Final Destination, one stock) and left at once
  * (rb_rollback.c: player 1 walks off the stage), back to the menus; the other game is told (REFUSE) so that it stops waiting. */
 #include "rb_hs.h"
-#define RBH_PROTO 4                                     /* 3 (hs12): RbhMatch carries the stage set-up context; 4 (hs14): PADS end with a mode byte, the stage is drawn from both picks */
-enum { RBH_CHOICE = 0x48, RBH_PROPOSE = 0x49, RBH_ACCEPT = 0x4a, RBH_REFUSE = 0x4b, RBH_BLOCK = 0x4c };
+#define RBH_PROTO 5                                     /* 3 (hs12): RbhMatch carries the stage set-up context; 4 (hs14): PADS end with a mode byte, the stage is drawn from both picks; 5 (R3 lwr): Local Wireless room matches, LAYOUT */
+enum { RBH_CHOICE = 0x48, RBH_PROPOSE = 0x49, RBH_ACCEPT = 0x4a, RBH_REFUSE = 0x4b, RBH_BLOCK = 0x4c, RBH_LAYOUT = 0x4d };      /* (R3 lwr) LAYOUT: a room match, each game's own player's control layout */
 #pragma pack(push, 1)
 typedef struct { uint8_t type, proto; int16_t game_build; uint32_t exe_stamp; uint32_t nonce, echo; RbhMatch m; } RbhMsg;
 typedef struct { uint8_t type, proto; int16_t game_build; uint32_t exe_stamp; uint32_t nonce; uint16_t off, len, total; uint8_t data[768]; } RbhBlock;
@@ -162,6 +164,14 @@ uint64_t rbn_match_seed(void) {
 static volatile LONG g_hs_room;                         /* (pub2) the last set-up was inside a Local Wireless room (until the next set-up: the fight-off of the
                                                            * room's waiting-stage fight comes AFTER the room match's set-up, run rm4) */
 int rbn_match_cancelled(void) { return g_hs_room ? 2 : (int)g_hs_cancelled; }      /* 0, 1 (not agreed: walk off) or 2 (pub2: a room fight, the game's own netcode) */
+/* (R3 lwr) debug_mode.c tells which set-up this is: 1 = a Local Wireless room's waiting-stage fight (the record builder called from
+ * the waiting-stage set-up, one player), 0 = any other (the select screens' "ready to fight", also the room's match) */
+static int g_setup_waiting, g_hs_lwr;
+void rbn_set_setup_waiting(int waiting) { g_setup_waiting = waiting; }
+int rbn_room_rollback(void) { return g_hs_lwr; }       /* (R3 lwr) the last agreed match is a Local Wireless room's match played with rollback */
+static int rbn_peer_heard_ms(void);                     /* (R3 lwr) ms since the other game's rollback session was last heard, -1 = never */
+static volatile LONG g_lay_have_mine, g_lay_have_peer; static uint8_t g_lay_peer_has; static uint16_t g_lay_peer[11];
+static RbhMsg g_lay_mine;
 const char *rbn_hs_why(void) { return g_hs_why; }      /* (R3 pub1) why the last handshake failed (rb_rollback.c's notice) */
 static void rtt_reset(void);                            /* (R3 net3) a new opponent: its round trip is measured afresh */
 static void hs_head(RbhMsg *m, int type) { memset(m, 0, sizeof *m); m->type = (uint8_t)type; m->proto = RBH_PROTO; m->game_build = (int16_t)g_game_build; m->exe_stamp = exe_stamp(); m->nonce = g_hs_nonce; }
@@ -174,9 +184,33 @@ static int hs_check(const RbhMsg *m, char *why, size_t n) {           /* 0 = the
 static void hs_refuse(uint32_t echo, const char *why) {
     RbhMsg r; hs_head(&r, RBH_REFUSE); r.echo = echo; snprintf((char *)&r.m, sizeof r.m, "%s", why); hs_send(&r, sizeof r);
 }
+/* (R3 lwr) a room match: each game knows only its OWN player's 11-word text field of the panel state (+ 0x54, record + 0x28:
+ * the name-tag text in runs lwr17..20; hs12 took it for the control layout) (the other player is a network player in the room's
+ * records). At player 2's record (both games are at the same set-up) each sends its own and waits for the other's
+ * (at most SSBU_RB_NET_ROOM_WAIT s / 2; sent again every 50 ms, a received one is answered once). 1 = *other is the other
+ * player's layout (*other_has: it had one); 0 = not received (each game keeps what it has: the match may differ, logged). */
+int rbn_room_layout(const uint16_t mine[11], int has, uint16_t other[11], int *other_has) {
+    AcquireSRWLockExclusive(&g_hs_lock);
+    hs_head(&g_lay_mine, RBH_LAYOUT); g_lay_mine.nonce = g_match_id; memcpy(g_lay_mine.m.layout[0], mine, sizeof g_lay_mine.m.layout[0]); g_lay_mine.m.has_layout[0] = (uint8_t)(has != 0);
+    g_lay_have_mine = 1;
+    RbhMsg ans = g_lay_mine; ans.echo = 1;
+    ReleaseSRWLockExclusive(&g_hs_lock);
+    double limit = (getenv("SSBU_RB_NET_ROOM_WAIT") ? atof(getenv("SSBU_RB_NET_ROOM_WAIT")) : 10.0) * 500.0;
+    uint64_t t0 = GetTickCount64(), last = 0;
+    while (!g_lay_have_peer && GetTickCount64() - t0 < limit) {
+        if (GetTickCount64() - last >= 50) { last = GetTickCount64(); hs_send(&g_lay_mine, sizeof g_lay_mine); }
+        Sleep(2);
+    }
+    for (int k = 0; k < 3; k++) hs_send(&ans, sizeof ans);          /* (the other game may still wait: answers that do not ask for one back) */
+    int ok = g_lay_have_peer != 0;
+    if (ok) { memcpy(other, g_lay_peer, sizeof g_lay_peer); *other_has = g_lay_peer_has; }
+    printf("[rbnet] room match: player text fields (name tag, state + 0x54): this game's player's sent, the other player's %s after %llu ms\n", ok ? "received" : "NOT RECEIVED (the match may differ)", (unsigned long long)(GetTickCount64() - t0));
+    fflush(stdout);
+    return ok;
+}
 /* the receive thread: a handshake message (1 = it was one) */
 static int hs_rx(const uint8_t *p, int n) {
-    if (n < 1 || p[0] < RBH_CHOICE || p[0] > RBH_BLOCK) return 0;
+    if (n < 1 || p[0] < RBH_CHOICE || p[0] > RBH_LAYOUT) return 0;
     g_hs_rx++;
     if (p[0] == RBH_BLOCK) {
         if (n < (int)offsetof(RbhBlock, data)) return 1;
@@ -206,6 +240,11 @@ static int hs_rx(const uint8_t *p, int n) {
         break;
     case RBH_ACCEPT:                                    /* (host) */
         if (g_local == 0 && waiting && g_hs_have_prop && m.echo == g_hs_prop.nonce && !memcmp(&m.m, &g_hs_prop.m, sizeof m.m)) g_hs_accepted = 1;
+        break;
+    case RBH_LAYOUT:                                    /* (R3 lwr) the other game's own player's control layout for this match; answered once with ours */
+        if (m.nonce != g_match_id || !g_match_id || m.proto != RBH_PROTO) break;
+        memcpy(g_lay_peer, m.m.layout[0], sizeof g_lay_peer); g_lay_peer_has = m.m.has_layout[0]; g_lay_have_peer = 1;
+        if (g_lay_have_mine && !m.echo) hs_send(&g_lay_mine, sizeof g_lay_mine);
         break;
     case RBH_REFUSE:                                    /* about our wait, or from the other game's wait we deal with */
         if (!waiting || !((m.echo && m.echo == g_hs_nonce) || (g_hs_peer_nonce && m.nonce == g_hs_peer_nonce))) break;
@@ -277,14 +316,33 @@ int rbn_handshake(const RbhMatch *mine, RbhMatch *out) {
      * rollback for these fights: they are played exactly as without rollback, whatever the other game's setting; a box says so
      * once. Rollback matches: Smash (versus) with a room code (host / join modes). SSBU_RB_NET_ROOM_MATCH=1: the old way (test). */
     InterlockedExchange(&g_hs_room, 0);
-    {   int nnldn_role(void); const char *e = getenv("SSBU_RB_NET_ROOM_MATCH");
+    /* (R3 lwr, owner 2026-10-21: "il rollback deve essere attivo anche nel local wireless con le stanze") the room's MATCH (not its
+     * waiting-stage fight) with rollback on both games: the room has already agreed fighters, stage and rules on both PCs, so the
+     * handshake here only checks that and agrees on a seed (no menus to wait for: both games reach this set-up together when the
+     * room maker starts the match; at most SSBU_RB_NET_ROOM_WAIT s, default 10). debug_mode.c then makes the fight a local versus
+     * match (the room's melee mode "local wireless" -> "local", match block + 0), so the game's own online netcode does not play it,
+     * and rb_rollback.c runs it as every rollback match (room maker = player 1, port i = player i). It is tried only when the other
+     * player of a 1-on-1 room is heard by this game's rollback session (its pings reach only a game with rollback on); otherwise,
+     * and whenever the agreement fails, the fight is left exactly as the game set it up (pub2: the game's own netcode), so a
+     * player with rollback off is never held. SSBU_RB_NET_ROOM_ROLLBACK=0: the pub2 way for every room fight. */
+    int lwr = 0;
+    g_hs_lwr = 0;
+    {   int nnldn_role(void), nnldn_players(void); const char *e = getenv("SSBU_RB_NET_ROOM_MATCH"), *rr = getenv("SSBU_RB_NET_ROOM_ROLLBACK");
         if (nnldn_role() && !(e && e[0] == '1')) {
-            static int told; void menu_popup(const char *title, const char *text);
-            InterlockedExchange(&g_hs_room, 1);
-            printf("[rbnet] handshake %ld: this fight is set up inside a Local Wireless room (%s): the game's own online netcode plays it; no rollback, no handshake, nothing changed\n", (long)round, nnldn_role() == 1 ? "made here" : "joined");
-            fflush(stdout);
-            if (!told++) menu_popup("Rollback netcode", "Fights started from a Local Wireless room use the game's own online netcode (rollback is not used there). For a rollback match: Smash (versus) with a room code, see docs/ONLINE.md.");
-            return 0;
+            int heard = rbn_peer_heard_ms(), players = nnldn_players(), want = !(rr && rr[0] == '0');
+            if (!g_setup_waiting && want && players == 2 && heard >= 0 && heard < 3000) {
+                lwr = 1;
+                printf("[rbnet] handshake %ld: the Local Wireless room's match (%s; 2 players; the other game's rollback session heard %d ms ago): agreeing on a rollback match\n", (long)round, nnldn_role() == 1 ? "made here" : "joined", heard);
+                fflush(stdout);
+            } else {
+                static int told; void menu_popup(const char *title, const char *text);
+                InterlockedExchange(&g_hs_room, 1);
+                printf("[rbnet] handshake %ld: this fight is set up inside a Local Wireless room (%s; %s): the game's own online netcode plays it; no rollback, no handshake, nothing changed\n", (long)round, nnldn_role() == 1 ? "made here" : "joined",
+                       g_setup_waiting ? "the room's waiting-stage fight" : !want ? "room rollback off (SSBU_RB_NET_ROOM_ROLLBACK=0)" : players != 2 ? "not a 1-on-1 room" : "the other player's game has rollback off (never heard)");
+                fflush(stdout);
+                if (!g_setup_waiting && !told++) menu_popup("Rollback netcode", "This room match uses the game's own online netcode: the other player's game has rollback off (or the room has more than 2 players). Rollback is used in a 1-on-1 room when both players have it on.");
+                return 0;
+            }
         } }
     /* (R3 pub1, testers 2026-10-20) through a lobby server (and on a LAN) NEITHER game is in JOIN mode, so both were "the host":
      * each waited for the other's CHOICE and sent nothing ("messages sent 0, received 0" for 120 s). The roles now come from
@@ -300,9 +358,9 @@ int rbn_handshake(const RbhMatch *mine, RbhMatch *out) {
     /* (owner 2026-10-21: "così hai tolto la possibilità alla gente di giocare offline") a Smash fight with rollback on and no room
      * code searched the lobby for an opponent: local fights against friends or CPUs were gone. Now a fight without a room code
      * (online play off, lobby or LAN mode) is a local fight, untouched, like a room fight; the online rollback match comes from
-     * the game's Online menu (in progress) or a room code (host / join). SSBU_RB_NET_FIND=1: the lobby search (test). */
+     * a Local Wireless room's match (R3 lwr) or a room code (host / join). SSBU_RB_NET_FIND=1: the lobby search (test). */
     {   const char *e = getenv("SSBU_RB_NET_FIND"); int mode = net_online() > 0 ? net_mode() : -1;
-        if (mode != 2 /* NET_MODE_HOST */ && mode != 3 /* NET_MODE_JOIN */ && !(e && e[0] == '1')) {
+        if (!lwr /* (R3 lwr: a room match) */ && mode != 2 /* NET_MODE_HOST */ && mode != 3 /* NET_MODE_JOIN */ && !(e && e[0] == '1')) {
             InterlockedExchange(&g_hs_room, 1);
             printf("[rbnet] handshake %ld: no room code: a local fight, played as without rollback\n", (long)round);
             fflush(stdout);
@@ -310,9 +368,10 @@ int rbn_handshake(const RbhMatch *mine, RbhMatch *out) {
         } }
     int find = 0, phase = 1;
     {   int nnldn_role(void); const char *e = getenv("SSBU_RB_NET_FIND"); int mode = net_online() > 0 ? net_mode() : -1;
-        find = !nnldn_role() && (mode == 0 /* NET_MODE_LOBBY */ || mode == 1 /* NET_MODE_LAN */) && (e && e[0] == '1');
+        find = !nnldn_role() && (mode == 0 /* NET_MODE_LOBBY */ || mode == 1 /* NET_MODE_LAN */) && e && e[0] == '1';
         if (find) { phase = 0; net_match_find_rb(); } }
     double limit = getenv("SSBU_RB_NET_HS_WAIT") ? atof(getenv("SSBU_RB_NET_HS_WAIT")) * 1000.0 : 120000.0;
+    if (lwr) limit = getenv("SSBU_RB_NET_ROOM_WAIT") ? atof(getenv("SSBU_RB_NET_ROOM_WAIT")) * 1000.0 : 10000.0;     /* (R3 lwr) both games are at this set-up together */
     uint64_t t0 = GetTickCount64(), last_tx = 0, last_log = t0, last_note = 0, last_redraw = 0;
     long long presents = nvn_front_presents(); uint64_t presents_at = t0, notes = 0, redraws = 0;
     int ok = 0, stopped = 0;
@@ -351,7 +410,17 @@ int rbn_handshake(const RbhMatch *mine, RbhMatch *out) {
         AcquireSRWLockExclusive(&g_hs_lock);
         if (phase == 0) { /* searching: nothing to send yet */ }
         else if (g_local == 0) {                             /* host: proposal = our choice + the joiner's */
-            if (!g_hs_have_prop && g_hs_have_peer) {
+            if (!g_hs_have_prop && g_hs_have_peer && lwr) {      /* (R3 lwr) the room's match: both games built it from the room; only the seed is new */
+                if (g_hs_peer.exe_stamp != exe_stamp()) printf("[rbnet] handshake: NOTE the other game's exe was linked at another time (stamp %08x here, %08x there): a different build may desync\n", exe_stamp(), g_hs_peer.exe_stamp);
+                if (g_hs_peer.m.chara[0] != mine->chara[0] || g_hs_peer.m.rule_kind != mine->rule_kind || g_hs_peer.m.stock != mine->stock) {
+                    snprintf(g_hs_why, sizeof g_hs_why, "the room's match differs on the two games (player 1 %016llx here, %016llx there; rule kind %d / %d, stocks %d / %d)", (unsigned long long)mine->chara[0], (unsigned long long)g_hs_peer.m.chara[0], mine->rule_kind, g_hs_peer.m.rule_kind, mine->stock, g_hs_peer.m.stock);
+                    g_hs_refused = 1; hs_refuse(g_hs_peer.nonce, g_hs_why);
+                } else {
+                    RbhMatch m = *mine; m.seed = hs_new_seed();
+                    hs_head(&g_hs_prop, RBH_PROPOSE); g_hs_prop.echo = g_hs_peer.nonce; g_hs_prop.m = m; g_hs_have_prop = 1;
+                }
+            }
+            if (!g_hs_have_prop && g_hs_have_peer && !lwr) {
                 if (g_hs_peer.exe_stamp != exe_stamp()) printf("[rbnet] handshake: NOTE the other game's exe was linked at another time (stamp %08x here, %08x there): a different build may desync\n", exe_stamp(), g_hs_peer.exe_stamp);
                 RbhMatch m = *mine;
                 m.chara[1] = g_hs_peer.m.chara[0]; m.colour[1] = g_hs_peer.m.colour[0];
@@ -377,6 +446,7 @@ int rbn_handshake(const RbhMatch *mine, RbhMatch *out) {
             char t[400]; double w = (now - t0) / 1000.0;
             char line[200];
             if (phase == 0) snprintf(line, sizeof line, !net_rb_ready() ? "Online match: connecting to the lobby..." : mm.searching > 0 ? "Online match: finding an opponent (%d of %d players of your version searching)..." : "Online match: finding an opponent...", mm.searching, mm.players);
+            else if (lwr) snprintf(line, sizeof line, "Room match: agreeing on a rollback match with the other player...");
             else if (find) snprintf(line, sizeof line, g_hs_peer_nonce ? "Online match with %s: agreeing on the match..." : "Online match: opponent found (%s), waiting for their game...", mm.peer_name);
             else snprintf(line, sizeof line, "%s", !net_rb_ready() ? "Not connected to the other player's game yet (lobby / room not joined)." : net_rb_no_destination() && !g_hs_peer_nonce ? "The other player is not in your Local Wireless room: both players must be in the same room." : g_hs_peer_nonce ? "The other player is here: agreeing on the match..." : "Waiting for the other player to choose a fighter and start...");
             snprintf(t, sizeof t, "%s\nWaiting %.0f s (this game gives up after %.0f s and goes back to the character select).\nPress Esc or hold B to stop waiting.", line, w, limit / 1000.0);
@@ -392,16 +462,23 @@ int rbn_handshake(const RbhMatch *mine, RbhMatch *out) {
     if (!ok) {
         AcquireSRWLockExclusive(&g_hs_lock);
         int told = g_hs_refused == 2; uint32_t echo = g_hs_peer_nonce;
-        g_hs_waiting = 0; g_hs_cancelled = 1;
+        g_hs_waiting = 0; g_hs_cancelled = lwr ? 0 : 1;
+        if (lwr) InterlockedExchange(&g_hs_room, 1);          /* (R3 lwr) nothing was changed: the game's own netcode plays the room's match */
         ReleaseSRWLockExclusive(&g_hs_lock);
         if (find) { net_match_get(&mm); if (mm.kind == 2 && (mm.state == MM_ASKING || mm.state == MM_SEARCHING || mm.state == MM_MATCHED)) net_match_cancel(); }   /* (R3 net3) the lobby and the opponent are told */
         if (!told) { char w[160]; snprintf(w, sizeof w, "the other player %s", stopped ? "stopped waiting" : "gave up waiting (time limit)"); for (int k = 0; k < 3; k++) { hs_refuse(echo, w); Sleep(20); } }
+        if (lwr) {                                       /* (R3 lwr) */
+            menu_notice(NULL);
+            printf("[rbnet] handshake %ld FAILED in the Local Wireless room: %s. The room's match is played by the game's own online netcode, as set up (no rollback)\n", (long)round, g_hs_why);
+            fflush(stdout); return 0;
+        }
         char t[400]; snprintf(t, sizeof t, "No online match: %s.\nThis match is left at once: back to the character select.", g_hs_why); menu_notice(t);
         printf("[rbnet] handshake %ld FAILED: %s. This match is played on this PC only (Final Destination, one stock) and left at once (player 1 walks off): back to the character select (notice updates %llu, frames shown again %llu)\n",
                (long)round, g_hs_why, (unsigned long long)notes, (unsigned long long)redraws);
         fflush(stdout); return 0;
     }
     menu_notice(NULL);
+    g_hs_lwr = lwr;
     g_hs_seed = out->seed; g_match_id = (uint32_t)(out->seed ^ (out->seed >> 32)) | 1u;
     host_fixed_random_reseed(g_hs_seed);
     printf("[rbnet] handshake %ld agreed after %.2f s (messages sent %lld, received %lld; match id %08x; notice updates %llu, frames shown again %llu)\n", (long)round, (GetTickCount64() - t0) / 1000.0, g_hs_tx, g_hs_rx, g_match_id,
@@ -499,6 +576,10 @@ void rbn_rx(const uint8_t *p, int n) {
     if (g_rq && next != g_rq_tail) { g_rq[g_rq_head].at_us = now_us(); g_rq[g_rq_head].at_frame = g_cur; g_rq[g_rq_head].n = n; memcpy(g_rq[g_rq_head].b, p, (size_t)n); g_rq_head = next; }
     else InterlockedIncrement64(&g_rx_drop);
     ReleaseSRWLockExclusive(&g_rq_lock);
+}
+static int rbn_peer_heard_ms(void) {                    /* (R3 lwr) any rollback message of the other game (its pings come every 100 ms) */
+    LONG64 last = g_rx_last_ms;
+    return last ? (int)(GetTickCount64() - (ULONGLONG)last) : -1;
 }
 static void rtt_reset(void) {                           /* (R3 net3) */
     AcquireSRWLockExclusive(&g_rq_lock); g_rtt_sum = 0; g_rtt_n = 0; ReleaseSRWLockExclusive(&g_rq_lock);

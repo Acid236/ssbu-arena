@@ -148,9 +148,12 @@ game back a few frames and replays them, instead of slowing both players down.
 4. **With a room code** (section 2 above): one player uses `online_mode = host` and gives the code, the other
    `online_mode = join` with that code; both open Smash (versus): the code connects the two (while a code is set, Smash fights are online).
 
-**Local Wireless rooms do not use rollback.** A fight started from a Local Wireless room (the room's match and its waiting
-stage) is always played with the game's own online netcode, whatever the two players' rollback setting: a short message
-says so once. Two players with different rollback settings can therefore still play together in a room.
+**Local Wireless rooms use rollback** when the room has exactly 2 players and both have rollback on: the room's match
+(started by the room maker) is played with rollback; the room maker is player 1. The fighters, colours, stage and rules are
+the room's. Both players play with the game's default controls in these matches (a player's own name-tag controls exist
+only on his own PC). The room's waiting stage, rooms with more than 2 players, and a room where one player has rollback
+off use the game's own online netcode as before (a short message says so once), so players with different settings can
+still play together in a room.
 
 Input delay is chosen from the best measured round trip: 1 frame below about 117 ms, 2 frames from about 117 ms, 3 from 150 ms,
 4 from about 184 ms (the rest of the trip is covered by rollback).

@@ -129,6 +129,8 @@ static void rbg_step_body(Ctx *c) {
         e = getenv("SSBU_RB_NET_RECAP"); g_rbg_recap = e ? atoi(e) : 5; e = getenv("SSBU_RB_NET_KEEP"); g_rbg_keep = e ? atoi(e) : 2; }
     if (g_rbg_wdfix) g_ra_wd_pause = 1;                 /* (until H2 lets the workers go: r1_state.c ra_kick2) */
     if (g_rbg_wd_before != g_ra_wd_fired) { if (g_rg_ready) LOG("r1: RB NET: the task-worker watchdog let them go before the safe point of frame %lld (%lld times so far)\n", i, g_ra_wd_fired); g_rbg_wd_before = g_ra_wd_fired; }
+    if (g_rbg_in_match == 3) return;                    /* (R3 lwr, run lwr2: both games crashed here) a room fight already running stays one until its fight-off:
+                                                         * the room's match is set up (handshake, rbn_match_cancelled() 0 again) while the waiting-stage fight still runs */
     if (rbn_match_cancelled() == 2) {                   /* (R3 pub2) a Local Wireless room fight: the game's own netcode, no ring, pads untouched */
         if (!g_rbg_in_match) { g_rbg_in_match = 3; LOG("r1: RB NET: a Local Wireless room fight: no rollback (the game's own netcode)\n"); }
         return;
