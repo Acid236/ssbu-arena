@@ -70,6 +70,9 @@ def compile_one(name):
     return name, r.returncode, r.stderr[-2000:], time.time() - t
 
 
+order_key = None          # build_opt.py: compile order (slowest first by measured time)
+
+
 def cmd_compile(jobs, force):
     os.makedirs(OBJ, exist_ok=True)
     sources = sorted(n for n in os.listdir(GEN) if n.endswith('.c'))
@@ -114,7 +117,8 @@ def cmd_compile(jobs, force):
         if n.endswith('.obj') and n not in wanted:
             os.remove(os.path.join(OBJ, n))
     # longest first (source size: the compile time follows it): the biggest files no longer start last and hold up the end
-    todo.sort(key=lambda n: -os.path.getsize(os.path.join(GEN, n)))
+    # (build_opt.py sets order_key: by the seconds each file took before, see build_opt.hints)
+    todo.sort(key=order_key or (lambda n: -os.path.getsize(os.path.join(GEN, n))))
     print('sources: %d   to compile: %d   jobs: %d' % (len(sources), len(todo), jobs), flush=True)
     t0 = time.time()
     failed, done, cpu = [], 0, 0.0
