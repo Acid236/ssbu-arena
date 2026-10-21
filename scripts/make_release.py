@@ -41,8 +41,7 @@ setup = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(setup)
 
 EXE = 'ssbu_native.exe'
-RB_EXE = 'ssbu_native_rb.exe'          # the rollback exe (scripts/setup.py --rollback): imports ssbu_game_r1.dll
-PACKAGE_FILES = [EXE, RB_EXE, 'SDL3.dll', 'ssbu_glslang.dll']
+PACKAGE_FILES = [EXE, 'SDL3.dll', 'ssbu_glslang.dll']      # (R4: no rollback exe any more: rollback runs on the normal build)
 OPTIONAL_FILES = ['opus.dll']
 # what may be in the zip besides PACKAGE_FILES / OPTIONAL_FILES
 PACKAGE_EXTRA = re.compile(r'^(manifest\.json|README\.txt|LICENSE-[A-Za-z0-9_.-]+\.txt)$')
@@ -291,13 +290,6 @@ def main():
     say('building %s from the runtime sources ...' % EXE)
     out = run([sys.executable, 'build.py', 'host'], 'build.py host')
     say('  ' + (out.strip().splitlines() or [''])[-1])
-    # the rollback exe: the same sources, the C++ runtime that marks its writes (build.py RECOMP_R1=1), ssbu_game_r1.dll
-    say('building %s (rollback) ...' % RB_EXE)
-    env_main = dict(env)
-    env.update(RECOMP_R1='1', RECOMP_EXE=RB_EXE, RECOMP_DLL='ssbu_game_r1.dll')
-    out = run([sys.executable, 'build.py', 'host'], 'build.py host (rollback exe)')
-    env.clear(); env.update(env_main)
-    say('  ' + (out.strip().splitlines() or [''])[-1])
     run([os.environ.get('COMSPEC', 'cmd.exe'), '/c', os.path.join(work, 'build_glslang.bat')], 'build_glslang.bat')
     for f in PACKAGE_FILES:
         if not os.path.exists(os.path.join(work, f)):
@@ -360,10 +352,6 @@ def main():
     bad = audit_package(pkg, files + [n for n in os.listdir(pkg) if PACKAGE_EXTRA.match(n)])
     more, imports = audit_exe_build(work, EXE, llvm)
     bad += more
-    more, rb_imports = audit_exe_build(work, RB_EXE, llvm)
-    bad += more
-    if 'ssbu_game_r1.dll' not in rb_imports:
-        bad.append('%s does not import ssbu_game_r1.dll' % RB_EXE)
     if a.against:
         more, n = audit_against(pkg, a.against)
         bad += more

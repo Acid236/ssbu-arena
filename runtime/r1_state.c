@@ -42,6 +42,7 @@ void r1_on_decommit(void *p, size_t n) { (void)p; (void)n; }
 void r1_on_commit(void *p, size_t n) { (void)p; (void)n; }
 void r1_wrote(uint64_t a, uint64_t n) { (void)a; (void)n; }
 void r1_nosim(uint64_t a, uint64_t n) { (void)a; (void)n; }
+void r1_read_retry_note(void) {}
 void r1_register_heap(void) { r1_on(); }
 #else
 #include <stdio.h>
@@ -193,6 +194,7 @@ static int g_rs_drop;                                   /* set by the first save
 static int g_rb_test_nomem = -1;                        /* SSBU_RB_NET_TEST_NOMEM (test only): 1 = the commit check says no, 2 = an allocation of the full save fails, 3 = the ring's own allocations fail, 4 = the shadow's commit fails */
 static int rb_test_nomem(void) { if (g_rb_test_nomem < 0) { const char *e = getenv("SSBU_RB_NET_TEST_NOMEM"); g_rb_test_nomem = e ? atoi(e) : 0; } return g_rb_test_nomem; }
 static double g_save_need_mb, g_save_avail_mb;          /* the last commit check (MB) */
+static uint8_t *ls_pool_meta(size_t *n);              /* R4 (rb_learned.c) */
 static void collect(Ctx *c) {
     for (int i = 0; i < g_nr; i++) { rs_free(g_r[i].s); g_r[i].s = NULL; free(g_r[i].dirty); free(g_r[i].async); }
     g_nr = 0;
@@ -200,6 +202,7 @@ static void collect(Ctx *c) {
     for (int i = 0; i < g_nheap; i++) add_alloc(g_heap_base[i]);
     add_span((uint8_t *)0x7100000000ull, (uint8_t *)0x7300000000ull);
     add_fighter_dlls();
+    { size_t pmn; uint8_t *pm = ls_pool_meta(&pmn); if (pm && pmn) add_span(pm, pm + pmn); }      /* R4: the presentation pool's bookkeeping (rb_learned.c) */
     if (g_catch_addr && !getenv("SSBU_R1_NO_CATCH")) {     /* nnunwind.c: the catch frames (guest CFA -> host jmp_buf) */
         size_t before = 0, after = 0; for (int i = 0; i < g_nr; i++) before += g_r[i].n;
         size_t cn = 8192 * 16; { const char *e = getenv("SSBU_R1_TEST_CATCH_KB"); if (e && atoi(e) > 0 && (size_t)atoi(e) * 1024 < cn) cn = (size_t)atoi(e) * 1024; }   /* (hs15, TEST ONLY) only that much of the table in the state: the pp3h crash on purpose */
@@ -1037,6 +1040,7 @@ static void mark_undo(void) {
     g_nx = 0; g_xbytes = 0; g_win1 = NULL; g_wn1 = 0;
 }
 /* after the first (full) save: shadows, extras, maps on. 1 = done; 0 = out of memory (mark_undo done: no marks) */
+static void ls_after_setup(void);                      /* R4 (rb_learned.c) */
 static int mark_setup(void) {
     size_t big = 0; uint8_t *base = NULL;
     for (int i = 0; i < g_nheap; i++) {
@@ -1110,6 +1114,7 @@ static int mark_setup(void) {
     for (int i = 0; i < g_nx; i++) if (g_x[i].n >= 65536) LOG("r1:   extra %s + %.0f KB\n", where(g_x[i].a), g_x[i].n / 1024.0);
     LOG("r1: MARK on: window 1 = region at %p, %.1f GB (map %.1f MB), window 2 = %llx + %.0f GB (map %.1f MB); shadow filled with %.1f MB; extras %d ranges %.1f MB copied whole each time\n",
         (void *)g_win1, g_wn1 / 1073741824.0, (g_wn1 >> 12) / 1048576.0, WIN2, WN2 / 1073741824.0, (WN2 >> 12) / 1048576.0, shb / 1048576.0, g_nx, g_xbytes / 1048576.0);
+    ls_after_setup();                                   /* R4: the learned-set save protects the windows (threads still held) */
     return 1;
 }
 /* every marked page: dir 0 memory -> shadow (save), 1 shadow -> memory (restore); marks cleared. Returns pages. */
@@ -1810,7 +1815,7 @@ static void ra_init(void) {
     if (g_ra_submit_mode) LOG("r1: RUN-AHEAD mode submit (no speculative pass; the submission step 71037f0590 is called at the save point): hook %s\n", hook_install(GA(0x71037f0590ull), ra_submit_hook, NULL, &g_orig_submit) ? "installed" : "FAILED");
     g_ra_wd_ev = CreateEventA(NULL, FALSE, FALSE, NULL); CloseHandle(CreateThread(NULL, 0, ra_watchdog, NULL, 0, NULL));
     g_park_ms = 20;
-    g_mark = mark_bind();
+    g_mark = mark_bind(); if (!g_mark) g_mark = ls_bind();      /* R4: no marked DLL: the learned set (rb_learned.c) */
     int k = hook_install(GA(0x710354c720ull), ra_kick, NULL, &g_orig_kick) && hook_install(GA(0x7103549170ull), ra_kick2, NULL, &g_orig_kick2);
     int l = hook_install_name("_ZN7lua2cpp16L2CFighterCommon31sys_line_system_control_fighterEv", ra_line, NULL, &g_orig_line);
     LOG("r1: RUN-AHEAD on (one frame): marks %s; save point: the return of the job-counter wait 710354c720 called at 710374c028 (preparation done, before the render kick): %s; frame line counter: %s; park %.1f ms\n",
@@ -1922,6 +1927,7 @@ void r1_init(void) {
     g_prot = getenv("SSBU_R1_MARK_PROT") != NULL; if (g_prot) AddVectoredExceptionHandler(1, prot_veh); g_mcheck = getenv("SSBU_R1_MARK_CHECK") != NULL; if (g_mark && !mark_bind()) g_mark = 0;
     g_fast = getenv("SSBU_R1_FAST") != NULL; g_fcheck = getenv("SSBU_R1_FAST_CHECK") != NULL; if (getenv("SSBU_R1_LEARN")) g_learn = atoi(getenv("SSBU_R1_LEARN"));
     g_r1_keep_fibers = 1; g_wait_idle = getenv("SSBU_R1_WAIT_IDLE") != NULL; g_busy_log = g_wait_idle ? 3 : 0;
+    ls_init();                                          /* R4: the presentation pool of the learned-set save */
     if (ra_wanted()) ra_init(); else g_ra = 0;
     int id = hook_install(GA(0x710386fc30ull), r1_frame_end, NULL, &g_orig_frame_end);
     LOG("r1: SSBU_R1 save at fight frame %d, %d frames, every %d frames, %d cycles; hook on the frame end 710386fc30: %s\n", g_n, g_k, g_p, g_c, id ? "installed" : "FAILED");
@@ -2011,14 +2017,16 @@ static void dc_set(void *p, size_t n, int v) {
     if (i1 > (g_wn1 >> 12)) i1 = g_wn1 >> 12;
     memset(g_dc + i0, v, i1 - i0);
 }
-void r1_on_decommit(void *p, size_t n) { r1_mark_range((uint64_t)(uintptr_t)p, n); dc_set(p, n, 1); }
+void r1_on_decommit(void *p, size_t n) { r1_mark_range((uint64_t)(uintptr_t)p, n); ls_range((uint64_t)(uintptr_t)p, n, 1); dc_set(p, n, 1); }
 void r1_on_commit(void *p, size_t n) {
     dc_set(p, n, 0);
+    ls_range((uint64_t)(uintptr_t)p, n, 2);              /* R4: new pages of a fight read-only (their first write faults) */
     uint8_t *a = (uint8_t *)p;
     if (g_blk1 && n && a >= g_win1 && a < g_win1 + g_wn1) blk1_add((size_t)(a - g_win1) >> 12, ((size_t)(a - g_win1) + n + PG - 1) >> 12);      /* round 5: the sweep covers it */
 }
 static void prot_open(uint64_t a, uint64_t n);
-void r1_wrote(uint64_t a, uint64_t n) { r1_mark_range(a, n); if (g_prot_on) prot_open(a, n); }          /* host code that writes guest memory (nnhid.c, nnfs.c reads: the kernel's writes do not fault) */
+void r1_read_retry_note(void) { InterlockedIncrement64(&g_read_retry); }      /* (R4) nnfs.c read_at: a read repeated after ERROR_NOACCESS */
+void r1_wrote(uint64_t a, uint64_t n) { r1_mark_range(a, n); ls_range(a, n, 0); if (g_prot_on) prot_open(a, n); }          /* host code that writes guest memory (nnhid.c, nnfs.c reads: the kernel's writes do not fault) */
 /* "not simulation": pages written by audio decoding etc.: not rolled back, not checked */
 void r1_nosim(uint64_t a, uint64_t n) {
     if (!g_ns1 || !n) return;

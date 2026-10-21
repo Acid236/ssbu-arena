@@ -427,8 +427,6 @@ $script:tips.AutoPopDelay = 20000
 $script:tips.SetToolTip($script:cbRuntime, 'No Visual Studio needed (about 3 GB less disk), some minutes shorter. The game you get is the same.')
 $script:cbFast = New-Check 'Shorter build, slower game (no inlining)' $false
 $script:tips.SetToolTip($script:cbFast, 'The game compiles in about half the time, but runs slower on the CPU (up to 25-30 % on the main thread). Leave it off unless the build takes too long on your PC.')
-$script:cbRb = New-Check 'Rollback netcode (experimental: Smash with a room code, not Local Wireless rooms)' $false
-$script:tips.SetToolTip($script:cbRb, 'Experimental. Between two PCs the rollback match does not start yet (both players wait, then the game leaves the match). Builds a second copy of the game (about twice as long).')
 $script:cbDry = New-Check 'Dry run (show what would happen, change nothing)' $false
 $fJobs = New-Object System.Windows.Forms.FlowLayoutPanel
 $fJobs.AutoSize = $true; $fJobs.WrapContents = $false
@@ -960,7 +958,7 @@ function Set-Buttons {
     $script:btnUpdate.Enabled = (-not $run) -and $ok
     foreach ($k in $script:F.Keys) { $script:F[$k].Box.Enabled = -not $run; foreach ($b in $script:F[$k].Buttons) { $b.Enabled = -not $run } }
     $script:dlcList.Enabled = -not $run; $script:btnDlcAdd.Enabled = -not $run; $script:btnDlcDel.Enabled = -not $run; $script:btnDlcClr.Enabled = -not $run
-    foreach ($c in @($script:cbShort, $script:cbUpd, $script:cbRuntime, $script:cbRb, $script:cbFast, $script:cbDry, $script:numJobs)) { $c.Enabled = -not $run }
+    foreach ($c in @($script:cbShort, $script:cbUpd, $script:cbRuntime, $script:cbFast, $script:cbDry, $script:numJobs)) { $c.Enabled = -not $run }
     $script:btnMsvc.Enabled = -not $run
     $loc = Get-ChosenBuild                # Play and Resume follow the install location shown in the window
     $script:btnPlay.Enabled = (-not $run) -and (Test-Path -LiteralPath ([IO.Path]::Combine($loc, 'work\ssbu_native.exe'))) -and (Same-Path $loc $buildDir)
@@ -992,7 +990,6 @@ function Build-InstallArgs([bool]$forceDry) {
     if ($forceDry -or $script:cbDry.Checked) { [void]$a.Add('--dry-run') }
     if (-not $script:cbRuntime.Checked) { [void]$a.Add('--no-runtime') }
     if (-not $script:cbShort.Checked) { [void]$a.Add('--no-shortcuts') }
-    if ($script:cbRb.Checked) { [void]$a.Add('--rollback') }
     if ($script:cbFast.Checked) { [void]$a.Add('--no-inline') }
     if (-not $script:cbUpd.Checked) { [void]$a.Add('--no-self-update') }
     return ($a -join ' ')

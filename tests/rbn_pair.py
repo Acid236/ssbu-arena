@@ -27,7 +27,7 @@ def main():
     while os.path.exists(os.path.join(HERE, 'QUIET_PLEASE')):
         print('QUIET_PLEASE: waiting', flush=True)
         time.sleep(25)
-    base = dict(N5_EXE='ssbu_rbn6r.exe', N5_SAVE='../userdata_completo', N5_SEQ='seq_completo.txt', SSBU_NRO_BIN='nro_bin_eh_o2r1',
+    base = dict(N5_EXE='ssbu_rbn6r.exe', N5_SAVE='../userdata_completo', N5_SEQ='seq_completo.txt', SSBU_NRO_BIN='nro_bin_eh_o2',
                 SSBU_DEBUG_END='2400', N5_SECS='480', SSBU_NET_SIM='75', SSBU_RB_NET='net', SSBU_ONLINE_STUN='off', SSBU_ONLINE_UPNP='off', SSBU_ONLINE_LOOPBACK='1',
                 N5_STOP_ON='fight.off', SSBU_DEBUG_MATCH='p1=mario,p2=donkey,p2=human,stage=end')
     base.update(both)
