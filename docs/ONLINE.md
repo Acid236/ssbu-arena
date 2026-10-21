@@ -9,7 +9,7 @@ This is the game's own Local Wireless mode, played over a network. You only open
 4. Both players vote on a stage and pick their fighters.
 5. The host starts the match with L+R.
 
-No room to join? With rollback on, **Smash (versus)** finds an opponent on the lobby by itself (see Rollback below).
+Smash (versus) always stays a local fight (friends, CPUs), with rollback on or off.
 The game's own Online menu (Quickplay, Battle Arenas) on our servers is in progress.
 
 Online play is experimental and ON by default: the game joins the project's public lobby
@@ -143,14 +143,10 @@ game back a few frames and replays them, instead of slowing both players down.
    each fight, which memory it writes). An older install's second copy for rollback (`ssbu_game_r1.dll`,
    `ssbu_native_rb.exe`, the folder `nro_bin_eh_o2r1`) is not used any more and can be deleted.
 2. **Both players** need it on, the same game update (13.0.4 or 13.0.5) and the same version of this project.
-3. **No code needed on the lobby:** with online play on its default (the public lobby) or any lobby server, just **open
-   Smash (versus)**, pick your own fighter (player 2's panel can be anything) and start the match. The box "Online match:
-   finding an opponent..." shows while the lobby looks for another player who does the same (same game version, same
-   mods, same lobby code); once found, the two games agree on the stage, the rules and a shared random seed, and the match
-   starts with rollback. The player who searched first is player 1. Esc or holding B stops waiting; nobody found in
-   2 minutes = back to the character select. This needs lobby 1.4 or newer (an older lobby: the box says so; use a room code).
-4. **Or with a room code** (section 2 above): one player uses `online_mode = host` and gives the code, the other
-   `online_mode = join` with that code; both open Smash (versus) as above (no search: the code already connects the two).
+3. **Smash (versus) stays local:** without a room code a Smash fight is a normal local fight (friends, CPUs), rollback
+   on or not. Finding an opponent will come with the game's own Online menu (Quickplay), in progress.
+4. **With a room code** (section 2 above): one player uses `online_mode = host` and gives the code, the other
+   `online_mode = join` with that code; both open Smash (versus): the code connects the two (while a code is set, Smash fights are online).
 
 **Local Wireless rooms do not use rollback.** A fight started from a Local Wireless room (the room's match and its waiting
 stage) is always played with the game's own online netcode, whatever the two players' rollback setting: a short message

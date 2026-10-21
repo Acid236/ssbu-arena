@@ -297,9 +297,20 @@ int rbn_handshake(const RbhMatch *mine, RbhMatch *out) {
      * net_relay.c net_match_find_rb); the lobby pairs two such games of the same build and lobby code and says who is player 1
      * (the one that waited longer). Then the handshake below runs as with a room code, with the rollback messages addressed to
      * that opponent. The box shows the search. SSBU_RB_NET_FIND=0: the old way (no search). */
+    /* (owner 2026-10-21: "così hai tolto la possibilità alla gente di giocare offline") a Smash fight with rollback on and no room
+     * code searched the lobby for an opponent: local fights against friends or CPUs were gone. Now a fight without a room code
+     * (online play off, lobby or LAN mode) is a local fight, untouched, like a room fight; the online rollback match comes from
+     * the game's Online menu (in progress) or a room code (host / join). SSBU_RB_NET_FIND=1: the lobby search (test). */
+    {   const char *e = getenv("SSBU_RB_NET_FIND"); int mode = net_online() > 0 ? net_mode() : -1;
+        if (mode != 2 /* NET_MODE_HOST */ && mode != 3 /* NET_MODE_JOIN */ && !(e && e[0] == '1')) {
+            InterlockedExchange(&g_hs_room, 1);
+            printf("[rbnet] handshake %ld: no room code: a local fight, played as without rollback\n", (long)round);
+            fflush(stdout);
+            return 0;
+        } }
     int find = 0, phase = 1;
     {   int nnldn_role(void); const char *e = getenv("SSBU_RB_NET_FIND"); int mode = net_online() > 0 ? net_mode() : -1;
-        find = !nnldn_role() && (mode == 0 /* NET_MODE_LOBBY */ || mode == 1 /* NET_MODE_LAN */) && !(e && e[0] == '0');
+        find = !nnldn_role() && (mode == 0 /* NET_MODE_LOBBY */ || mode == 1 /* NET_MODE_LAN */) && (e && e[0] == '1');
         if (find) { phase = 0; net_match_find_rb(); } }
     double limit = getenv("SSBU_RB_NET_HS_WAIT") ? atof(getenv("SSBU_RB_NET_HS_WAIT")) * 1000.0 : 120000.0;
     uint64_t t0 = GetTickCount64(), last_tx = 0, last_log = t0, last_note = 0, last_redraw = 0;
