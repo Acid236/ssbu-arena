@@ -120,6 +120,10 @@ static void rbg_step_body(Ctx *c) {
         e = getenv("SSBU_RB_NET_RECAP"); g_rbg_recap = e ? atoi(e) : 1; e = getenv("SSBU_RB_NET_KEEP"); g_rbg_keep = e ? atoi(e) : 2; }
     if (g_rbg_wdfix) g_ra_wd_pause = 1;                 /* (until H2 lets the workers go: r1_state.c ra_kick2) */
     if (g_rbg_wd_before != g_ra_wd_fired) { if (g_rg_ready) LOG("r1: RB NET: the task-worker watchdog let them go before the safe point of frame %lld (%lld times so far)\n", i, g_ra_wd_fired); g_rbg_wd_before = g_ra_wd_fired; }
+    if (rbn_match_cancelled() == 2) {                   /* (R3 pub2) a Local Wireless room fight: the game's own netcode, no ring, pads untouched */
+        if (!g_rbg_in_match) { g_rbg_in_match = 3; LOG("r1: RB NET: a Local Wireless room fight: no rollback (the game's own netcode)\n"); }
+        return;
+    }
     if (rbn_match_cancelled()) {                        /* (hs12) not agreed with the other game: no rollback; rbg_pad leaves this match */
         if (!g_rbg_in_match) { g_rbg_in_match = 2; g_rbg_quit_t0 = now_ms(); LOG("r1: RB NET: this match was not agreed with the other game: no rollback, leaving it (player 1 walks off the stage)\n"); }
         return;
@@ -348,6 +352,7 @@ static void rbg_report(void);
 static void rbg_fight_off(void) {
     if (!g_rbg_in_match) return;
     if (g_rbg_in_match == 1) { rbg_report(); r1_ring_let_go(); if (g_rg_ready) r1_ring_release(); g_rbg_rebase = 1; }
+    else if (g_rbg_in_match == 3) LOG("r1: RB NET: the Local Wireless room fight is over\n");
     else LOG("r1: RB NET: the match that was not agreed is over after %.1f s (player 1 walked off)\n", (now_ms() - g_rbg_quit_t0) / 1000.0);
     if (g_rg_nomem == 1) g_rg_nomem = 0;                /* (hs13) nothing was kept: the next match tries the ring again */
     g_rbg_noring = 0;

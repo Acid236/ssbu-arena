@@ -101,13 +101,15 @@ static int script_key(int vk) {
  *   @until:<lo>-<hi>[/<n>]:<keys>/<period>  press the keys (8 polls) every <period> polls until the draw count has
  *                     been in lo..hi for n polls in a row (default 20), e.g. to skip the opening movie, which
  *                     ignores A for a while; period must exceed the transition time plus n
+ *   @untilmark:<mark>:<keys>/<period>[/<hold>]  (R3 pub2) press the keys (hold polls, default 8) every <period> polls until
+ *                     input_mark(<mark>) has been raised, e.g. the room host's L + R until the mark setup-2p (debug_mode.c): the room's match is set up
  *   <n>               wait n polls
  *   <n>:<keys>[/<h>]  wait n polls, then hold the keys for h polls (default 8); keys as in SSBU_SCRIPT
  * Example: "@movie 90:Z 120:Z @draws:150-200 300:u/40 10:Z". Each step is announced with the poll number and the
  * draw count of the last frame. tests\seq_battle.txt is the sequence from boot to a battle (tests\run_battle.sh). */
 #define SEQ_MAX 256
 #define MARK_MAX 128
-enum { SEQ_KEYS = 0, SEQ_MARK, SEQ_DRAWS, SEQ_UNTIL };
+enum { SEQ_KEYS = 0, SEQ_MARK, SEQ_DRAWS, SEQ_UNTIL, SEQ_UNTILMARK };
 static struct { int wait, hold, kind, lo, hi, need; char keys[12]; char mark[40]; } g_seq[SEQ_MAX];
 static int g_seq_count = -1, g_seq_index, g_seq_left, g_seq_holding, g_seq_run;
 static char g_marks[MARK_MAX][40];
@@ -144,7 +146,14 @@ static void seq_tick(void) {                              /* once per poll of pl
             s += used;
             memset(&g_seq[g_seq_count], 0, sizeof g_seq[0]);
             g_seq[g_seq_count].hold = 8;
-            if (!strncmp(tok, "@until:", 7)) {
+            if (!strncmp(tok, "@untilmark:", 11)) {
+                g_seq[g_seq_count].kind = SEQ_UNTILMARK;
+                const char *k = strchr(tok + 11, ':');
+                if (!k || (size_t)(k - (tok + 11)) >= sizeof g_seq[0].mark) { printf("input sequence: bad step %s\n", tok); break; }
+                memcpy(g_seq[g_seq_count].mark, tok + 11, (size_t)(k - (tok + 11))); g_seq[g_seq_count].mark[k - (tok + 11)] = 0;
+                g_seq[g_seq_count].wait = 200;
+                if (sscanf(k + 1, "%11[^/]/%d/%d", g_seq[g_seq_count].keys, &g_seq[g_seq_count].wait, &g_seq[g_seq_count].hold) < 1) { printf("input sequence: bad step %s\n", tok); break; }
+            } else if (!strncmp(tok, "@until:", 7)) {
                 g_seq[g_seq_count].kind = SEQ_UNTIL;
                 g_seq[g_seq_count].need = 20;
                 g_seq[g_seq_count].wait = 200;
@@ -173,6 +182,22 @@ static void seq_tick(void) {                              /* once per poll of pl
     if (g_seq_index >= g_seq_count) return;
     if (g_seq[g_seq_index].kind == SEQ_MARK) {
         if (mark_seen(g_seq[g_seq_index].mark)) { printf("input sequence: poll %lld step %d: %s seen\n", (long long)g_seq_polls, g_seq_index, g_seq[g_seq_index].mark); seq_begin(g_seq_index + 1); }
+        return;
+    }
+    if (g_seq[g_seq_index].kind == SEQ_UNTILMARK) {
+        static int since2;
+        if (!g_seq_holding && g_seq_left == g_seq[g_seq_index].wait) { since2 = g_seq[g_seq_index].wait; g_seq_left = 0; }      /* step just began: press at once */
+        if (mark_seen(g_seq[g_seq_index].mark) && !g_seq_holding) {
+            printf("input sequence: poll %lld step %d: %s seen\n", (long long)g_seq_polls, g_seq_index, g_seq[g_seq_index].mark);
+            seq_begin(g_seq_index + 1);
+            return;
+        }
+        since2++;
+        if (g_seq_holding && since2 >= g_seq[g_seq_index].hold) g_seq_holding = 0;
+        if (!g_seq_holding && since2 >= g_seq[g_seq_index].wait) {
+            g_seq_holding = 1; since2 = 0;
+            printf("input sequence: poll %lld step %d keys %s for %d (%ld draws), repeated until %s\n", (long long)g_seq_polls, g_seq_index, g_seq[g_seq_index].keys, g_seq[g_seq_index].hold, g_frame_draws_seen, g_seq[g_seq_index].mark);
+        }
         return;
     }
     if (g_seq[g_seq_index].kind == SEQ_UNTIL) {

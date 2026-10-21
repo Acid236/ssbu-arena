@@ -126,7 +126,8 @@ static RbhMsg g_hs_peer;  static int g_hs_have_peer;    /* host: the joiner's ne
 static RbhMsg g_hs_prop;  static int g_hs_have_prop;    /* host: the proposal sent; joiner: the proposal accepted (this wait) */
 static volatile LONG g_hs_accepted, g_hs_refused; static char g_hs_why[160];
 static uint64_t g_hs_seed; static uint32_t g_match_id;  /* the agreed match: its seed, and its id (tag of the pad and block messages) */
-static volatile LONG g_hs_cancelled;                    /* this match: no agreement: played locally and left at once */
+static volatile LONG g_hs_cancelled;                    /* this match: 1 = no agreement: played locally and left at once; 2 = (pub2) set up
+                                                           * inside a Local Wireless room: the game's own netcode plays it, no rollback, nothing changed */
 static int g_match_n;                                   /* (hs12) online matches of this session so far (1 = the first; rbn_start) */
 /* (hs12) the tag byte at the end of every PADS message: the agreed match id and the match number of the session. Run tw7:
  * the other game's last pads of match 1 arrived after this game's match-1 reset and were taken at the start of match 2
@@ -156,7 +157,9 @@ uint64_t rbn_match_seed(void) {
     if (g_loop && !g_hs_seed) { const char *e = getenv("SSBU_RB_NET_LOOP_SEED"); if (e && *e) return strtoull(e, NULL, 0); }   /* (hs15, test) the loop game's generators from a seed */
     return g_hs_seed;
 }
-int rbn_match_cancelled(void) { return g_hs_cancelled != 0; }
+static volatile LONG g_hs_room;                         /* (pub2) the last set-up was inside a Local Wireless room (until the next set-up: the fight-off of the
+                                                           * room's waiting-stage fight comes AFTER the room match's set-up, run rm4) */
+int rbn_match_cancelled(void) { return g_hs_room ? 2 : (int)g_hs_cancelled; }      /* 0, 1 (not agreed: walk off) or 2 (pub2: a room fight, the game's own netcode) */
 const char *rbn_hs_why(void) { return g_hs_why; }      /* (R3 pub1) why the last handshake failed (rb_rollback.c's notice) */
 static void hs_head(RbhMsg *m, int type) { memset(m, 0, sizeof *m); m->type = (uint8_t)type; m->proto = RBH_PROTO; m->game_build = (int16_t)g_game_build; m->exe_stamp = exe_stamp(); m->nonce = g_hs_nonce; }
 static void hs_send(const void *p, int n) { if (net_rb_send(p, n)) g_hs_tx++; }
@@ -263,6 +266,23 @@ static void hs_stage_rule(RbhMatch *m, const RbhMatch *peer) {
 int rbn_handshake(const RbhMatch *mine, RbhMatch *out) {
     if (!rbn_handshake_wanted() || rbn_on() <= 0 || g_loop) return 0;
     LONG round = InterlockedIncrement(&g_hs_round);
+    /* (R3 pub2: the Local Wireless "deadlock" of lb1 / lb3 and of the testers 2026-10-20) a fight set up while this game is in a Local
+     * Wireless room is either the room's waiting-stage fight (each game alone, one player) or the room's own match, which the game
+     * plays with its own online netcode: BOTH games build the records of BOTH players from the room (run nb2: player 1 = the room
+     * maker's fighter, player 2 = the joiner's, the same on both PCs). Rollback cannot run under that netcode, and holding one game
+     * here stopped its traffic: the other game waited on its loading screen for it, then left the room. So no handshake and no
+     * rollback for these fights: they are played exactly as without rollback, whatever the other game's setting; a box says so
+     * once. Rollback matches: Smash (versus) with a room code (host / join modes). SSBU_RB_NET_ROOM_MATCH=1: the old way (test). */
+    InterlockedExchange(&g_hs_room, 0);
+    {   int nnldn_role(void); const char *e = getenv("SSBU_RB_NET_ROOM_MATCH");
+        if (nnldn_role() && !(e && e[0] == '1')) {
+            static int told; void menu_popup(const char *title, const char *text);
+            InterlockedExchange(&g_hs_room, 1);
+            printf("[rbnet] handshake %ld: this fight is set up inside a Local Wireless room (%s): the game's own online netcode plays it; no rollback, no handshake, nothing changed\n", (long)round, nnldn_role() == 1 ? "made here" : "joined");
+            fflush(stdout);
+            if (!told++) menu_popup("Rollback netcode", "Fights started from a Local Wireless room use the game's own online netcode (rollback is not used there). For a rollback match: Smash (versus) with a room code, see docs/ONLINE.md.");
+            return 0;
+        } }
     /* (R3 pub1, testers 2026-10-20) through a lobby server (and on a LAN) NEITHER game is in JOIN mode, so both were "the host":
      * each waited for the other's CHOICE and sent nothing ("messages sent 0, received 0" for 120 s). The roles now come from
      * the Local Wireless room: the game that made the room is player 1 (host of the handshake), the one that joined it player 2.

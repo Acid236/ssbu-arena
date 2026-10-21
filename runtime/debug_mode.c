@@ -291,6 +291,7 @@ static void hs_apply(uint64_t st, int idx, uint32_t type_was) {
         if (getenv("SSBU_RB_NET_WATCH")) { uint64_t off = strtoull(getenv("SSBU_RB_NET_WATCH"), NULL, 16); if (off <= 1) off = 0x98;      /* (hs12: =<hex offset in the match block>) */
             uint64_t w[1] = {MELEE_INFO + (off & ~7ull)}; printf("[rbnet] research: match block + 0x%llx at the handshake = %016llx\n", (unsigned long long)(off & ~7ull), (unsigned long long)rd64(w[0])); debug_watch(w, 1); }
         g_hs_ok = rbn_handshake(&me, &g_hs_m); g_hs_local = 0;
+        {   int rbn_match_cancelled(void); if (!g_hs_ok && rbn_match_cancelled() == 2) return; }      /* (R3 pub2) a Local Wireless room fight: nothing changed */
         if (!g_hs_ok) {                                   /* (hs12) not agreed: a local match of this game (player 2 = this player's fighter again), left at once by rb_rollback.c */
             g_hs_m = me; g_hs_m.chara[1] = me.chara[0]; g_hs_m.colour[1] = (uint8_t)((me.colour[0] + 1) & 7); g_hs_m.has_layout[1] = me.has_layout[0];
             memcpy(g_hs_m.layout[1], me.layout[0], sizeof g_hs_m.layout[1]); g_hs_ok = 1; g_hs_local = 1;
@@ -388,6 +389,7 @@ static void match_player_hook(Ctx *c, void *user) {
     if (g_hs_wanted) hs_apply(st, idx, type_was);       /* R3: the match both online games agreed (rb_net.c handshake) */
     if (idx == 1) g_dm_state1_ok = safe_read(st, g_dm_state1, sizeof g_dm_state1);
     g_orig_player_record(c);
+    if (idx == 1 && rd32(st + 0x78) == 0) { void input_mark(const char *what); input_mark("setup-2p"); }      /* (R3 pub2, test aid) a match set up with a human player 2 (SSBU_SEQ @untilmark:setup-2p) */
     printf("debug match: player %d: screen choice %llx type %u level %u -> record %llx: ui_chara %llx, fighter kind %d, type %d, colour %d, cpu level %d\n", idx,
            (unsigned long long)was, type_was, rd32(st + 0x224), (unsigned long long)rec, (unsigned long long)rd64(rec), (int)(int8_t)rd8(rec + 8), rd8(rec + 0xa), rd8(rec + 0x19), rd8(rec + 0x79));
     if (getenv("SSBU_DEBUG_RESEARCH") && idx == 0) {
@@ -480,7 +482,8 @@ static void panel_copy_hook(Ctx *c, void *user) {
         printf("debug panels: entry 1 copied as type %u: made none (SSBU_RB_NET_P2NONE)\n", rd32(e + 0x30));
         wr32(e + 0x30, 3); wr32(e + 0x34, 0xffffffffu); wr64(e + 0x38, 0xc1ffff0000000000ull); wr64(e + 0x40, 0xc1ffff0000000000ull);
     }
-    if (g_autop2 > 0 && rd32(e + 0x30) == 3) {        /* the CPU panel a save brings (run pnB) */
+    int nnldn_role(void);
+    if (g_autop2 > 0 && rd32(e + 0x30) == 3 && !nnldn_role()) {        /* the CPU panel a save brings (run pnB); (R3 pub2) never in a Local Wireless room: its fights are the game's own */
         wr8(e, 0xff); wr32(e + 0x28, 2); wr32(e + 0x34, 0xffffffffu);
         wr64(e + 0x38, 0xc100000fd5f7fa78ull); wr64(e + 0x40, 0xc100000fd5f7fa78ull); wr8(e + 0x48, 0); wr8(e + 0x49, 3);
         wr32(e + 0x30, 1);

@@ -160,11 +160,15 @@ game back a few frames and replays them, instead of slowing both players down.
    about as long as the first build) and puts `ssbu_native_rb.exe` beside it.
 2. **Switch it on:** in the game, **F1 -> Experimental -> Rollback netcode: ON**, then restart the game (Play SSBU.bat).
 3. **Both players** need it on, the same game update (13.0.4 or 13.0.5) and the same version of this project.
-4. Play as usual through **Local Wireless**: each player picks only their own fighter; the two games agree on the stage,
-   rules and a shared random seed before the match starts (a box "Online match" shows while they wait).
+4. **Connect the two games with a room code** (section 2 above): one player uses `online_mode = host` and gives the code,
+   the other `online_mode = join` with that code.
+5. **Both open Smash (versus)**, each picks only their own fighter (player 2's panel can be anything), and both start the
+   match. The two games agree on the stage, the rules and a shared random seed first (a box "Online match" shows while
+   one waits for the other; Esc or holding B stops waiting).
 
-**Known issue (being fixed):** between two PCs the rollback match may still not start (both games wait for each other
-at the start of the match, then leave it). Use the normal netcode for real matches until the next update.
+**Local Wireless rooms do not use rollback.** A fight started from a Local Wireless room (the room's match and its waiting
+stage) is always played with the game's own online netcode, whatever the two players' rollback setting: a short message
+says so once. Two players with different rollback settings can therefore still play together in a room.
 
 Limits today: rollbacks of 3 or more frames take a little longer than one frame (a short hitch at very high ping);
 Windows only; tested between two games on one PC with simulated 150 ms ping and loss (0 desyncs), not yet much between

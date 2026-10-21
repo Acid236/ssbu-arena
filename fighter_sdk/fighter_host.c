@@ -1192,7 +1192,8 @@ static void fh_hook(Ctx *c, void *user) {
                 uint64_t rb = fh_rng_base();
                 printf("[fight] first battle frame (fighter entry %d); input mark \"fight\" raised; script random generators at %llx\n", g_fh_f[k].entry, (unsigned long long)rb);
                 if (rb) { printf("[fight] generators before:"); for (int i = 0; i < 9; i++) printf(" %08x.%u", rd32(rb + 0x14ull * i + 12), rd32(rb + 0x14ull * i + 16)); printf("\n"); }
-                if (g_fh_det && !(g_fh_detoff & 1) && rb) {
+                int rbn_match_cancelled(void);
+                if (g_fh_det && !(g_fh_detoff & 1) && rb && !(rbn_match_cancelled() == 2 && !getenv("SSBU_DETERMINISTIC"))) {      /* (R3 pub2) a room fight with only rollback mode on: the game's own generators */
                     uint64_t ms = rbn_match_seed();    /* R3: the seed of the online match handshake (0 without one: the fixed state below) */
                     if (ms) {
                         for (int i = 0; i < 9; i++) {
