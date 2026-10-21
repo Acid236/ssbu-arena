@@ -126,15 +126,12 @@ def main():
     work = os.path.join(a.build, 'work')
     rollback = False
     if a.play and a.exe == main_exe and not (a.linux or a.mac) and ini_on(os.path.join(a.build, 'config', 'graphics.ini'), 'rollback'):
-        # F1 > Experimental > Rollback netcode: the rollback pair (setup.py --rollback) instead of the normal exe
-        if all(os.path.isfile(os.path.join(work, f)) for f in ('ssbu_native_rb.exe', 'ssbu_game_r1.dll')):
-            a.exe, rollback = 'ssbu_native_rb.exe', True
-            print('Rollback netcode on: ssbu_native_rb.exe + ssbu_game_r1.dll')
-        else:
-            print('Rollback netcode is on in the settings menu, but the rollback build is not there: open Install SSBU.bat, tick\n'
-                  '"Rollback netcode", press Resume (about as long as the first compile). Starting the normal game now.')
+        # F1 > Experimental > Rollback netcode: the normal exe and game DLL with SSBU_RB_NET (since R4 the ring saves the fight on
+        # the normal build: runtime/rb_learned.c); the old pair ssbu_native_rb.exe + ssbu_game_r1.dll of an older install is not used
+        rollback = True
+        print('Rollback netcode on (the normal build; no second compile needed)')
     exe = os.path.join(work, a.exe)
-    native = os.path.join(work, 'ssbu_native_rb.exe' if rollback else main_exe)
+    native = os.path.join(work, main_exe)
     if not os.path.exists(exe):
         shutil.copy2(native, exe)
     elif exe != native and os.path.getmtime(exe) < os.path.getmtime(native):
@@ -182,8 +179,6 @@ def main():
         env['SSBU_FIXED_SEED'] = a.seed
     if rollback and 'SSBU_RB_NET' not in env:
         env['SSBU_RB_NET'] = 'net'                    # rollback over the online connection (net_relay); needs online play on
-    if rollback and os.path.isdir(os.path.join(work, 'nro_bin_eh_o2r1')):
-        env['SSBU_NRO_BIN'] = 'nro_bin_eh_o2r1'       # the script modules with dirty-page marks (setup.py --rollback, step nro)
     if a.mac and not (env.get('VK_DRIVER_FILES') or env.get('VK_ICD_FILENAMES')):
         # MoltenVK (the Vulkan driver on Metal) named for Homebrew's Vulkan loader, as play_mac.sh does: run.py started by hand
         icd = next((p for p in ('/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json', '/opt/homebrew/share/vulkan/icd.d/MoltenVK_icd.json',

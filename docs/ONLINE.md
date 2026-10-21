@@ -155,14 +155,14 @@ sees rooms of its own build.
 Smooth fights at high ping: each game runs the match locally and only the players' inputs travel; a late input rolls the
 game back a few frames and replays them, instead of slowing both players down.
 
-1. **Build it once:** open `Install SSBU.bat`, tick **"Rollback netcode for online play"**, press **Install** (or
-   **Resume**). It builds a second copy of the game with the extra bookkeeping rollback needs (`ssbu_game_r1.dll`,
-   about as long as the first build) and puts `ssbu_native_rb.exe` beside it.
-2. **Switch it on:** in the game, **F1 -> Experimental -> Rollback netcode: ON**, then restart the game (Play SSBU.bat).
-3. **Both players** need it on, the same game update (13.0.4 or 13.0.5) and the same version of this project.
-4. **Connect the two games with a room code** (section 2 above): one player uses `online_mode = host` and gives the code,
+1. **Switch it on:** in the game, **F1 -> Experimental -> Rollback netcode: ON**, then restart the game (Play SSBU.bat).
+   Nothing extra to build: rollback runs on the normal game build (the game saves the fight by learning, at the start of
+   each fight, which memory it writes). An older install's second copy for rollback (`ssbu_game_r1.dll`,
+   `ssbu_native_rb.exe`, the folder `nro_bin_eh_o2r1`) is not used any more and can be deleted.
+2. **Both players** need it on, the same game update (13.0.4 or 13.0.5) and the same version of this project.
+3. **Connect the two games with a room code** (section 2 above): one player uses `online_mode = host` and gives the code,
    the other `online_mode = join` with that code.
-5. **Both open Smash (versus)**, each picks only their own fighter (player 2's panel can be anything), and both start the
+4. **Both open Smash (versus)**, each picks only their own fighter (player 2's panel can be anything), and both start the
    match. The two games agree on the stage, the rules and a shared random seed first (a box "Online match" shows while
    one waits for the other; Esc or holding B stops waiting).
 

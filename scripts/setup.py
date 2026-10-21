@@ -1061,16 +1061,6 @@ def step_compile(cx):
     cx.run('compile', [sys.executable, 'build_opt.py', 'main', str(cx.jobs)], env=build_env(cx))
     dll = os.path.join(cx.work, game_lib(cx))
     say('  %s %.0f MB; objects %.0f MB' % (game_lib(cx), os.path.getsize(dll) / 1048576.0, disk_mb(os.path.join(cx.work, 'obj_eh_o1'))))
-    if getattr(cx.a, 'rollback', False) and not cx.linux:
-        # the rollback game DLL: the same generated code, every guest store marking its page (runtime.h R1M), so the
-        # rollback ring saves exactly the pages a frame wrote (runtime/r1_ring.c). Its own object folder and DLL name.
-        say('  rollback: the game DLL with dirty-page marks (ssbu_game_r1.dll; about as long as the compile above) ...')
-        cx.run('compile', [sys.executable, 'build_opt.py', 'main', str(cx.jobs)],
-               env=cx.env(RECOMP_GEN='gen_eh_o2', RECOMP_OBJ='obj_r1', RECOMP_DLL='ssbu_game_r1.dll', RECOMP_NRO_SUFFIX='_eh_o2',
-                          RECOMP_SHIM='game_shim_r1.c',     # exports the page maps r1_m1 / r1_m2 the marked code writes
-                          RECOMP_INLINE=inline_flag(cx),
-                          RECOMP_CFLAGS='-DR1_MARK', RECOMP_DATA_CFLAGS='-DR1_MARK'))
-        say('  ssbu_game_r1.dll %.0f MB' % (os.path.getsize(os.path.join(cx.work, 'ssbu_game_r1.dll')) / 1048576.0))
 
 
 def step_nro(cx):
@@ -1079,15 +1069,6 @@ def step_nro(cx):
     cx.run('nro', argv, env=build_env(cx))
     d = os.path.join(cx.work, 'nro_bin_eh_o2')
     say('  %d module libraries in nro_bin_eh_o2 (%.0f MB)' % (len([f for f in os.listdir(d) if f.endswith(lib_ext(cx))]), disk_mb(d)))
-    if getattr(cx.a, 'rollback', False) and not cx.posix:
-        # the rollback pair's script modules: the same lifted code (gen_nro_eh_o2) compiled with -DR1_MARK, so the fighters'
-        # own stores mark their pages too and a rollback restores them (without marks a fighter module's writes are not
-        # in the snapshot ring: desync); loaded by the rollback exe from nro_bin_eh_o2r1 (scripts/run.py SSBU_NRO_BIN)
-        say('  rollback: the script modules with dirty-page marks (nro_bin_eh_o2r1; about as long as the step above) ...')
-        cx.run('nro', argv, env=cx.env(**dict(build_env(cx), RECOMP_NRO_SUFFIX='_eh_o2r1', RECOMP_NRO_GEN_SUFFIX='_eh_o2',
-                                               RECOMP_CFLAGS='-DR1_MARK')))
-        d = os.path.join(cx.work, RB_NRO)
-        say('  %d module libraries in %s (%.0f MB)' % (len([f for f in os.listdir(d) if f.endswith(lib_ext(cx))]), RB_NRO, disk_mb(d)))
 
 
 def step_link(cx):
@@ -1252,29 +1233,9 @@ def _difftest(cx):
         say('  WARNING: the differential test reports differences (see logs/check_difftest.log)')
 
 
-RB_EXE = 'ssbu_native_rb.exe'
-RB_NRO = 'nro_bin_eh_o2r1'           # the rollback pair's script modules (step_nro --rollback)
-
-
-def link_rollback(cx):
-    """--rollback: the exe of the rollback pair beside ssbu_game_r1.dll (step compile). The prebuilt runtime package carries
-    it (copied by step_link with the rest); without the package it is linked here (RECOMP_R1=1: the C++ runtime that marks
-    its writes, importing ssbu_game_r1.dll). Play SSBU.bat starts this pair when F1 > Experimental > Rollback netcode is on."""
-    if not getattr(cx.a, 'rollback', False) or cx.linux or cx.mac:
-        return
-    if not os.path.exists(os.path.join(cx.work, 'ssbu_game_r1.dll')):
-        raise Fail('--rollback: ssbu_game_r1.dll is missing: run the compile step again with --rollback (setup.py --from compile --rollback)')
-    if not os.path.exists(os.path.join(cx.work, RB_EXE)):
-        if cx.runtime_dir:
-            raise Fail('--rollback: the prebuilt runtime package has no %s (an older package): update this folder (Update only)' % RB_EXE)
-        cx.run('link', [sys.executable, 'build.py', 'host'], env=cx.env(**dict({k: v for k, v in build_env(cx).items() if k != 'RECOMP_NRO_SUFFIX'},
-               RECOMP_R1='1', RECOMP_EXE=RB_EXE, RECOMP_DLL='ssbu_game_r1.dll')))
-    say('  rollback pair ready: %s + ssbu_game_r1.dll (F1 > Experimental > Rollback netcode)' % RB_EXE)
-
-
 RUNNERS = {'deps': step_deps, 'stage': step_stage, 'convert': step_convert, 'modules': step_modules, 'tables': step_tables,
            'lift': step_lift, 'sdk': step_sdk, 'compile': step_compile, 'nro': step_nro,
-           'link': lambda cx: (step_link(cx), link_rollback(cx))[0], 'check': step_check}
+           'link': step_link, 'check': step_check}
 ALWAYS = {'deps', 'stage'}               # cheap, and they fill the in-memory context
 
 
@@ -1324,9 +1285,8 @@ def main():
     ap.add_argument('--nocrt', action='store_true', help='build the game libraries with LLVM alone (the exe is still built here)')
     ap.add_argument('--redo', help='repeat this step')
     ap.add_argument('--from', dest='from_step', help='repeat this step and all after it')
-    ap.add_argument('--rollback', action='store_true', help='also build the rollback pair: the game DLL with dirty-page marks '
-                    '(ssbu_game_r1.dll, -DR1_MARK; about as long as the first compile) and ssbu_native_rb.exe beside it. '
-                    'Online rollback (F1 > Experimental > Rollback netcode) needs them')
+    ap.add_argument('--rollback', action='store_true', help='not needed any more (kept so older command lines still work): online '
+                    'rollback (F1 > Experimental > Rollback netcode) runs on the normal build')
     ap.add_argument('--no-inline', action='store_true', help='compile the game without the inlined helpers (RECOMP_INLINE): a '
                     'shorter compile on a weak PC, a slower game (the main thread about 25-30 %% slower)')
     ap.add_argument('--full-check', action='store_true', help='the check step also runs the lifter\'s differential test against '
@@ -1373,11 +1333,9 @@ def main():
                 'Protection history): it is made again' % (', '.join(gone), cx.work))
             for s in ('compile', 'link', 'check'):
                 done.pop(s, None)
-    if getattr(a, 'rollback', False) and not a.dry_run and 'compile' in done and not cx.linux and not cx.mac and \
-            not all(os.path.exists(os.path.join(cx.work, f)) for f in ('ssbu_game_r1.dll', RB_EXE, os.path.join(RB_NRO, 'lua2cpp_common.dll'))):
-        say('--rollback: the rollback pair is not built yet: compile (the marked game DLL), nro (the marked script modules) and link run again')
-        for s in ('compile', 'nro', 'link'):
-            done.pop(s, None)
+    if getattr(a, 'rollback', False):
+        say('--rollback: not needed any more: online rollback runs on the normal build (no second game DLL, no second set of '
+            'script modules); the option is ignored')
     t_all = time.time()
     for i, s in enumerate(STEPS):
         if s not in todo:

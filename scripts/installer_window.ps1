@@ -425,8 +425,6 @@ $script:cbRuntime = New-Check 'Use the prebuilt runtime (recommended)' $true
 $script:tips = New-Object System.Windows.Forms.ToolTip
 $script:tips.AutoPopDelay = 20000
 $script:tips.SetToolTip($script:cbRuntime, 'No Visual Studio needed (about 3 GB less disk), some minutes shorter. The game you get is the same.')
-$script:cbRb = New-Check 'Rollback netcode (NOT WORKING between two PCs yet: being fixed)' $false
-$script:tips.SetToolTip($script:cbRb, 'Experimental. Between two PCs the rollback match does not start yet (both players wait, then the game leaves the match). Builds a second copy of the game (about twice as long).')
 $script:cbDry = New-Check 'Dry run (show what would happen, change nothing)' $false
 $fJobs = New-Object System.Windows.Forms.FlowLayoutPanel
 $fJobs.AutoSize = $true; $fJobs.WrapContents = $false
@@ -958,7 +956,7 @@ function Set-Buttons {
     $script:btnUpdate.Enabled = (-not $run) -and $ok
     foreach ($k in $script:F.Keys) { $script:F[$k].Box.Enabled = -not $run; foreach ($b in $script:F[$k].Buttons) { $b.Enabled = -not $run } }
     $script:dlcList.Enabled = -not $run; $script:btnDlcAdd.Enabled = -not $run; $script:btnDlcDel.Enabled = -not $run; $script:btnDlcClr.Enabled = -not $run
-    foreach ($c in @($script:cbShort, $script:cbUpd, $script:cbRuntime, $script:cbRb, $script:cbDry, $script:numJobs)) { $c.Enabled = -not $run }
+    foreach ($c in @($script:cbShort, $script:cbUpd, $script:cbRuntime, $script:cbDry, $script:numJobs)) { $c.Enabled = -not $run }
     $script:btnMsvc.Enabled = -not $run
     $loc = Get-ChosenBuild                # Play and Resume follow the install location shown in the window
     $script:btnPlay.Enabled = (-not $run) -and (Test-Path -LiteralPath ([IO.Path]::Combine($loc, 'work\ssbu_native.exe'))) -and (Same-Path $loc $buildDir)
@@ -990,7 +988,6 @@ function Build-InstallArgs([bool]$forceDry) {
     if ($forceDry -or $script:cbDry.Checked) { [void]$a.Add('--dry-run') }
     if (-not $script:cbRuntime.Checked) { [void]$a.Add('--no-runtime') }
     if (-not $script:cbShort.Checked) { [void]$a.Add('--no-shortcuts') }
-    if ($script:cbRb.Checked) { [void]$a.Add('--rollback') }
     if (-not $script:cbUpd.Checked) { [void]$a.Add('--no-self-update') }
     return ($a -join ' ')
 }
