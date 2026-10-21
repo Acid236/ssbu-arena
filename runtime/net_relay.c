@@ -47,7 +47,10 @@
  *   SSBU_ONLINE=1 | <host:port>      online_server = <host:port>      the lobby (default 127.0.0.1:39500); 0/off = off
  *   SSBU_ONLINE_NAME                 online_name                      name in the lobby's log (default Player-xxxx)
  *   SSBU_ONLINE_CODE                 online_code                      lobby code: only players with the same code meet
- *   SSBU_ONLINE_DIRECT=0             online_direct = off              no direct paths: everything through the lobby
+ *   SSBU_ONLINE_DIRECT=1             online_direct = on               direct paths (hole punching) allowed. Default OFF in this
+ *                                                                     fork: every datagram goes through the lobby, no player
+ *                                                                     learns another one's internet address, and datagrams that
+ *                                                                     do not come from the lobby are dropped
  *   SSBU_ONLINE_PORT=<n>             local UDP port (default: any)
  *   SSBU_ONLINE_LOG=0..3             log level (default 1)
  *   SSBU_ONLINE_BUILD                build id override (players of different builds never meet) */
@@ -105,7 +108,7 @@ static uint64_t rnd64(void) {
 }
 
 /* ---------------------------------------------------------------- configuration */
-static int g_cfg = -1, g_log = 1, g_direct = 1;
+static int g_cfg = -1, g_log = 1, g_direct = 0;      /* g_direct: off by default (relay only, see online_direct above) */
 extern int g_game_build;             /* hostrt.c: 0 = 13.0.4, 1 = 13.0.5 (hostrt.h GAME_13_0_*), -1 before main.elf is read */
 static char g_server[256], g_name[NAME_LEN + 1], g_code[NAME_LEN + 1] = "public", g_build[BUILD_LEN + 1] = NET_BUILD_DEFAULT;
 static uint16_t g_local_port;
