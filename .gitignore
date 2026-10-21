@@ -77,3 +77,7 @@ __pycache__/
 
 # an SD card folder with Skyline plugins and mods you installed (docs/SKYLINE.md)
 /sd/
+
+# Kirby loading art: made on each PC from Ultimate Frame Data by tools/ui/loading_inhale.py (game-derived: never committed)
+media/loading_kirby.png
+media/sources/

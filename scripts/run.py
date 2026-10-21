@@ -144,7 +144,7 @@ def main():
             print('note: %s is older than %s and may run an older runtime (--refresh copies it again)' % (a.exe, main_exe))
     # the window's icon and the loading animation's pictures (display.c / loading_anim.c read them beside the exe): newer
     # ones after an update are copied at once (the build copies them only at link)
-    for name in ('opensmash.ico', 'loading_kong.png', 'loading_kong_back.png', 'loading_arm.png'):
+    for name in ('arena.ico', 'loading_kirby.png'):
         logo = os.path.join(REPO, 'media', name)
         if os.path.isfile(logo) and not (a.linux or a.mac):
             dst = os.path.join(work, name)

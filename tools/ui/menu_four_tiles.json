@@ -1,0 +1,1050 @@
+{
+  "main_menu.bflyt": {
+    "bg": {
+      "vertex_colors": [
+        "ffffffff",
+        "ffffffff",
+        "ffffffff",
+        "ffffffff"
+      ],
+      "texture": "main_menu_btn3_00_online_frame^u",
+      "material_like": [
+        "main_menu_btn3_00.bflyt",
+        "frame"
+      ],
+      "texture_uv": true,
+      "material_white": "ffffffff",
+      "material_black": "00000000"
+    },
+    "set_parts_text_scroll": {
+      "visible": false
+    },
+    "center": {
+      "visible": false
+    },
+    "nul_menu_colle_record": {
+      "visible": false
+    },
+    "null_menu_colle": {
+      "visible": false
+    },
+    "nul_preview_melee": {
+      "visible": false
+    },
+    "nul_preview_colle": {
+      "visible": false
+    },
+    "nul_preview_spirits": {
+      "visible": false
+    },
+    "nul_preview_other": {
+      "visible": false
+    },
+    "nul_preview_online": {
+      "visible": false
+    },
+    "mask_melee": {
+      "visible": false,
+      "pos": [
+        -384,
+        157.0
+      ],
+      "size": [
+        1024,
+        366
+      ]
+    },
+    "null_btn_melee": {
+      "pos": [
+        -384,
+        157.0
+      ]
+    },
+    "set_parts_btn_melee": {
+      "pos": [
+        0,
+        0
+      ],
+      "size": [
+        1024,
+        366
+      ],
+      "parts": {
+        "blink_scale": {
+          "pos": [
+            0,
+            0
+          ],
+          "scale": [
+            1,
+            1
+          ]
+        },
+        "txt_sdw": {
+          "visible": false
+        },
+        "txt_off": {
+          "visible": false
+        },
+        "txt_on": {
+          "visible": false
+        },
+        "icon_sdw": {
+          "visible": false
+        },
+        "icon_off": {
+          "visible": false
+        },
+        "icon_on": {
+          "visible": false
+        },
+        "frame": {
+          "visible": true,
+          "alpha": 255,
+          "pos": [
+            0,
+            0
+          ],
+          "size": [
+            1024,
+            366
+          ],
+          "texture_uv": true,
+          "vertex_colors": [
+            "ffffffff",
+            "ffffffff",
+            "ffffffff",
+            "ffffffff"
+          ]
+        },
+        "circle_position": {
+          "pos": [
+            0,
+            0
+          ],
+          "scale": [
+            1,
+            1
+          ]
+        },
+        "circle_off": {
+          "visible": false,
+          "size": [
+            1024,
+            366
+          ],
+          "pos": [
+            0,
+            0
+          ],
+          "texture_uv": true
+        },
+        "circle_on": {
+          "size": [
+            1024,
+            366
+          ],
+          "pos": [
+            0,
+            0
+          ],
+          "texture_uv": true
+        },
+        "hit_00": {
+          "pos": [
+            -512.0,
+            183.0
+          ]
+        },
+        "hit_01": {
+          "pos": [
+            512.0,
+            183.0
+          ]
+        },
+        "hit_02": {
+          "pos": [
+            512.0,
+            0
+          ]
+        },
+        "hit_03": {
+          "pos": [
+            512.0,
+            -183.0
+          ]
+        },
+        "hit_04": {
+          "pos": [
+            -512.0,
+            -183.0
+          ]
+        },
+        "hit_05": {
+          "pos": [
+            -512.0,
+            0
+          ]
+        }
+      }
+    },
+    "mask_other": {
+      "visible": false,
+      "pos": [
+        526,
+        157.0
+      ],
+      "size": [
+        740,
+        366
+      ]
+    },
+    "null_btn_other": {
+      "pos": [
+        526,
+        157.0
+      ]
+    },
+    "set_parts_btn_other": {
+      "pos": [
+        0,
+        0
+      ],
+      "size": [
+        740,
+        366
+      ],
+      "parts": {
+        "blink_scale": {
+          "pos": [
+            0,
+            0
+          ],
+          "scale": [
+            1,
+            1
+          ]
+        },
+        "txt_sdw": {
+          "visible": false
+        },
+        "txt_off": {
+          "visible": false
+        },
+        "txt_on": {
+          "visible": false
+        },
+        "icon_sdw": {
+          "visible": false
+        },
+        "icon_off": {
+          "visible": false
+        },
+        "icon_on": {
+          "visible": false
+        },
+        "frame": {
+          "visible": true,
+          "alpha": 255,
+          "pos": [
+            0,
+            0
+          ],
+          "size": [
+            740,
+            366
+          ],
+          "texture_uv": true,
+          "vertex_colors": [
+            "ffffffff",
+            "ffffffff",
+            "ffffffff",
+            "ffffffff"
+          ]
+        },
+        "circle_position": {
+          "pos": [
+            0,
+            0
+          ],
+          "scale": [
+            1,
+            1
+          ]
+        },
+        "circle_off": {
+          "visible": false,
+          "size": [
+            740,
+            366
+          ],
+          "pos": [
+            0,
+            0
+          ],
+          "texture_uv": true
+        },
+        "circle_on": {
+          "size": [
+            740,
+            366
+          ],
+          "pos": [
+            0,
+            0
+          ],
+          "texture_uv": true
+        },
+        "hit_00": {
+          "pos": [
+            -370.0,
+            183.0
+          ]
+        },
+        "hit_01": {
+          "pos": [
+            370.0,
+            183.0
+          ]
+        },
+        "hit_02": {
+          "pos": [
+            370.0,
+            0
+          ]
+        },
+        "hit_03": {
+          "pos": [
+            370.0,
+            -183.0
+          ]
+        },
+        "hit_04": {
+          "pos": [
+            -370.0,
+            -183.0
+          ]
+        },
+        "hit_05": {
+          "pos": [
+            -370.0,
+            0
+          ]
+        }
+      }
+    },
+    "mask_spirits": {
+      "visible": false,
+      "pos": [
+        -384,
+        -237.0
+      ],
+      "size": [
+        1024,
+        366
+      ]
+    },
+    "null_btn_spirits": {
+      "pos": [
+        -384,
+        -237.0
+      ]
+    },
+    "set_parts_btn_spirits": {
+      "pos": [
+        0,
+        0
+      ],
+      "size": [
+        1024,
+        366
+      ],
+      "parts": {
+        "blink_scale": {
+          "pos": [
+            0,
+            0
+          ],
+          "scale": [
+            1,
+            1
+          ]
+        },
+        "txt_sdw": {
+          "visible": false
+        },
+        "txt_off": {
+          "visible": false
+        },
+        "txt_on": {
+          "visible": false
+        },
+        "icon_sdw": {
+          "visible": false
+        },
+        "icon_off": {
+          "visible": false
+        },
+        "icon_on": {
+          "visible": false
+        },
+        "frame": {
+          "visible": true,
+          "alpha": 255,
+          "pos": [
+            0,
+            0
+          ],
+          "size": [
+            1024,
+            366
+          ],
+          "texture_uv": true,
+          "vertex_colors": [
+            "ffffffff",
+            "ffffffff",
+            "ffffffff",
+            "ffffffff"
+          ]
+        },
+        "circle_position": {
+          "pos": [
+            0,
+            0
+          ],
+          "scale": [
+            1,
+            1
+          ]
+        },
+        "circle_off": {
+          "visible": false,
+          "size": [
+            1024,
+            366
+          ],
+          "pos": [
+            0,
+            0
+          ],
+          "texture_uv": true
+        },
+        "circle_on": {
+          "size": [
+            1024,
+            366
+          ],
+          "pos": [
+            0,
+            0
+          ],
+          "texture_uv": true
+        },
+        "hit_00": {
+          "pos": [
+            -512.0,
+            183.0
+          ]
+        },
+        "hit_01": {
+          "pos": [
+            512.0,
+            183.0
+          ]
+        },
+        "hit_02": {
+          "pos": [
+            512.0,
+            0
+          ]
+        },
+        "hit_03": {
+          "pos": [
+            512.0,
+            -183.0
+          ]
+        },
+        "hit_04": {
+          "pos": [
+            -512.0,
+            -183.0
+          ]
+        },
+        "hit_05": {
+          "pos": [
+            -512.0,
+            0
+          ]
+        }
+      }
+    },
+    "mask_colle": {
+      "visible": false,
+      "pos": [
+        526,
+        -237.0
+      ],
+      "size": [
+        740,
+        366
+      ]
+    },
+    "null_btn_colle": {
+      "pos": [
+        526,
+        -237.0
+      ]
+    },
+    "set_parts_btn_colle": {
+      "pos": [
+        0,
+        0
+      ],
+      "size": [
+        740,
+        366
+      ],
+      "parts": {
+        "blink_scale": {
+          "pos": [
+            0,
+            0
+          ],
+          "scale": [
+            1,
+            1
+          ]
+        },
+        "txt_sdw": {
+          "visible": false
+        },
+        "txt_off": {
+          "visible": false
+        },
+        "txt_on": {
+          "visible": false
+        },
+        "icon_sdw": {
+          "visible": false
+        },
+        "icon_off": {
+          "visible": false
+        },
+        "icon_on": {
+          "visible": false
+        },
+        "frame": {
+          "visible": true,
+          "alpha": 255,
+          "pos": [
+            0,
+            0
+          ],
+          "size": [
+            740,
+            366
+          ],
+          "texture_uv": true,
+          "vertex_colors": [
+            "ffffffff",
+            "ffffffff",
+            "ffffffff",
+            "ffffffff"
+          ]
+        },
+        "circle_position": {
+          "pos": [
+            0,
+            0
+          ],
+          "scale": [
+            1,
+            1
+          ]
+        },
+        "circle_off": {
+          "visible": false,
+          "size": [
+            740,
+            366
+          ],
+          "pos": [
+            0,
+            0
+          ],
+          "texture_uv": true
+        },
+        "circle_on": {
+          "size": [
+            740,
+            366
+          ],
+          "pos": [
+            0,
+            0
+          ],
+          "texture_uv": true
+        },
+        "hit_00": {
+          "pos": [
+            -370.0,
+            183.0
+          ]
+        },
+        "hit_01": {
+          "pos": [
+            370.0,
+            183.0
+          ]
+        },
+        "hit_02": {
+          "pos": [
+            370.0,
+            0
+          ]
+        },
+        "hit_03": {
+          "pos": [
+            370.0,
+            -183.0
+          ]
+        },
+        "hit_04": {
+          "pos": [
+            -370.0,
+            -183.0
+          ]
+        },
+        "hit_05": {
+          "pos": [
+            -370.0,
+            0
+          ]
+        }
+      }
+    },
+    "eshop": {
+      "visible": true,
+      "pos": [
+        0,
+        0
+      ]
+    },
+    "mask_eshop": {
+      "visible": false
+    },
+    "set_parts_btn_eshop": {
+      "visible": true,
+      "pos": [
+        -636,
+        450
+      ],
+      "size": [
+        520,
+        128
+      ],
+      "parts": {
+        "blink_scale": {
+          "pos": [
+            0,
+            0
+          ],
+          "scale": [
+            1,
+            1
+          ]
+        },
+        "txt_sdw": {
+          "visible": false
+        },
+        "txt_off": {
+          "visible": false
+        },
+        "txt_on": {
+          "visible": false
+        },
+        "icon_sdw": {
+          "visible": false
+        },
+        "icon_off": {
+          "visible": false
+        },
+        "icon_on": {
+          "visible": false
+        },
+        "frame": {
+          "visible": true,
+          "alpha": 255,
+          "pos": [
+            0,
+            0
+          ],
+          "size": [
+            520,
+            128
+          ],
+          "texture_uv": true,
+          "vertex_colors": [
+            "ffffffff",
+            "ffffffff",
+            "ffffffff",
+            "ffffffff"
+          ]
+        },
+        "circle_position": {
+          "pos": [
+            0,
+            0
+          ],
+          "scale": [
+            1,
+            1
+          ]
+        },
+        "circle_off": {
+          "visible": false
+        },
+        "circle_on": {
+          "visible": false
+        },
+        "hit_00": {
+          "pos": [
+            -512.0,
+            183.0
+          ]
+        },
+        "hit_01": {
+          "pos": [
+            512.0,
+            183.0
+          ]
+        },
+        "hit_02": {
+          "pos": [
+            512.0,
+            0
+          ]
+        },
+        "hit_03": {
+          "pos": [
+            512.0,
+            -183.0
+          ]
+        },
+        "hit_04": {
+          "pos": [
+            -512.0,
+            -183.0
+          ]
+        },
+        "hit_05": {
+          "pos": [
+            -512.0,
+            0
+          ]
+        }
+      }
+    },
+    "online": {
+      "visible": false
+    },
+    "mask_online": {
+      "visible": false
+    },
+    "set_parts_btn_online": {
+      "visible": true,
+      "pos": [
+        0,
+        0
+      ],
+      "size": [
+        1920,
+        1080
+      ],
+      "parts": {
+        "blink_scale": {
+          "pos": [
+            0,
+            0
+          ],
+          "scale": [
+            1,
+            1
+          ]
+        },
+        "txt_sdw": {
+          "visible": false
+        },
+        "txt_off": {
+          "visible": false
+        },
+        "txt_on": {
+          "visible": false
+        },
+        "icon_sdw": {
+          "visible": false
+        },
+        "icon_off": {
+          "visible": false
+        },
+        "icon_on": {
+          "visible": false
+        },
+        "frame": {
+          "visible": true,
+          "alpha": 255,
+          "pos": [
+            0,
+            0
+          ],
+          "size": [
+            1920,
+            1080
+          ],
+          "texture_uv": true,
+          "vertex_colors": [
+            "ffffffff",
+            "ffffffff",
+            "ffffffff",
+            "ffffffff"
+          ]
+        },
+        "circle_position": {
+          "pos": [
+            0,
+            0
+          ],
+          "scale": [
+            1,
+            1
+          ]
+        },
+        "circle_off": {
+          "visible": false
+        },
+        "circle_on": {
+          "visible": false
+        },
+        "hit_00": {
+          "pos": [
+            -512.0,
+            183.0
+          ]
+        },
+        "hit_01": {
+          "pos": [
+            512.0,
+            183.0
+          ]
+        },
+        "hit_02": {
+          "pos": [
+            512.0,
+            0
+          ]
+        },
+        "hit_03": {
+          "pos": [
+            512.0,
+            -183.0
+          ]
+        },
+        "hit_04": {
+          "pos": [
+            -512.0,
+            -183.0
+          ]
+        },
+        "hit_05": {
+          "pos": [
+            -512.0,
+            0
+          ]
+        }
+      }
+    },
+    "null_btn_online": {
+      "pos": [
+        0,
+        0
+      ]
+    },
+    "null_btn_eshop": {
+      "pos": [
+        0,
+        0
+      ]
+    }
+  },
+  "main_menu_btn3_00.bflyt": {
+    "blink_scale": {
+      "pos": [
+        0,
+        0
+      ],
+      "scale": [
+        1,
+        1
+      ]
+    },
+    "txt_sdw": {
+      "visible": false
+    },
+    "txt_off": {
+      "visible": false
+    },
+    "txt_on": {
+      "visible": false
+    },
+    "icon_sdw": {
+      "visible": false
+    },
+    "icon_off": {
+      "visible": false
+    },
+    "icon_on": {
+      "visible": false
+    },
+    "frame": {
+      "visible": true,
+      "alpha": 255,
+      "pos": [
+        0,
+        0
+      ],
+      "size": [
+        1024,
+        366
+      ],
+      "texture_uv": true,
+      "vertex_colors": [
+        "ffffffff",
+        "ffffffff",
+        "ffffffff",
+        "ffffffff"
+      ]
+    },
+    "circle_position": {
+      "pos": [
+        0,
+        0
+      ],
+      "scale": [
+        1,
+        1
+      ]
+    },
+    "circle_off": {
+      "visible": false,
+      "size": [
+        1024,
+        366
+      ],
+      "pos": [
+        0,
+        0
+      ],
+      "texture_uv": true
+    },
+    "circle_on": {
+      "size": [
+        1024,
+        366
+      ],
+      "pos": [
+        0,
+        0
+      ],
+      "texture_uv": true
+    },
+    "hit_00": {
+      "pos": [
+        -512.0,
+        183.0
+      ]
+    },
+    "hit_01": {
+      "pos": [
+        512.0,
+        183.0
+      ]
+    },
+    "hit_02": {
+      "pos": [
+        512.0,
+        0
+      ]
+    },
+    "hit_03": {
+      "pos": [
+        512.0,
+        -183.0
+      ]
+    },
+    "hit_04": {
+      "pos": [
+        -512.0,
+        -183.0
+      ]
+    },
+    "hit_05": {
+      "pos": [
+        -512.0,
+        0
+      ]
+    }
+  },
+  "melee_bg.bflyt": {
+    "bg": {
+      "visible": false
+    },
+    "bg_00": {
+      "visible": false
+    },
+    "emitters": {
+      "visible": false
+    }
+  },
+  "other_bg.bflyt": {
+    "bg": {
+      "visible": false
+    },
+    "bg_00": {
+      "visible": false
+    },
+    "bg_01": {
+      "visible": false
+    },
+    "anim_panes": {
+      "visible": false
+    }
+  },
+  "spirits_bg.bflyt": {
+    "bg": {
+      "visible": false
+    },
+    "bg_00": {
+      "visible": false
+    },
+    "bg_01": {
+      "visible": false
+    },
+    "anim_panes": {
+      "visible": false
+    }
+  },
+  "colle_bg.bflyt": {
+    "bg_01": {
+      "visible": false
+    },
+    "bg_00": {
+      "visible": false
+    },
+    "bg_02": {
+      "visible": false
+    },
+    "anim_panes_00": {
+      "visible": false
+    }
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "source": "https://ultimateframedata.com/hitboxes/kirby/KirbyInhale.gif",
+  "page": "https://ultimateframedata.com/kirby",
+  "credit": "Ultimate Frame Data / MetalMusicMan; Smash Ultimate hitboxes: Zeckemyro",
+  "source_sha256": "a12ef38fb88a25ed816cd63bdfa7a1476f4a04e9382656be124cd210f2744b19",
+  "frame_width": 384,
+  "frame_height": 256,
+  "columns": 10,
+  "frames": 60,
+  "fps": 30,
+  "edits": "Original opaque debug volumes separated from Kirby; Arena website wireframe spheres with translucent fills, curved meridians and soft rims; subtle bob, breathing and seamless cyan suction motes.",
+  "style_reference": "arena-website/src/components/arena-art.tsx HitSphere; illustrative geometry, not a frame-data visualization"
+}

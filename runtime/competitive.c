@@ -19,6 +19,7 @@
 #include <windows.h>
 #include "runtime.h"
 #include "hostrt.h"
+#include "menu.h"
 
 typedef void (*HookFn)(Ctx *c, void *user);
 int hook_install(uint64_t addr, HookFn repl, void *user, ImportFn *orig);      /* fighter_sdk\hook_host.c */
@@ -67,11 +68,78 @@ static void comp_stage(void) {
  * opening a mode whose data the light archive does not have. */
 #define CURRENT_SEQUENCE 0x71053040f0ull
 static ImportFn g_scene_orig;
+static ImportFn g_menu_orig;
+static ImportFn g_pallet_orig;
+static ImportFn g_pallet_ready_orig;
+static uint8_t *g_local_pending;
+/* PalletMenu's native layout controller (13.0.4). Its completed selection is
+ * consumed by 0x71032ecc80 and broadcast as PalletCommandMessage. Local Wireless
+ * is command 3 (the third sidebar button, with one-based native IDs). */
+static uint8_t *comp_pallet(void) {
+    uint64_t owner = *(uint64_t *)(uintptr_t)0x710532e7f0ull;
+    uint64_t service = owner ? *(uint64_t *)(uintptr_t)(owner+8) : 0;
+    uint64_t layout = service ? *(uint64_t *)(uintptr_t)(service+8) : 0;
+    uint8_t *p = layout ? *(uint8_t **)(uintptr_t)(layout+128) : NULL;
+    if (!p || *(uint64_t *)(p+72) != 0x7101af97f0ull || *(uint64_t *)(p+120) != 0x7101af9ee0ull) return NULL;
+    return p;
+}
+static void comp_open_local(Ctx *c, void *user) {
+    (void)user;
+    /* Preserve the Lua C function's argument/result-stack convention. */
+    g_pallet_orig(c);
+    uint8_t *p = comp_pallet();
+    if (!p || g_local_pending || *(int *)(p+476)) return;
+    g_local_pending = p;
+    printf("competitive UI: Online & Friends -> opening native Local Wireless controller\n"); fflush(stdout);
+}
+static void comp_pallet_ready(Ctx *c, void *user) {
+    (void)user;
+    uint8_t *p = (uint8_t *)(uintptr_t)c->x[0];
+    g_pallet_ready_orig(c);
+    if (p != g_local_pending) return;
+    int index = *(int *)(p+228);
+    if (index < 0 || index >= 20 || *(int *)(p+152+4*index) != 2) return;
+    static int trace_count;
+    if (++trace_count == 1 || trace_count == 60) { printf("UI pallet ready: tick %d flags %d %d %d %d %d %d queue %llu\n",*(int *)(p+236),p[498],p[499],p[500],p[501],p[502],p[503],(unsigned long long)*(uint64_t *)(p+288));fflush(stdout); }
+    if (!p[499] || !p[502]) return;
+    g_local_pending = NULL;
+    *(int *)(p+468) = 3;
+    *(int *)(p+152+4*index) = 4; /* native confirmation, close and publish */
+    printf("competitive UI: Online & Friends -> native Local Wireless confirmation\n"); fflush(stdout);
+}
+static void comp_menu(Ctx *c, void *user) {
+    (void)user;
+    if (getenv("SSBU_UI_TRACE")) {
+        uint8_t *obj = (uint8_t *)(uintptr_t)c->x[0];
+        int index = *(int *)(obj+396);
+        uint64_t mgr = *(uint64_t *)obj;
+        int state = index >= 0 && index < 20 ? *(int *)(obj+320+4*index) : -1;
+        int result = mgr ? *(int *)(uintptr_t)(mgr+64) : -1;
+        int active = *(int *)(obj+404), mode = *(int *)(obj+408);
+        static int ps=-9, pr=-9, pm=-9;
+        if(state!=ps || result!=pr || mode!=pm) {
+            printf("UI trace: state %d result %d active %d mode %d sequence %08x\n",state,result,active,mode,*(uint32_t *)(uintptr_t)CURRENT_SEQUENCE);
+            fflush(stdout); ps=state;pr=result;pm=mode;
+        }
+    }
+    g_menu_orig(c);
+}
 static int comp_seq_allowed(uint32_t s) { return (s >> 24) == 0x01 || s == 0x02010000u || (s >> 24) == 0x06 || s == 0; }
 static void comp_scene(Ctx *c, void *user) {
     (void)user;
     volatile uint32_t *seq = (volatile uint32_t *)(uintptr_t)CURRENT_SEQUENCE;
     uint32_t s = *seq;
+    if (getenv("SSBU_UI_TRACE")) {              /* every mode change the scene dispatcher sees (menu route mapping) */
+        static uint32_t last = 0xffffffffu;
+        if (s != last) { printf("UI trace: sequence %08x\n", s); fflush(stdout); last = s; }
+    }
+    const char *ui = getenv("SSBU_COMPETITIVE_UI");
+    if (ui && ui[0] == '1' && (s >> 24) == 0x06 && menu_enabled()) {
+        printf("competitive UI: Settings -> PC settings menu\n");
+        *seq = 0x01000000u;
+        menu_request_toggle();
+        s = *seq;
+    }
     if (!comp_seq_allowed(s)) { printf("competitive: mode %08x is not part of the competitive build: back to the menu\n", s); *seq = 0x01000000u; }
     g_scene_orig(c);
 }
@@ -125,6 +193,14 @@ static DWORD WINAPI comp_wait(LPVOID arg) {
     for (int i = 0; i < 3000; i++) {        /* the hook table answers once the game's function table is set up */
         if (hook_install(0x71014e58f0ull, comp_battle, NULL, &g_battle_orig)) {
             if (!hook_install(0x710235cbf0ull, comp_scene, NULL, &g_scene_orig)) printf("competitive: scene hook FAILED: every mode can be opened\n");
+            const char *arena_ui = getenv("SSBU_COMPETITIVE_UI");
+            if (arena_ui && arena_ui[0] == '1') {
+                int menu_hook = hook_install(0x710232ce40ull, comp_menu, NULL, &g_menu_orig);
+                int local_hook = hook_install(0x7101bef020ull, comp_open_local, NULL, &g_pallet_orig);
+                int ready_hook = hook_install(0x7101af97f0ull, comp_pallet_ready, NULL, &g_pallet_ready_orig);
+                printf("competitive UI: menu hook %d; trace %s\n", menu_hook, getenv("SSBU_UI_TRACE") ? getenv("SSBU_UI_TRACE") : "off");
+                if (!local_hook || !ready_hook) printf("competitive UI: Local Wireless action hook FAILED\n");
+            }
             HANDLE k = CreateThread(NULL, 0, comp_keep, NULL, 0, NULL);
             if (k) CloseHandle(k);
             printf("competitive: ON (no FS meter, no random items, no hazards, no stage morph)\n");

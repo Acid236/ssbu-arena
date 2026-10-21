@@ -360,6 +360,12 @@ static void icall_record(Ctx *c, uint64_t addr) {
     }
     g_icall_lock = 0;
 }
+/* SSBU_ICALLS_STEP=<step>,<dur s> (nnhid.c): the window opens when the input sequence reaches that step instead */
+void icall_arm(int seconds) {
+    if (g_icall_mode < 0) { Ctx dummy; memset(&dummy, 0, sizeof dummy); icall_record(&dummy, 0); }
+    g_icall_start = GetTickCount64(); g_icall_end = g_icall_start + (ULONGLONG)seconds * 1000; g_icall_mode = 1;
+    printf("[icall] window armed for %d s\n", seconds); fflush(stdout);
+}
 uint64_t icall_first_x0(uint64_t target) {
     for (int i = 0; i < ICALL_MAX; i++) if (g_icall[i].target == target) return g_icall[i].x0;
     return 0;

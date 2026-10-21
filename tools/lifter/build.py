@@ -346,7 +346,8 @@ def cmd_link(host_only=False):
         objs.append(obj)
         if not os.path.exists(obj) or os.path.getmtime(obj) < max(os.path.getmtime(src), newest_dep, newest_vk if n == 'nvn_vk.c' else 0,
                                                                        os.path.getmtime(os.path.join(HERE, 'plat_mf.c')) if n == 'mf_ffmpeg.c' else 0,   # mf_ffmpeg.c includes plat_mf.c
-                                                                       os.path.getmtime(os.path.join(HERE, 'skyline.c')) if n == 'nnro.c' else 0):   # nnro.c includes skyline.c
+                                                                       os.path.getmtime(os.path.join(HERE, 'skyline.c')) if n == 'nnro.c' else 0,
+                                                                       os.path.getmtime(os.path.join(HERE, 'loading_anim.c')) if n == 'display.c' else 0):   # display.c includes loading_anim.c
             jobs.append((src, obj))
     for src in CXX_SOURCES:                          # U1: the settings menu (C++); imgui's own files depend on their source and menu_imconfig.h only
         obj = os.path.join(objdir, os.path.splitext(os.path.basename(src))[0] + '_cxx.obj')

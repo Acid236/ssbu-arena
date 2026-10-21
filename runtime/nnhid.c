@@ -234,7 +234,9 @@ static void seq_tick(void) {                              /* once per poll of pl
         g_seq_holding = 1;
         g_seq_left = g_seq[g_seq_index].hold;
         printf("input sequence: poll %lld step %d keys %s for %d (%ld draws)\n", (long long)g_seq_polls, g_seq_index, g_seq[g_seq_index].keys, g_seq[g_seq_index].hold, g_frame_draws_seen);
-        { void nvn_front_shot_step(int step); nvn_front_shot_step(g_seq_index); }      /* track V: SSBU_SHOT_STEPS=1 saves the frame of every key step (renderer comparison) */
+        { void nvn_front_shot_step(int step); nvn_front_shot_step(g_seq_index); }
+        {   int st, du; const char *e = getenv("SSBU_ICALLS_STEP");     /* hostrt.c: indirect-call window from this step */
+            if (e && sscanf(e, "%d,%d", &st, &du) == 2 && st == g_seq_index) { void icall_arm(int seconds); icall_arm(du); } }      /* track V: SSBU_SHOT_STEPS=1 saves the frame of every key step (renderer comparison) */
         return;
     }
     seq_begin(g_seq_index + 1);                           /* the hold just ended */
