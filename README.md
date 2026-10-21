@@ -87,7 +87,10 @@ sees a virtual address of the server's network.
 
 ## Credits
 
-SSBU Arena exists because of **[OpenSmash-Ultimate / ssbu-recomp](https://github.com/Denkishi/ssbu-recomp)**.
+SSBU Arena is made by **[Acid236](https://github.com/Acid236)**: Local Wireless over the internet, the relay lobby
+servers, online rollback through the relay, the ping overlay, the competitive mode and light archive, the launchers.
+
+It exists because of **[OpenSmash-Ultimate / ssbu-recomp](https://github.com/Denkishi/ssbu-recomp)**.
 Thank you to **Denkishi**, who created it and wrote most of it, and to its contributors: **Stephen Jayakar**,
 **xtlg511**, **v1Ta44**, **Frank Fly**, **Victor Navega** and **jfb112697**. The full history of their work is kept in
 this repository's git history. Details, and the open-source projects both projects build on, are in
