@@ -30,7 +30,7 @@ namespace Arena
 
     public static class Core
     {
-        public const string DefaultServer = "germany.ssbuarena.com:39010";      // our lobby (tools/net/rb_lobby.c, relay only)
+        public const string DefaultServer = "eu-germany.ssbuarena.com:39010";      // our lobby (tools/net/rb_lobby.c, relay only)
         public const string Site = "https://ssbuarena.com/";
 
         public static readonly string Build = AppDomain.CurrentDomain.BaseDirectory.TrimEnd('\\');
