@@ -731,8 +731,14 @@ static void hid_SetSupportedNpadIdType(Ctx *c) {            /* (const NpadIdType
 }
 /* The style a connected controller is shown in: the adapter's GameCube controllers as NpadStyleGc when the game asked for that
  * style (and controllers.ini gamecube_style is native, the default), every other controller as a Pro Controller. */
+/* (R3 lwr) a Local Wireless room rollback match: ports 1 / 2 are shown in the kind (GameCube or Pro) of each player's OWN
+ * controller on its own PC (sent in the room handshake, debug_mode.c), so both PCs pick the same control set of each player */
+static int g_lwr_style_on, g_lwr_gc[2];
+void nnhid_lwr_styles(int on, int gc0, int gc1) { g_lwr_gc[0] = gc0; g_lwr_gc[1] = gc1; g_lwr_style_on = on; }
+int nnhid_native_gc0(void) { return sdl_on() && nnpad_is_gc(0) && nnpad_gc_native() && (g_supported_styles & STYLE_GC); }
 static uint32_t npad_style(uint32_t id) {
     if (!player_connected(id)) return 0;
+    if (g_lwr_style_on && id < 2) return g_lwr_gc[id] && (g_supported_styles & STYLE_GC) ? STYLE_GC : STYLE_FULLKEY;
     if (sdl_on() && nnpad_is_gc((int)id) && nnpad_gc_native() && (g_supported_styles & STYLE_GC)) return STYLE_GC;
     return STYLE_FULLKEY;
 }

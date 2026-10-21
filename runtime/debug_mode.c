@@ -316,8 +316,8 @@ static uint64_t prof_ptr(uint32_t prof) {
  * Joy-Cons / handheld, + 0x4b one Joy-Con; kind = [[0x7105338860 + 8 * slot] + 0x10] + 0x9c, if [0x71053388b0] + 8). In a room
  * match each game sends its own player's 0x2b bytes + that byte; both games then hold both players' own controls. */
 #define LWR_CTL 0x2b
-static uint8_t g_lwr_ctl[2][LWR_CTL + 1]; static int g_lwr_ctl_ok, g_lwr_ctl_applied;
-static void lwr_own_controls(uint64_t st, uint8_t out[LWR_CTL + 1]) {
+static uint8_t g_lwr_ctl[2][LWR_CTL + 2];      /* + LWR_CTL: the option byte; + LWR_CTL + 1: 1 = the player's own controller is a GameCube one */ static int g_lwr_ctl_ok, g_lwr_ctl_applied;
+static void lwr_own_controls(uint64_t st, uint8_t out[LWR_CTL + 2]) {
     uint32_t prof = rd32(st + 0x214), slot = rd32(st + 0x210);
     uint64_t p = rd8(st + 0x450) && rd32(st + 0x78) == 0 ? prof_ptr(prof) : GA(0x7105313518ULL);
     for (int k = 0; k < LWR_CTL; k++) out[k] = rd8(p + 0x24 + (uint64_t)k);
@@ -329,6 +329,8 @@ static void lwr_own_controls(uint64_t st, uint8_t out[LWR_CTL + 1]) {
         if (ctl && kind < 7 && ((0x66u >> kind) & 1)) opt = rd8(p + 0x3f); else if (ctl && kind - 3 < 2) opt = rd8(p + 0x4b); else if (ctl && kind == 7) opt = rd8(p + 0x2f);
     }
     out[LWR_CTL] = opt;
+    {   int nnhid_native_gc0(void); const char *e = getenv("SSBU_RB_NET_TEST_GC");      /* (TEST ONLY) =1: this game's player's controller taken as a GameCube one */
+        out[LWR_CTL + 1] = (uint8_t)(nnhid_native_gc0() || (e && e[0] == '1')); }
     {   const char *e = getenv("SSBU_RB_NET_TEST_CTL");    /* (TEST ONLY) =<0x2b bytes in hex>: this game's own player's controls, as if its profile held them */
         if (e && strlen(e) >= 2 * LWR_CTL) { for (int k = 0; k < LWR_CTL; k++) { unsigned v = 0; sscanf(e + 2 * k, "%2x", &v); out[k] = (uint8_t)v; }
             printf("[rbnet] room match: TEST: this game's player's controls from SSBU_RB_NET_TEST_CTL\n"); fflush(stdout); } }
@@ -429,7 +431,7 @@ static void hs_apply(uint64_t st, int idx, uint32_t type_was) {
          * maker's own), player 2's sent by the joiner at this record (rb_net.c rbn_room_layout). */
         static int norm = -1; if (norm < 0) { const char *e = getenv("SSBU_RB_NET_ROOM_NORM"); norm = e && *e ? atoi(e) : 1; }
         if (norm) {
-            int rbn_local_player(void); int rbn_room_layout(const uint16_t mine[11], int has, const uint8_t mine_ctl[LWR_CTL + 1], uint16_t other[11], int *other_has, uint8_t other_ctl[LWR_CTL + 1]);
+            int rbn_local_player(void); int rbn_room_layout(const uint16_t mine[11], int has, const uint8_t mine_ctl[LWR_CTL + 2], uint16_t other[11], int *other_has, uint8_t other_ctl[LWR_CTL + 2]);
             int local = rbn_local_player(), has = 0; uint16_t lay[11]; memset(lay, 0, sizeof lay);
             if (idx == 0) { g_lwr_ctl_ok = 0; g_lwr_ctl_applied = 0; }
             if (idx == local) lwr_own_controls(st, g_lwr_ctl[idx]);      /* (before the state is changed below: its own profile and controller) */
@@ -439,6 +441,9 @@ static void hs_apply(uint64_t st, int idx, uint32_t type_was) {
                 if (local == 1) own_has = hs_layout(st, own); else { own_has = g_hs_m.has_layout[0]; memcpy(own, g_hs_m.layout[0], sizeof own); }
                 int got = rbn_room_layout(own, own_has, g_lwr_ctl[local], other, &other_has, g_lwr_ctl[1 - local]);
                 g_lwr_ctl_ok = got;
+                {   void nnhid_lwr_styles(int on, int gc0, int gc1);       /* (R3 lwr) port i in player i's own controller kind on both PCs */
+                    if (got) { nnhid_lwr_styles(1, g_lwr_ctl[0][LWR_CTL + 1], g_lwr_ctl[1][LWR_CTL + 1]);
+                        printf("[rbnet] room match: controller kinds: player 1 %s, player 2 %s (ports 1 / 2 shown so on this PC)\n", g_lwr_ctl[0][LWR_CTL + 1] ? "GameCube" : "Pro", g_lwr_ctl[1][LWR_CTL + 1] ? "GameCube" : "Pro"); } }
                 if (local == 1) { has = own_has; memcpy(lay, own, sizeof lay); } else if (got) { has = other_has; memcpy(lay, other, sizeof lay); }
             }
             if (!has) { uint64_t p = GA(0x7105313518ULL); for (int k = 0; k < 11; k++) lay[k] = rd16(p + 0xc + 2ull * k); }      /* (the game's default profile) */
@@ -514,6 +519,7 @@ static void match_player_hook(Ctx *c, void *user) {
         if (g_dm_hazards >= 0) wr8(GA(0x7105309985ULL), (uint8_t)g_dm_hazards);
         if (g_dm.items >= 0) wr32(MELEE_INFO + 0x54, g_dm.items ? 2u : 0u);
     }
+    if (idx == 0) { void nnhid_lwr_styles(int on, int gc0, int gc1); nnhid_lwr_styles(0, 0, 0); }      /* (R3 lwr) a new set-up: the ports in their own kinds again */
     if (idx == 0) { void rbn_set_setup_waiting(int waiting); rbn_set_setup_waiting(c->x[30] == GA(0x71017911dcULL)); }      /* (R3 lwr) a Local Wireless room's waiting-stage fight: built from its own set-up (runs lwres2 / lwres3: return address 0x71017911dc; the room's match and the select screens: 0x710178f498) */
     if (g_hs_wanted) hs_apply(st, idx, type_was);       /* R3: the match both online games agreed (rb_net.c handshake) */
     if (idx == 1) g_dm_state1_ok = safe_read(st, g_dm_state1, sizeof g_dm_state1);

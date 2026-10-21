@@ -170,7 +170,7 @@ static int g_setup_waiting, g_hs_lwr;
 void rbn_set_setup_waiting(int waiting) { g_setup_waiting = waiting; }
 int rbn_room_rollback(void) { return g_hs_lwr; }       /* (R3 lwr) the last agreed match is a Local Wireless room's match played with rollback */
 static int rbn_peer_heard_ms(void);                     /* (R3 lwr) ms since the other game's rollback session was last heard, -1 = never */
-static volatile LONG g_lay_have_mine, g_lay_have_peer; static uint8_t g_lay_peer_has; static uint16_t g_lay_peer[11]; static uint8_t g_lay_peer_ctl[0x2c];
+static volatile LONG g_lay_have_mine, g_lay_have_peer; static uint8_t g_lay_peer_has; static uint16_t g_lay_peer[11]; static uint8_t g_lay_peer_ctl[0x2d];
 static RbhMsg g_lay_mine;
 const char *rbn_hs_why(void) { return g_hs_why; }      /* (R3 pub1) why the last handshake failed (rb_rollback.c's notice) */
 static void rtt_reset(void);                            /* (R3 net3) a new opponent: its round trip is measured afresh */
@@ -191,10 +191,10 @@ static void hs_refuse(uint32_t echo, const char *why) {
  * player's layout (*other_has: it had one); 0 = not received (each game keeps what it has: the match may differ, logged). */
 /* (owner 2026-10-22) the message also carries the player's own name-tag controls: 0x2b bytes (profile + 0x24 .. + 0x4e) and the
  * option byte of its controller kind (debug_mode.c lwr_own_controls), in RbhMatch.ctx_hist (not used by a LAYOUT otherwise). */
-int rbn_room_layout(const uint16_t mine[11], int has, const uint8_t mine_ctl[0x2c], uint16_t other[11], int *other_has, uint8_t other_ctl[0x2c]) {
+int rbn_room_layout(const uint16_t mine[11], int has, const uint8_t mine_ctl[0x2d], uint16_t other[11], int *other_has, uint8_t other_ctl[0x2d]) {
     AcquireSRWLockExclusive(&g_hs_lock);
     hs_head(&g_lay_mine, RBH_LAYOUT); g_lay_mine.nonce = g_match_id; memcpy(g_lay_mine.m.layout[0], mine, sizeof g_lay_mine.m.layout[0]); g_lay_mine.m.has_layout[0] = (uint8_t)(has != 0);
-    memcpy(g_lay_mine.m.ctx_hist, mine_ctl, 0x2c);
+    memcpy(g_lay_mine.m.ctx_hist, mine_ctl, 0x2d);      /* (+ 0x2c: 1 = a GameCube controller) */
     g_lay_have_mine = 1;
     RbhMsg ans = g_lay_mine; ans.echo = 1;
     ReleaseSRWLockExclusive(&g_hs_lock);
