@@ -1054,13 +1054,19 @@ def install_launcher(cx):
 
 
 def copy_logo(cx):
-    """media/opensmash.ico beside the exe: display.c loads it as the window's and taskbar's icon; and the loading
-    animation's pictures (media/loading_kong.png, loading_kong_back.png, loading_arm.png: runtime/loading_anim.c paints
-    them in the window until the game's first frame)."""
-    for name in ('opensmash.ico', 'loading_kong.png', 'loading_kong_back.png', 'loading_arm.png'):
+    """media/arena.ico beside the exe: display.c loads it as the window's and taskbar's icon; and the loading
+    animation atlas (media/loading_kirby.png: runtime/loading_anim.c paints it until the game's first frame)."""
+    for name in ('arena.ico', 'loading_kirby.png'):
         src = os.path.join(REPO, 'media', name)
         if os.path.isfile(src):
             shutil.copy2(src, os.path.join(cx.work, name))
+    # the Barlow fonts (SIL OFL 1.1) of the settings screen (runtime/menu.cpp looks in arena_fonts beside the exe)
+    fonts = os.path.join(REPO, 'tools', 'launcher', 'arena', 'Assets', 'Fonts')
+    if os.path.isdir(fonts):
+        os.makedirs(os.path.join(cx.work, 'arena_fonts'), exist_ok=True)
+        for name in ('Barlow-Medium.ttf', 'BarlowCondensed-ExtraBoldItalic.ttf', 'OFL.txt'):
+            if os.path.isfile(os.path.join(fonts, name)):
+                shutil.copy2(os.path.join(fonts, name), os.path.join(cx.work, 'arena_fonts', name))
 
 
 def copy_ffmpeg(cx):

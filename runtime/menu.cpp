@@ -22,6 +22,7 @@
  * pages and of the stats overlay with the menu closed, read back from the swapchain image into BMPs; "menu: test:" lines). */
 #include <windows.h>
 #include <stdio.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -476,7 +477,7 @@ static long long g_closed_at, g_frame;
 static char g_pads[1024];
 static ULONGLONG g_pads_at;
 enum { SEC_DISPLAY, SEC_GRAPHICS, SEC_AUDIO, SEC_CONTROLS, SEC_EXPERIMENTAL, SEC_ROOMS, SEC_DLC, SEC_LANG, SEC_LOG, SEC_ABOUT, SEC_N };
-static const char *const k_sections[SEC_N] = {"Display", "Graphics", "Audio", "Controls", "Experimental", "Online", "Add-on content", "Language", "Log", "About"};
+static const char *const k_sections[SEC_N] = {"Display", "Graphics", "Audio", "Controls", "Online & netplay", "Online rooms", "Add-on content", "Language", "Log", "About"};
 
 static ImGuiKey vk_key(int vk) {
     if (vk >= 'A' && vk <= 'Z') return (ImGuiKey)(ImGuiKey_A + (vk - 'A'));
@@ -490,6 +491,89 @@ static ImGuiKey vk_key(int vk) {
     case VK_SHIFT: return ImGuiKey_LeftShift; case VK_CONTROL: return ImGuiKey_LeftCtrl; case VK_MENU: return ImGuiKey_LeftAlt;
     }
     return ImGuiKey_None;
+}
+
+/* ------------------------------------------------------------------ SSBU Arena's look (the launcher's, tools/launcher/arena):
+ * the palette of ssbuarena.com, the Barlow fonts (SIL OFL 1.1), the settings as one fixed screen. The fonts are looked for in
+ * arena_fonts\ beside the exe (scripts/setup.py copies them there), then in the launcher's sources of this tree; without them
+ * the system font stays and the titles use it too. */
+static ImFont *g_font_title;                       /* Barlow Condensed ExtraBold Italic, about twice the body size */
+static ImVec4 hexc(unsigned rgb, float a = 1.0f) { return ImVec4(((rgb >> 16) & 255) / 255.0f, ((rgb >> 8) & 255) / 255.0f, (rgb & 255) / 255.0f, a); }
+#define AR_BG 0x0B1018
+#define AR_CARD 0x0F1620
+#define AR_FIELD 0x0A1018
+#define AR_TEXT 0xEEF3F7
+#define AR_MUTED 0x91A0B2
+#define AR_ACCENT 0x65C7FF
+#define AR_LINE 0x233041
+static int arena_font_path(const char *name, char *out, size_t n) {
+    static const char *const dirs[] = {"arena_fonts", "..\\..\\tools\\launcher\\arena\\Assets\\Fonts", "../../tools/launcher/arena/Assets/Fonts"};
+    char exe[MAX_PATH] = "";
+#ifdef _WIN32
+    DWORD k = GetModuleFileNameA(NULL, exe, MAX_PATH);
+    while (k && exe[k - 1] != '\\' && exe[k - 1] != '/') k--;
+    exe[k] = 0;
+#endif
+    for (size_t i = 0; i < sizeof dirs / sizeof dirs[0]; i++) {
+        snprintf(out, n, "%s%s/%s", exe, dirs[i], name);
+        FILE *fp = fopen(out, "rb");
+        if (fp) { fclose(fp); return 1; }
+    }
+    return 0;
+}
+static void arena_fonts(ImGuiIO &io, float px, ImFont **body, char *used, size_t n) {
+    char p[MAX_PATH + 64];
+    if (arena_font_path("Barlow-Medium.ttf", p, sizeof p)) {
+        io.Fonts->Clear();                          /* Barlow for everything; the system font above was only the fallback */
+        ImFontConfig c; c.OversampleH = 2;
+        ImFont *b = io.Fonts->AddFontFromFileTTF(p, px * 1.05f, &c, io.Fonts->GetGlyphRangesDefault());
+        if (b) { *body = b; snprintf(used, n, "%s", p); }
+        else { ImFontConfig d; d.SizePixels = px; io.Fonts->AddFontDefault(&d); *body = NULL; }
+    }
+    if (arena_font_path("BarlowCondensed-ExtraBoldItalic.ttf", p, sizeof p)) g_font_title = io.Fonts->AddFontFromFileTTF(p, px * 2.2f);
+}
+static void arena_style(ImGuiStyle &st) {
+    ImVec4 *c = st.Colors;
+    c[ImGuiCol_Text] = hexc(AR_TEXT); c[ImGuiCol_TextDisabled] = hexc(AR_MUTED);
+    c[ImGuiCol_WindowBg] = hexc(AR_BG, 1.0f); c[ImGuiCol_ChildBg] = hexc(AR_CARD, 0.0f); c[ImGuiCol_PopupBg] = hexc(0x111A26, 0.99f);
+    c[ImGuiCol_Border] = hexc(AR_LINE); c[ImGuiCol_BorderShadow] = hexc(0, 0.0f);
+    c[ImGuiCol_FrameBg] = hexc(AR_FIELD); c[ImGuiCol_FrameBgHovered] = hexc(0x142030); c[ImGuiCol_FrameBgActive] = hexc(0x1C2C3F);
+    c[ImGuiCol_TitleBg] = c[ImGuiCol_TitleBgActive] = c[ImGuiCol_TitleBgCollapsed] = c[ImGuiCol_MenuBarBg] = hexc(0x080C12);
+    c[ImGuiCol_ScrollbarBg] = hexc(0, 0.0f); c[ImGuiCol_ScrollbarGrab] = hexc(0x2A3A4D); c[ImGuiCol_ScrollbarGrabHovered] = c[ImGuiCol_ScrollbarGrabActive] = hexc(0x3B5A78);
+    c[ImGuiCol_CheckMark] = hexc(AR_ACCENT); c[ImGuiCol_SliderGrab] = hexc(AR_ACCENT); c[ImGuiCol_SliderGrabActive] = hexc(0x8AD5FF);
+    c[ImGuiCol_Button] = hexc(0x142030); c[ImGuiCol_ButtonHovered] = hexc(AR_ACCENT, 0.22f); c[ImGuiCol_ButtonActive] = hexc(AR_ACCENT, 0.38f);
+    c[ImGuiCol_Header] = hexc(AR_ACCENT, 0.12f); c[ImGuiCol_HeaderHovered] = hexc(AR_ACCENT, 0.12f); c[ImGuiCol_HeaderActive] = hexc(AR_ACCENT, 0.20f);
+    c[ImGuiCol_Separator] = hexc(AR_LINE); c[ImGuiCol_SeparatorHovered] = c[ImGuiCol_SeparatorActive] = hexc(AR_ACCENT);
+    c[ImGuiCol_Tab] = hexc(0x142030); c[ImGuiCol_TabHovered] = hexc(AR_ACCENT, 0.24f); c[ImGuiCol_TabSelected] = hexc(AR_ACCENT, 0.34f);
+    c[ImGuiCol_PlotLines] = c[ImGuiCol_PlotHistogram] = hexc(AR_ACCENT);
+    c[ImGuiCol_TextSelectedBg] = hexc(AR_ACCENT, 0.35f); c[ImGuiCol_NavCursor] = hexc(AR_ACCENT); c[ImGuiCol_ModalWindowDimBg] = hexc(0x050810, 0.7f);
+    st.WindowRounding = 0.0f; st.ChildRounding = 6.0f; st.FrameRounding = 4.0f; st.PopupRounding = 4.0f; st.GrabRounding = 4.0f; st.ScrollbarRounding = 4.0f;
+    st.WindowBorderSize = 0.0f; st.ChildBorderSize = 1.0f; st.FrameBorderSize = 1.0f; st.PopupBorderSize = 1.0f;
+    st.FramePadding = ImVec2(8.0f, 5.0f); st.ItemSpacing = ImVec2(10.0f, 8.0f); st.ScrollbarSize = 10.0f; st.GrabMinSize = 12.0f;
+}
+/* the brand mark (ssbuarena.com: viewBox 0 0 56 48, three convex parts) at (x, y), h pixels high */
+static void arena_mark(ImDrawList *dl, float x, float y, float h, ImU32 col) {
+    static const float p[3][4][2] = {{{22, 3}, {33, 3}, {11, 45}, {0, 45}}, {{35, 9}, {54, 45}, {42, 45}, {29, 20}}, {{22, 31}, {32, 31}, {37, 40}, {17, 40}}};
+    float s = h / 48.0f;
+    for (int i = 0; i < 3; i++) {
+        ImVec2 v[4];
+        for (int k = 0; k < 4; k++) v[k] = ImVec2(x + p[i][k][0] * s, y + p[i][k][1] * s);
+        dl->AddConvexPolyFilled(v, 4, col);
+    }
+}
+/* a controller hint at the top right: a round button glyph and its word */
+static float arena_hint(ImDrawList *dl, float right, float y, const char *glyph, const char *word) {
+    ImFont *f = ImGui::GetFont();
+    float fs = ImGui::GetFontSize(), r = fs * 0.62f;
+    ImVec2 wsz = f->CalcTextSizeA(fs, FLT_MAX, 0.0f, word), gsz = f->CalcTextSizeA(fs * 0.72f, FLT_MAX, 0.0f, glyph);
+    float gw = gsz.x + fs * 0.6f > 2 * r ? gsz.x + fs * 0.6f : 2 * r;
+    float x = right - wsz.x - gw - fs * 0.45f;
+    ImVec2 c0(x, y + fs * 0.5f - r), c1(x + gw, y + fs * 0.5f + r);
+    dl->AddRectFilled(c0, c1, ImGui::GetColorU32(hexc(0x1E2A38)), r);
+    dl->AddRect(c0, c1, ImGui::GetColorU32(hexc(AR_MUTED, 0.6f)), r);
+    dl->AddText(f, fs * 0.72f, ImVec2(x + (gw - gsz.x) * 0.5f, y + fs * 0.5f - gsz.y * 0.5f), ImGui::GetColorU32(hexc(AR_TEXT)), glyph);
+    dl->AddText(ImVec2(x + gw + fs * 0.45f, y), ImGui::GetColorU32(hexc(0xC9D3DD)), word);
+    return x - fs * 1.6f;
 }
 
 static void im_init(int h) {
@@ -530,6 +614,8 @@ static void im_init(int h) {
     ImGui::GetPlatformIO().Platform_GetClipboardTextFn = clip_get;
 #endif
     if (!f) { ImFontConfig c; c.SizePixels = px; io.Fonts->AddFontDefault(&c); }
+    arena_fonts(io, px, &f, font, sizeof font);
+    arena_style(st);
     st.ScaleAllSizes(px / 15.0f);
     int bpp = 0;
     io.Fonts->GetTexDataAsRGBA32(&g_font_px, &g_font_w, &g_font_h, &bpp);
@@ -550,13 +636,45 @@ static void pad_feed(ImGuiIO &io, uint64_t b) {
     for (size_t i = 0; i < sizeof m / sizeof m[0]; i++) io.AddKeyEvent(m[i].k, (b & BIT(m[i].bit)) != 0);
 }
 
+/* after a field: when it takes effect, as a small chip (LIVE: at once; NEXT START; RESTART NEEDED: changed, used from the
+ * next start) */
 static void tag(int restart, int changed) {
-    ImGui::SameLine();
-    if (!restart) ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.45f, 1.0f), "[live]");
-    else ImGui::TextColored(changed ? ImVec4(1.0f, 0.75f, 0.2f, 1.0f) : ImVec4(0.6f, 0.6f, 0.6f, 1.0f), changed ? "[restart: changed]" : "[restart]");
+    const char *t = !restart ? "LIVE" : changed ? "RESTART NEEDED" : "NEXT START";
+    ImVec4 col = !restart ? hexc(0x3DDC97) : changed ? hexc(0xFFC857) : hexc(AR_MUTED);
+    ImGui::SameLine(0, ImGui::GetFontSize() * 0.7f);
+    float fs = ImGui::GetFontSize() * 0.66f;
+    ImVec2 sz = ImGui::GetFont()->CalcTextSizeA(fs, FLT_MAX, 0.0f, t), p = ImGui::GetCursorScreenPos();
+    float h = ImGui::GetFrameHeight(), padx = fs * 0.6f, ch = fs * 1.55f, y = p.y + (h - ch) * 0.5f;
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(ImVec2(p.x, y), ImVec2(p.x + sz.x + 2 * padx, y + ch), ImGui::GetColorU32(ImVec4(col.x, col.y, col.z, 0.14f)), ch * 0.5f);
+    dl->AddText(ImGui::GetFont(), fs, ImVec2(p.x + padx, y + (ch - sz.y) * 0.5f), ImGui::GetColorU32(col), t);
+    ImGui::Dummy(ImVec2(sz.x + 2 * padx, h));
 }
-static bool combo(const char *label, int *v, const char *const *names, int n) { return ImGui::Combo(label, v, names, n); }
-static void help(const char *s) { ImGui::PushTextWrapPos(0.0f); ImGui::TextDisabled("%s", s); ImGui::PopTextWrapPos(); }
+/* a field's name above it, small capitals in the muted colour, as the launcher's FieldLabel; a little air above */
+static void flabel(const char *label) {
+    char up[96];
+    int i = 0;
+    for (; label[i] && i < 95; i++) up[i] = label[i] >= 'a' && label[i] <= 'z' ? (char)(label[i] - 32) : label[i];
+    up[i] = 0;
+    ImGui::Dummy(ImVec2(0, ImGui::GetFontSize() * 0.35f));
+    ImGui::SetWindowFontScale(0.74f);
+    ImGui::TextColored(hexc(AR_MUTED), "%s", up);
+    ImGui::SetWindowFontScale(1.0f);
+}
+static bool combo(const char *label, int *v, const char *const *names, int n) {
+    char id[96]; snprintf(id, sizeof id, "##%s", label);
+    flabel(label);
+    return ImGui::Combo(id, v, names, n);
+}
+/* a short muted line under a field, a little smaller (Arena: the field is the thing, the note is secondary) */
+static void note(const char *fmt, ...) {
+    va_list ap; va_start(ap, fmt);
+    ImGui::SetWindowFontScale(0.82f); ImGui::PushTextWrapPos(0.0f);
+    ImGui::TextColoredV(ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled), fmt, ap);
+    ImGui::PopTextWrapPos(); ImGui::SetWindowFontScale(1.0f);
+    va_end(ap);
+}
+static void help(const char *s) { ImGui::SetWindowFontScale(0.82f); ImGui::PushTextWrapPos(0.0f); ImGui::TextDisabled("%s", s); ImGui::PopTextWrapPos(); ImGui::SetWindowFontScale(1.0f); }
 
 static void sec_display(int cw, int ch) {
     int wm = display_window_mode();
@@ -576,7 +694,7 @@ static void sec_display(int cw, int ch) {
             help("The game runs at 60 frames per second. Set the screen to 120 Hz (or 60 Hz) in the system's display settings, "
                  "and the game locks to it: every frame is shown equally long. Or turn on G-Sync / FreeSync (VRR) and play in fullscreen.");
 #endif
-        } else if (hz > 30) ImGui::TextDisabled("Screen %.0f Hz: locked, %d refresh%s per game frame.", hz, k, k > 1 ? "es" : "");
+        } else if (hz > 30) note("Screen %.0f Hz: locked, %d refresh%s per game frame.", hz, k, k > 1 ? "es" : "");
     }
 #ifdef _WIN32
     help("F11 also switches between the window and borderless at any time. Fullscreen = borderless and always on top (no display mode change).");
@@ -592,7 +710,7 @@ static void sec_display(int cw, int ch) {
         snprintf(v, sizeof v, "%d", k_sizes[sz][1]); ini("height", v);
     }
     tag(0, 0);
-    ImGui::TextDisabled("now %d x %d (the windowed size is kept for later when borderless)", cw, ch);
+    note("now %d x %d (the windowed size is kept for later when borderless)", cw, ch);
     ImGui::Separator();
     if (combo("Vsync / pacing", &S.vsync, k_vsync, N(k_vsync))) ini("vsync", k_vsync[S.vsync]);
     tag(1, S.vsync != S0.vsync);
@@ -601,21 +719,22 @@ static void sec_display(int cw, int ch) {
     tag(1, S.latency != S0.latency);
     if (combo("Renderer", &S.renderer, k_renderer, N(k_renderer))) ini("renderer", k_renderer[S.renderer]);
     tag(1, S.renderer != S0.renderer);
-    ImGui::InputText("GPU", S.gpu, sizeof S.gpu);
+    flabel("GPU"); ImGui::InputText("##GPU", S.gpu, sizeof S.gpu);
     if (ImGui::IsItemDeactivatedAfterEdit()) ini("gpu", S.gpu[0] ? S.gpu : "auto");
     tag(1, strcmp(S.gpu, S0.gpu) != 0);
-    ImGui::TextDisabled("in use: %s   (auto, a number of the list in the log, or a part of the name)", nvn_vk_device_name());
+    note("in use: %s   (auto, a number of the list in the log, or a part of the name)", nvn_vk_device_name());
 }
 static void sec_graphics(void) {
-    if (ImGui::SliderFloat("Resolution scale", &S.scale, 0.25f, 2.0f, "%.2f")) S.scale = floorf(S.scale * 20.0f + 0.5f) / 20.0f;
+    flabel("Resolution scale");
+    if (ImGui::SliderFloat("##Resolution scale", &S.scale, 0.25f, 2.0f, "%.2f")) S.scale = floorf(S.scale * 20.0f + 0.5f) / 20.0f;
     if (ImGui::IsItemDeactivatedAfterEdit()) { char v[16]; snprintf(v, sizeof v, "%.2f", S.scale); ini("resolution_scale", v); }
     tag(1, fabsf(S.scale - S0.scale) > 0.001f);
-    ImGui::TextDisabled("1.00 = 1920 x 1080 inside; 0.50 = 960 x 540 (weak GPU); above 1 = supersampling (strong GPU)");
+    note("1.00 = 1920 x 1080 inside; 0.50 = 960 x 540 (weak GPU); above 1 = supersampling (strong GPU)");
     if (combo("Anisotropic filtering", &S.aniso, k_aniso, N(k_aniso))) ini("anisotropic_filtering", k_aniso[S.aniso]);
     tag(1, S.aniso != S0.aniso);
     if (combo("Profile", &S.profile, k_profile, N(k_profile))) ini("profile", k_profile[S.profile]);
     tag(1, S.profile != S0.profile);
-    ImGui::TextDisabled("low = scale 0.50, filtering game, vsync clock (those three keys are then not used)");
+    note("low = scale 0.50, filtering game, vsync clock (those three keys are then not used)");
     if (combo("Shader wait", &S.wait, k_wait, N(k_wait))) ini("shader_wait", k_wait[S.wait]);
     tag(1, S.wait != S0.wait);
     if (combo("Shader preparation", &S.prepare, k_prepare, N(k_prepare))) ini("shader_prepare", k_prepare[S.prepare]);
@@ -627,18 +746,19 @@ static void sec_graphics(void) {
     bool ov = S.overlay != 0;
     if (ImGui::Checkbox("Frame time overlay", &ov)) apply_overlay(ov);
     tag(0, 0);
-    ImGui::TextDisabled("in the picture (top left), in the window title and as a 'frame-time:' log line every second");
+    note("in the picture (top left), in the window title and as a 'frame-time:' log line every second");
     bool so = S.stats != 0;
     if (ImGui::Checkbox("Stats overlay (F2)", &so)) apply_stats(so);
     tag(0, 0);
-    ImGui::TextDisabled("top right: fps, frame time, online state, ping, input delay, rollback, run-ahead");
+    note("top right: fps, frame time, online state, ping, input delay, rollback, run-ahead");
 }
 static void sec_audio(void) {
     int cur = nnaudio_volume();
     int v = S.volume < 0 ? (cur >= 0 ? cur : 100) : S.volume;
     const bool dis_1 = cur < 0;
     if (dis_1) ImGui::BeginDisabled();
-    if (ImGui::SliderInt("Volume", &v, 0, 100, "%d %%")) { S.volume = v; nnaudio_set_volume(v); }
+    flabel("Volume");
+    if (ImGui::SliderInt("##Volume", &v, 0, 100, "%d %%")) { S.volume = v; nnaudio_set_volume(v); }
     if (ImGui::IsItemDeactivatedAfterEdit()) { char t[8]; snprintf(t, sizeof t, "%d", S.volume); ini("volume", t); }
     if (dis_1) ImGui::EndDisabled();
     tag(0, 0);
@@ -1010,10 +1130,11 @@ static bool onoff(const char *id, bool on, bool enabled) {     /* a big ON / OFF
     snprintf(l, sizeof l, "%s##%s", on ? "ON" : "OFF", id);
     const bool dis_5 = !enabled;
     if (dis_5) ImGui::BeginDisabled();
-    ImGui::PushStyleColor(ImGuiCol_Button, on ? ImVec4(0.20f, 0.60f, 0.25f, 1) : ImVec4(0.35f, 0.35f, 0.38f, 1));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, on ? ImVec4(0.25f, 0.70f, 0.30f, 1) : ImVec4(0.45f, 0.45f, 0.48f, 1));
+    ImGui::PushStyleColor(ImGuiCol_Button, on ? hexc(AR_ACCENT) : hexc(0x1E2A38));      /* Arena: the launcher's switch colours */
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, on ? hexc(0x8AD5FF) : hexc(0x2A3A4D));
+    ImGui::PushStyleColor(ImGuiCol_Text, on ? hexc(0x06121D) : hexc(AR_MUTED));
     bool c = ImGui::Button(l, ImVec2(ImGui::GetFontSize() * 4.0f, 0));
-    ImGui::PopStyleColor(2);
+    ImGui::PopStyleColor(3);
     if (dis_5) ImGui::EndDisabled();
     return c && enabled;
 }
@@ -1036,7 +1157,7 @@ static void sec_experimental(void) {
     if (!pname_read) { pname_read = 1; ini_read("player_name", pname, sizeof pname); memcpy(pname0, pname, sizeof pname); }
     if (InterlockedExchange(&g_osk_name_done, 0) == 1) { snprintf(pname, sizeof pname, "%s", g_osk_name); ini("player_name", pname); }
     ImGui::SetNextItemWidth(260);
-    ImGui::InputTextWithHint("Your name", "the name other players see", pname, sizeof pname);
+    flabel("Your name"); ImGui::InputTextWithHint("##Your name", "the name other players see", pname, sizeof pname);
     if (ImGui::IsItemDeactivatedAfterEdit()) ini("player_name", pname);
     tag(1, strcmp(pname, pname0) != 0);
     ImGui::SameLine();
@@ -1127,7 +1248,7 @@ static void sec_online(void) {
         tag(1, O.upnp != O0.upnp);
     }
     if (O.mode == 3) {
-        ImGui::InputTextWithHint("Room code", "1A2B3-C4D5E", O.join, sizeof O.join, ImGuiInputTextFlags_CharsUppercase);
+        flabel("Room code"); ImGui::InputTextWithHint("##Room code", "1A2B3-C4D5E", O.join, sizeof O.join, ImGuiInputTextFlags_CharsUppercase);
         if (ImGui::IsItemDeactivatedAfterEdit()) changed = 1;
         tag(1, strcmp(O.join, O0.join) != 0);
         ImGui::SameLine();
@@ -1142,7 +1263,7 @@ static void sec_online(void) {
         if (O0.mode == 3 && net_room_code()[0]) ImGui::TextDisabled("Your own code (only if the host's router blocks you; the host sets it as online_peer): %s", net_room_code());
     }
     if (O.mode == 4) {
-        ImGui::InputTextWithHint("Lobby server", "host:port", O.server, sizeof O.server);
+        flabel("Lobby server"); ImGui::InputTextWithHint("##Lobby server", "host:port", O.server, sizeof O.server);
         if (ImGui::IsItemDeactivatedAfterEdit()) changed = 1;
         tag(1, strcmp(O.server, O0.server) != 0);
         if (strcmp(O.server, ONLINE_DEFAULT_LOBBY) && ImGui::SmallButton("Use the public lobby")) { snprintf(O.server, sizeof O.server, "%s", ONLINE_DEFAULT_LOBBY); changed = 1; }
@@ -1432,7 +1553,7 @@ static void sec_rooms(void) {
     static char pop_title[96], pop_text[512];
     int state = 0, n = net_rooms_get(rooms, 32, &state);
     if (!state) {
-        help("Online play is off: Experimental > Online play.");
+        help("Online play is off: Online & netplay > Online play.");
         return;
     }
     {   const char *b = net_build_id(), *plus = strchr(b, '+'), *end = plus ? plus : b + strlen(b), *d = end;
@@ -1525,24 +1646,74 @@ static void draw_overlay(void) {
     ImGui::End();
 }
 
-static void draw_menu(int cw, int ch) {
-    if (ImGui::BeginMainMenuBar()) {
-        ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.2f, 1.0f), "SSBU native");
-        for (int i = 0; i < SEC_N; i++) if (ImGui::MenuItem(k_sections[i], NULL, g_section == i)) g_section = i;
-        ImGui::TextDisabled("   F1 / Home: close   L / R: section");
-        ImGui::EndMainMenuBar();
-    }
+/* The settings as SSBU Arena's screen: the whole window, nothing to move or resize; the sections on the left (L / R, or the
+ * d-pad and A on the list), the chosen one on a card on the right, the controller hints at the top. B goes back (menu_frame). */
+static int g_back_blocked;                         /* last frame: an item in use or a popup open: B is theirs, it does not close */
+static void draw_arena(int cw, int ch) {
     ImGuiIO &io = ImGui::GetIO();
-    ImVec2 size(io.DisplaySize.x * 0.62f, io.DisplaySize.y * 0.78f);
-    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.53f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(size, ImGuiCond_Always);
-    char title[64];
-    snprintf(title, sizeof title, "%s###settings", k_sections[g_section]);
+    const float W = io.DisplaySize.x, H = io.DisplaySize.y, fs = ImGui::GetFontSize();
+    const float padx = W * 0.045f, pady = H * 0.05f;
+    ImGui::SetNextWindowPos(ImVec2(0, 0), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(io.DisplaySize, ImGuiCond_Always);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(padx, pady));
     if (g_section_req >= 0) ImGui::SetNextWindowFocus();
-    ImGui::Begin(title, NULL, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings);
-    g_section_req = -1;
-    ImGui::BeginChild("body", ImVec2(0, -ImGui::GetFrameHeightWithSpacing() * (restart_pending() ? 2.2f : 1.2f)), ImGuiChildFlags_NavFlattened);
-    ImGui::PushItemWidth(ImGui::GetFontSize() * 14);
+    ImGui::Begin("##arena_settings", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoSavedSettings |
+                 ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoScrollWithMouse);
+    ImGui::PopStyleVar();
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    {   /* a cold glow behind the header, as the launcher's hero */
+        ImU32 a = ImGui::GetColorU32(hexc(0x13283D, 0.55f)), z = ImGui::GetColorU32(hexc(AR_BG, 0.0f));
+        dl->AddRectFilledMultiColor(ImVec2(0, 0), ImVec2(W, H * 0.45f), a, a, z, z);
+    }
+    /* header: the mark, SETTINGS, the hints */
+    float title_h = g_font_title ? g_font_title->FontSize * io.FontGlobalScale : fs * 2.0f;
+    ImVec2 top = ImGui::GetCursorScreenPos();
+    arena_mark(dl, top.x, top.y + title_h * 0.12f, title_h * 0.82f, ImGui::GetColorU32(hexc(AR_ACCENT)));
+    ImGui::SetCursorScreenPos(ImVec2(top.x + title_h * 1.25f, top.y));
+    if (g_font_title) ImGui::PushFont(g_font_title);
+    ImGui::TextUnformatted("SETTINGS");
+    if (g_font_title) ImGui::PopFont();
+    {   float r = top.x + (W - 2 * padx), y = top.y + (title_h - fs) * 0.5f;
+        r = arena_hint(dl, r, y, "B", "Back");
+        r = arena_hint(dl, r, y, "A", "Select");
+        arena_hint(dl, r, y, "L R", "Section");
+    }
+    ImGui::SetCursorScreenPos(ImVec2(top.x, top.y + title_h + fs * 0.6f));
+    {   ImVec2 a = ImGui::GetCursorScreenPos();
+        dl->AddLine(a, ImVec2(a.x + W - 2 * padx, a.y), ImGui::GetColorU32(hexc(AR_LINE)), 1.0f);
+        ImGui::Dummy(ImVec2(0, fs * 0.9f));
+    }
+    float body_h = ImGui::GetContentRegionAvail().y;
+    /* the sections */
+    float nav_w = (W - 2 * padx) * 0.21f;
+    ImGui::BeginChild("##nav", ImVec2(nav_w, body_h), ImGuiChildFlags_NavFlattened, ImGuiWindowFlags_NoScrollbar);      /* flattened: the d-pad moves between the list and the card */
+    for (int i = 0; i < SEC_N; i++) {
+        ImVec2 p = ImGui::GetCursorScreenPos();
+        float rh = fs * 2.1f;
+        bool sel = g_section == i;
+        ImGui::PushID(i);
+        if (sel) dl = ImGui::GetWindowDrawList(), dl->AddRectFilled(p, ImVec2(p.x + nav_w - fs * 0.6f, p.y + rh), ImGui::GetColorU32(hexc(0x142030)), 5.0f);
+        if (ImGui::Selectable("##sec", false, 0, ImVec2(nav_w - fs * 0.6f, rh))) { g_section = i; }
+        dl = ImGui::GetWindowDrawList();
+        if (sel) dl->AddRectFilled(ImVec2(p.x, p.y + rh * 0.22f), ImVec2(p.x + 3.0f, p.y + rh * 0.78f), ImGui::GetColorU32(hexc(AR_ACCENT)), 1.5f);
+        dl->AddText(ImVec2(p.x + fs * 0.9f, p.y + (rh - fs) * 0.5f), ImGui::GetColorU32(sel ? hexc(AR_TEXT) : hexc(AR_MUTED)), k_sections[i]);
+        ImGui::PopID();
+    }
+    ImGui::EndChild();
+    ImGui::SameLine(0, fs * 1.2f);
+    /* the card of the chosen section */
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, hexc(AR_CARD, 0.96f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(fs * 1.6f, fs * 1.2f));
+    ImGui::BeginChild("##card", ImVec2(0, body_h), ImGuiChildFlags_Borders | ImGuiChildFlags_AlwaysUseWindowPadding | ImGuiChildFlags_NavFlattened);
+    if (g_font_title) { ImGui::PushFont(g_font_title); ImGui::SetWindowFontScale(0.6f); }
+    {   char up[48]; snprintf(up, sizeof up, "%s", k_sections[g_section]);
+        for (char *q = up; *q; q++) if (*q >= 'a' && *q <= 'z') *q = (char)(*q - 32);
+        ImGui::TextUnformatted(up); }
+    if (g_font_title) { ImGui::SetWindowFontScale(1.0f); ImGui::PopFont(); }
+    ImGui::Dummy(ImVec2(0, fs * 0.3f));
+    float foot = ImGui::GetFrameHeightWithSpacing() * (restart_pending() ? 2.4f : 1.4f);
+    ImGui::BeginChild("body", ImVec2(0, -foot), ImGuiChildFlags_NavFlattened);
+    ImGui::PushItemWidth(fs * 16);
     switch (g_section) {
     case SEC_DISPLAY: sec_display(cw, ch); break;
     case SEC_GRAPHICS: sec_graphics(); break;
@@ -1557,10 +1728,20 @@ static void draw_menu(int cw, int ch) {
     }
     ImGui::PopItemWidth();
     ImGui::EndChild();
-    if (restart_pending()) ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1.0f), "Saved. The settings marked [restart: changed] take effect at the next start.");
-    if (ImGui::Button("Close")) menu_request_toggle();
+    {   ImVec2 a = ImGui::GetCursorScreenPos();
+        ImGui::GetWindowDrawList()->AddLine(a, ImVec2(a.x + ImGui::GetContentRegionAvail().x, a.y), ImGui::GetColorU32(hexc(AR_LINE)), 1.0f);
+        ImGui::Dummy(ImVec2(0, fs * 0.25f)); }
+    if (restart_pending()) ImGui::TextColored(hexc(0xFFC857), "Saved. The settings marked [restart: changed] take effect at the next start.");
+    ImGui::PushStyleColor(ImGuiCol_Button, hexc(AR_ACCENT)); ImGui::PushStyleColor(ImGuiCol_ButtonHovered, hexc(0x8AD5FF)); ImGui::PushStyleColor(ImGuiCol_ButtonActive, hexc(0x4AB4F0));
+    ImGui::PushStyleColor(ImGuiCol_Text, hexc(0x06121D));
+    if (ImGui::Button("  Done  ")) menu_request_toggle();
+    ImGui::PopStyleColor(4);
     ImGui::SameLine();
-    ImGui::TextDisabled("Settings are saved at once (config\\graphics.ini)");
+    ImGui::TextDisabled("Saved at once to config\\graphics.ini");
+    ImGui::EndChild();
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor();
+    g_section_req = -1;
     ImGui::End();
 }
 
@@ -1734,6 +1915,7 @@ extern "C" int menu_frame(int width, int height, MenuDraw *out) {
     else {
         if (down & (BIT(B_HOME) | BIT(B_CAPTURE))) menu_request_toggle();      /* nnhid_menu_buttons bits 16 / 17: never seen by the game */
         if (g_open && (down & BIT(B_PLUS))) menu_request_toggle();
+        if (g_open && (down & BIT(B_B)) && !g_back_blocked && !osk_active()) menu_request_toggle();      /* B: back to where the menu was opened from */
     }
     if (g_open) capture_tick(down);
     for (LONG t = InterlockedExchange(&g_toggle_req, 0); t > 0; t--) set_open(!g_open);
@@ -1816,7 +1998,8 @@ extern "C" int menu_frame(int width, int height, MenuDraw *out) {
         ImGui::PopStyleColor();
         if (!InterlockedExchange(&g_popup_drawn, 1)) { printf("menu: online popup drawn (presented frame %lld): %s: %s\n", g_frame, title, text); fflush(stdout); }
     }
-    if (g_open && !osk_active()) draw_menu(width, height);
+    if (g_open && !osk_active()) draw_arena(width, height);
+    g_back_blocked = ImGui::IsAnyItemActive() || ImGui::IsPopupOpen(NULL, ImGuiPopupFlags_AnyPopupId);
     ImGui::Render();
 #ifndef _WIN32
     InterlockedExchange(&g_text_want, g_open && io.WantTextInput ? 1 : 0);      /* a text box is active: SDL's text input on (window thread) */
