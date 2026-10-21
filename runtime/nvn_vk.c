@@ -147,10 +147,20 @@ static const char *vk_result_name(VkResult r) {
     return buf;
 }
 static void vkd_lost_report(void);                                    /* nvn_vk_draw.c (PR #32): what the driver and the markers say about the loss */
+static void vk_unavailable(void);
 static void vk_fatal(const char *what, VkResult r) {
     printf("nvn_vk: %s failed: %s\n", what, vk_result_name(r));
     fflush(stdout);
     if (r == VK_ERROR_DEVICE_LOST && V.device) vkd_lost_report();
+    /* (2026-10-21, tester: Quadro M1200, the device lost at the 4th frame, every start) a device lost in the first 20 s: this
+     * driver cannot run the game's Vulkan; graphics.ini gets renderer = opengl (F1 > Graphics switches back) and the game
+     * starts again with OpenGL (vk_unavailable) */
+    if (r == VK_ERROR_DEVICE_LOST && nvn_front_frame_next() < 1200 && !getenv("SSBU_RENDERER")) {
+        printf("nvn_vk: the device was lost at frame %lld, at the start: graphics.ini now says renderer = opengl\n", nvn_front_frame_next());
+        fflush(stdout);
+        gfx_ini_set("renderer", "opengl");
+        vk_unavailable();
+    }
     ExitProcess(5);
 }
 /* A call that may fail while running (present path): counted, reported a few times, the frame goes on. */

@@ -69,11 +69,29 @@ def xts_decrypt(key, data, sector, sector_size=0x200):
     return bytes(out)
 
 
+def not_a_package(path, head):
+    """2026-10-21 (a tester's install: 'assert magic == PFS0'): what the file is instead of an .nsp, in words."""
+    size = os.path.getsize(path) if os.path.exists(path) else 0
+    kinds = ((b'PK\x03\x04', 'a ZIP archive'), (b'Rar!', 'a RAR archive'), (b'7z\xbc\xaf', 'a 7-Zip archive'), (b'\x1f\x8b', 'a GZIP archive'))
+    what = next((k for m, k in kinds if head.startswith(m)), None)
+    if what:
+        why = 'it is %s renamed .nsp: extract it first and choose the .nsp / .xci inside' % what
+    elif not head.strip(b'\x00'):
+        why = 'it starts with zeros: the download is incomplete or the file is damaged; download it again'
+    elif size < 64 << 20:
+        why = 'it is only %.1f MB: not a game package (the base game is several GB); download it again' % (size / 1048576.0)
+    else:
+        why = 'it is not an NSP or XCI package (it starts with %s): download it again, or use another copy of the game' % head[:4].hex(' ')
+    return '%s: this file cannot be read as the game: %s.' % (path, why)
+
+
 class Nsp:
     def __init__(self, path):
         self.f = open(path, 'rb')
-        magic, count, strings_size, _ = struct.unpack('<4sIII', self.f.read(16))
-        assert magic == b'PFS0', path
+        head = self.f.read(16)
+        if len(head) < 16 or head[:4] != b'PFS0':
+            raise SystemExit(not_a_package(path, head))
+        magic, count, strings_size, _ = struct.unpack('<4sIII', head)
         entries = [struct.unpack('<QQII', self.f.read(24)) for _ in range(count)]
         strings = self.f.read(strings_size)
         base = 16 + 24 * count + strings_size
