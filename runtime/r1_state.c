@@ -1828,7 +1828,10 @@ static void ra_init(void) {
         g_mark > 0 ? "yes" : "NO (run-ahead will stay off)", k ? "installed" : "FAILED", l ? "installed or waiting" : "FAILED", g_ra_park_ms);
     if (rgs_wanted() && rbg_on()) {                       /* R3: re-run passes but the last skip the preparation kicks + lists (49) and the presentation callees (127), proven exact in R2 round 3 */
         g_rgs_skip = getenv("SSBU_RB_SIM_SKIP") ? atoi(getenv("SSBU_RB_SIM_SKIP")) : 49;
-        if (!getenv("SSBU_RB_SIM_LITE")) _putenv("SSBU_RB_SIM_LITE=127");
+        /* 123 = 127 without group 4 (lighting): skipping the lighting callees in re-run passes left the fighters' colour
+         * blend wrong for the rest of the match (magenta / green / yellow fighters, seen in every rollback fight; groups 1, 2,
+         * 8, 16, 32, 64 checked one by one: colours right). Costs ~0.3 of the ~1.3 ms a re-run pass saves. */
+        if (!getenv("SSBU_RB_SIM_LITE")) _putenv("SSBU_RB_SIM_LITE=123");
         rbn_init();
         LOG("r1: RB NET on (R3 online rollback on the snapshot ring): kick skip mask in re-run passes %d\n", g_rgs_skip);
         rgs_lite_init(); }
