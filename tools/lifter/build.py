@@ -128,7 +128,11 @@ def cmd_compile(jobs, force):
             cpu += secs
             if code:
                 failed.append(name)
-                print('FAILED %s\n%s' % (name, err), flush=True)
+                # 2026-10-21 (a tester: 539 files FAILED with no text, 6-11 s each, 10 jobs): the exit code says which kind (Windows
+                # 0xC0000005 / 0xC0000017 / 0xC000012D, or a negative signal elsewhere = the compiler crashed or ran out of memory)
+                why = '' if (err or '').strip() else ' (exit code %s, no message: the compiler crashed - usually out of memory with %d at once; it is compiled again with fewer at the end)' % (
+                    ('0x%08X' % (code & 0xffffffff)) if isinstance(code, int) and (code < 0 or code > 255) else code, jobs)
+                print('FAILED %s%s\n%s' % (name, why, err), flush=True)
             if done % 10 == 0 or done == len(todo):
                 print('  %d/%d   %.0fs elapsed   %.0fs compiler time' % (done, len(todo), time.time() - t0, cpu), flush=True)
     # a file that failed while many compilers ran at once usually ran out of memory (clang crashes "due to signal" on the
