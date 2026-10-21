@@ -75,11 +75,40 @@ def cmd_compile(jobs, force):
     sources = sorted(n for n in os.listdir(GEN) if n.endswith('.c'))
     # only the headers the generated code includes; hostrt.h belongs to the host sources, which cmd_link rebuilds when they are stale
     newest_header = max(os.path.getmtime(os.path.join(HERE, h)) for h in GEN_HEADERS)
-    todo = []
+    # content check on top of the dates: an object whose source, headers and flags hash to what it was compiled from is kept
+    # even when the files are newer (an update that rewrote them with the same bytes, a lifter run that regenerated equal
+    # files): before, any newer date recompiled, and touching runtime.h recompiled the whole game
+    import hashlib, json
+    hpath = os.path.join(OBJ, '_srchash.json')
+    try:
+        known = json.load(open(hpath))
+    except (OSError, ValueError):
+        known = {}
+    hh = hashlib.sha1(repr([os.environ.get(k, '') for k in ('RECOMP_CFLAGS', 'RECOMP_INLINE', 'RECOMP_OPT', 'RECOMP_TARGET', 'RECOMP_NOCRT')]).encode())
+    for h in GEN_HEADERS:
+        with open(os.path.join(HERE, h), 'rb') as f:
+            hh.update(f.read())
+    hkey = hh.hexdigest()
+    def src_hash(n):
+        with open(os.path.join(GEN, n), 'rb') as f:
+            return hashlib.sha1(f.read() + hkey.encode()).hexdigest()
+    todo, cur, kept = [], {}, 0
     for n in sources:
         obj = os.path.join(OBJ, n[:-2] + '.obj')
-        if force or not os.path.exists(obj) or os.path.getmtime(obj) < max(os.path.getmtime(os.path.join(GEN, n)), newest_header):
+        if force or not os.path.exists(obj):
             todo.append(n)
+            continue
+        if os.path.getmtime(obj) >= max(os.path.getmtime(os.path.join(GEN, n)), newest_header):
+            cur[n] = known[n] if n in known else src_hash(n)     # (first run with the check: the record is made now)
+            continue
+        cur[n] = src_hash(n)
+        if known.get(n) == cur[n]:
+            os.utime(obj, None)                  # equal content: the object stands; dated now so the date check agrees next time
+            kept += 1
+        else:
+            todo.append(n)
+    if kept:
+        print('objects kept because their source, headers and flags are unchanged (only the dates were newer): %d' % kept, flush=True)
     wanted = set(n[:-2] + '.obj' for n in sources)
     for n in os.listdir(OBJ):
         if n.endswith('.obj') and n not in wanted:
@@ -111,6 +140,14 @@ def cmd_compile(jobs, force):
                     failed.append(name)
                     print('FAILED again %s\n%s' % (name, err), flush=True)
     print('compiled: %d   failed: %d   elapsed: %.0fs' % (len(todo) - len(failed), len(failed), time.time() - t0), flush=True)
+    for n in todo:                                   # what each object was made from (cmd_compile's content check)
+        if n not in failed:
+            cur[n] = src_hash(n)
+    try:
+        with open(hpath, 'w') as f:
+            json.dump(cur, f)
+    except OSError:
+        pass
     return 1 if failed else 0
 
 

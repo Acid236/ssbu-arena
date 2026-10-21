@@ -476,7 +476,7 @@ static long long g_closed_at, g_frame;
 static char g_pads[1024];
 static ULONGLONG g_pads_at;
 enum { SEC_DISPLAY, SEC_GRAPHICS, SEC_AUDIO, SEC_CONTROLS, SEC_EXPERIMENTAL, SEC_ROOMS, SEC_DLC, SEC_LANG, SEC_LOG, SEC_ABOUT, SEC_N };
-static const char *const k_sections[SEC_N] = {"Display", "Graphics", "Audio", "Controls", "Experimental", "Online rooms", "Add-on content", "Language", "Log", "About"};
+static const char *const k_sections[SEC_N] = {"Display", "Graphics", "Audio", "Controls", "Experimental", "Online", "Add-on content", "Language", "Log", "About"};
 
 static ImGuiKey vk_key(int vk) {
     if (vk >= 'A' && vk <= 'Z') return (ImGuiKey)(ImGuiKey_A + (vk - 'A'));
@@ -1064,20 +1064,16 @@ static void sec_experimental(void) {
     if (O.mode) ImGui::TextColored(ImVec4(1, 0.6f, 0.3f, 1), "Online play is not in the Linux / macOS build yet: these settings are kept for when it is.");
 #endif
     if (O.mode) {
-        /* (4) rollback netcode over the online connection: Play SSBU.bat (scripts/run.py) starts ssbu_native_rb.exe with
-         * SSBU_RB_NET=net when graphics.ini has rollback = on; the pair is built by the installer's "Rollback netcode" */
+        /* (4) rollback netcode over the online connection: Play SSBU.bat (scripts/run.py) starts the normal exe with
+         * SSBU_RB_NET=net when graphics.ini has rollback = on (R4: no second build any more, runtime/rb_learned.c) */
         static int rb_have = -1, rb_on = -1, rb_on0;
         if (rb_have < 0) {
-            char exe[MAX_PATH], p[MAX_PATH + 32], v[16];
-            GetModuleFileNameA(NULL, exe, MAX_PATH); char *s = strrchr(exe, '\\'); if (s) *s = 0;
+            char v[16];
 #ifdef _WIN32
-            snprintf(p, sizeof p, "%s\\ssbu_game_r1.dll", exe);
-#elif defined(__APPLE__)
-            snprintf(p, sizeof p, "%s\\ssbu_game_r1.dylib", exe);
+            rb_have = 1;
 #else
-            snprintf(p, sizeof p, "%s\\ssbu_game_r1.so", exe);
+            rb_have = 0;
 #endif
-            rb_have = GetFileAttributesA(p) != INVALID_FILE_ATTRIBUTES;
             rb_on = ini_read("rollback", v, sizeof v) && !off_word(v); rb_on0 = rb_on;
         }
         if (onoff("rb", rb_on != 0, rb_have || rb_on)) { rb_on = !rb_on; ini("rollback", rb_on ? "on" : "off"); }
@@ -1085,7 +1081,7 @@ static void sec_experimental(void) {
         tag(1, rb_on != rb_on0);
         ImGui::SameLine();
         if (rb_have) ImGui::TextDisabled("smooth online fights at high ping (experimental); both players need it on");
-        else ImGui::TextDisabled("needs the rollback build: Install SSBU.bat, tick \"Rollback netcode\", Resume");
+        else ImGui::TextDisabled("not in the Linux / macOS build yet");
         if (getenv("SSBU_RB_NET")) ImGui::TextColored(ImVec4(0.45f, 0.9f, 0.45f, 1), "Rollback is active in this run (SSBU_RB_NET=%s).", getenv("SSBU_RB_NET"));
         sec_online();
     }
@@ -1375,6 +1371,60 @@ static void draw_stats(void) {
     ImGui::End();
 }
 
+/* ------------------------------------------------------------------ O2: Find an opponent (net_relay.c net_match_*)
+ * Returns the matched host's address while this game is matched to join (its row in the table below says so). */
+static uint32_t sec_match(void) {
+    NetMatch m;
+    net_match_get(&m);
+    const ImVec4 green(0.45f, 0.9f, 0.45f, 1), amber(1, 0.8f, 0.2f, 1);
+    ImGui::Separator();
+    ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.35f, 1.0f), "Find an opponent");
+    if (m.state == MM_OFFLINE) { ImGui::TextDisabled("Not connected to the lobby yet."); return 0; }
+    if (m.players >= 0) {
+        ImGui::Text("Online now: %d player%s with your version and mods", m.players, m.players == 1 ? "" : "s");
+        if (m.code_players >= 0 && m.code_players != m.players) { ImGui::SameLine(); ImGui::TextDisabled("(%d in this lobby, any version)", m.code_players); }
+        if (m.searching >= 0) ImGui::Text("Searching for an opponent: %d", m.searching);
+        else ImGui::TextDisabled("Searching for an opponent: not known (an older lobby server)");
+    }
+    float bw = ImGui::GetFontSize() * 11;
+    if (m.kind == 2 && (m.state == MM_ASKING || m.state == MM_SEARCHING || m.state == MM_MATCHED || m.state == MM_TOGETHER)) {   /* (R3 net3) rb_net.c's search */
+        if (m.state == MM_ASKING || m.state == MM_SEARCHING) ImGui::TextColored(amber, "Rollback match (Smash versus): finding an opponent... %d s", m.waited_s);
+        else ImGui::TextColored(green, "Rollback match (Smash versus) with %s", m.peer_name);
+        help("Started by a Smash (versus) match with rollback on and no room code; the box over the game shows each step (Esc or B held stops waiting).");
+        return 0;
+    }
+    switch (m.state) {
+    case MM_ASKING:
+    case MM_SEARCHING:
+        ImGui::TextColored(amber, "Searching%s... %d s", m.state == MM_ASKING ? " (asking the lobby)" : "", m.waited_s);
+        help("You can keep playing: a box at the top of the picture says when an opponent is found.");
+        if (ImGui::Button("Cancel##mm", ImVec2(bw, 0))) net_match_cancel();
+        break;
+    case MM_MATCHED:
+        if (m.role == MM_ROLE_HOST) {
+            ImGui::TextColored(green, "Matched with %s: you host.", m.peer_name);
+            help("Create a room: Local Wireless > Create Room (an open room of yours counts). Accept their request when \"wants to join!\" appears.");
+        } else {
+            ImGui::TextColored(green, "Matched with %s: they host.", m.peer_name);
+            if (m.room_open) help("Their room is open: Local Wireless > Rooms List, their room is first. Join it.");
+            else help("Waiting for their room: open Local Wireless > Rooms List, their room will be first as soon as it exists.");
+        }
+        ImGui::TextDisabled("Matched %d s ago.", m.waited_s);
+        if (ImGui::Button("Cancel the match##mm", ImVec2(bw, 0))) net_match_cancel();
+        break;
+    default:
+        if (m.state == MM_TOGETHER) ImGui::TextColored(green, "In a room with %s.", m.peer_name);
+        else if (m.state == MM_TIMEOUT) ImGui::TextColored(amber, "No opponent found in time: nobody with your version and mods was searching.");
+        else if (m.state == MM_PEER_LEFT) ImGui::TextColored(amber, "%s cancelled the match or left.", m.peer_name);
+        else if (m.state == MM_EXPIRED) ImGui::TextColored(amber, "The match with %s expired: you did not meet in a room in time.", m.peer_name);
+        else if (m.state == MM_OLD_LOBBY) ImGui::TextColored(amber, "This lobby server is an older version: it cannot find opponents. Create a room or join one.");
+        if (ImGui::Button(m.state == MM_IDLE ? "Find an opponent##mm" : "Search again##mm", ImVec2(bw, 0))) net_match_find();
+        help("The lobby pairs you with another player of the same version and mods who is searching too, and says who hosts the room.");
+        break;
+    }
+    return m.state == MM_MATCHED && m.role == MM_ROLE_JOIN ? m.peer : 0;
+}
+
 /* ------------------------------------------------------------------ O1: Online rooms (net_relay.c net_rooms_get) */
 static void sec_rooms(void) {
     static NetRoom rooms[32];
@@ -1391,6 +1441,8 @@ static void sec_rooms(void) {
         ImGui::TextColored(ImVec4(0.45f, 0.9f, 0.45f, 1), "%.*s", (int)(end - d), d); }
     ImGui::SameLine(); ImGui::Text("  mods:"); ImGui::SameLine();
     ImGui::PushTextWrapPos(0.0f); ImGui::TextUnformatted(net_mods_text()); ImGui::PopTextWrapPos();
+    uint32_t match_host = sec_match();
+    ImGui::Separator();
     help("Every room of your lobby, any version or mod set. Join a room from the game: Local Wireless > Rooms List. "
          "Rooms of another version or mod set are listed there too, but joining one is refused and says why. Select a row for details.");
     ImGui::Separator();
@@ -1422,6 +1474,7 @@ static void sec_rooms(void) {
             ImGui::TableNextColumn(); ImGui::Text("%d / %d", r.players, r.most);
             ImGui::TableNextColumn();
             if (r.mine) ImGui::TextDisabled("yours");
+            else if (match_host && r.host == match_host) ImGui::TextColored(ImVec4(0.45f, 0.9f, 0.45f, 1), "YOUR MATCH: join it");
             else if (r.joinable) ImGui::TextColored(r.open ? ImVec4(0.45f, 0.9f, 0.45f, 1) : ImVec4(0.7f, 0.7f, 0.7f, 1), "%s", r.open ? "can join" : "full / closed");
             else {
                 const char *nl = strchr(r.why, '\n'), *colon = strchr(r.why, ':');

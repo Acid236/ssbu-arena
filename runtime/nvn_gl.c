@@ -2090,6 +2090,9 @@ static CmdBuf *cb_new(uint64_t g) {
 static void cb_forget(CmdBuf *cb) { AcquireSRWLockExclusive(&g_all_cb_lock); for (int i = 0; i < g_all_cb_n; i++) if (g_all_cb[i] == cb) g_all_cb[i] = NULL; ReleaseSRWLockExclusive(&g_all_cb_lock); }
 typedef struct { CmdBuf *cb, copy; uint8_t *data; size_t cap; } CbSave;
 static CbSave g_cbs[512]; static int g_ncbs;
+/* (R3 pub1) r1_ring.c: the save area's addresses, without a linker map (the prebuilt runtime package has none) */
+void nvn_gl_r1_cb_area(void **cbs, void **ncbs, void **all) { *cbs = g_cbs; *ncbs = &g_ncbs; *all = g_all_cb; }
+size_t nvn_gl_r1_cb_size(void) { return sizeof(CbSave); }      /* (R3 pub1) the entry size r1_ring.c expects (RG_CBS_SIZE) */
 size_t nvn_r1_cb_save(void) {                      /* the guest threads are held */
     size_t bytes = 0;
     AcquireSRWLockShared(&g_all_cb_lock);

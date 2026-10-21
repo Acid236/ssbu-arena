@@ -10,6 +10,9 @@ int net_mode(void) { return 0; }
 int net_log_level(void) { return 0; }
 void net_start(void) {}
 uint32_t net_my_ip(void) { return 0; }
+int net_rb_no_destination(void) { return 0; }      /* (R3 pub1) rb_net.c's notice */
+int net_rb_ready(void) { return 0; }                /* rb_net.c (rollback over the network: off without online play) */
+int net_rb_send(const void *p, int n) { (void)p; (void)n; return 0; }
 int net_lobby_gone(void) { return 0; }
 void net_list_rooms(uint32_t seq) { (void)seq; }
 void net_send(uint32_t src, uint16_t sport, uint32_t dst, uint16_t dport, const void *data, uint32_t len) {
@@ -25,3 +28,8 @@ void net_stats_get(NetStats *o) { memset(o, 0, sizeof *o); o->state = NET_OFFLIN
 int net_rooms_get(NetRoom *out, int max, int *state) { (void)out; (void)max; if (state) *state = 0; return 0; }
 const char *net_build_id(void) { return ""; }
 const char *net_mods_text(void) { return "none"; }
+uint32_t net_match_host(void) { return 0; }
+void net_match_find(void) {}
+void net_match_find_rb(void) {}
+void net_match_cancel(void) {}
+void net_match_get(NetMatch *o) { memset(o, 0, sizeof *o); o->state = MM_OFFLINE; o->players = o->searching = o->code_players = -1; }

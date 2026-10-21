@@ -19,7 +19,7 @@
  *  - the oldest slot is dropped when the ring is full (SSBU_RB_DEPTH, default 7 frames back = 8 states).
  * Public API (a future rb_rollback.c, at the safe point run-ahead uses, the kick after the submission):
  *    int r1_ring_capture(long long frame, Ctx *c);  1 = captured; 0 = not now (a thread not at a wait in time)
- *    int r1_ring_load(long long frame, Ctx *c);     1 = loaded (c = main's registers of that frame); 0 = not in the ring
+ *    int r1_ring_load(long long frame, Ctx *c);     1 = loaded (c = main's registers of that frame); 0 = not in the ring; -1 = refused for now (pub1: a thread was running)
  *    void r1_ring_release(void);                    every slot dropped
  *    long long r1_ring_oldest(void), r1_ring_newest(void);   (-1 = empty)
  *    double r1_ring_last_ms(int load);              the last capture / load in ms
@@ -60,7 +60,6 @@ static uint8_t *g_rg_pool; static uint32_t g_rg_bump, g_rg_pcom, *g_rg_free, g_r
 static uint8_t *g_rg_cbs; static int *g_rg_ncbs; static int g_rg_cb_ok = -1;
 static double g_rg_park_ms = 30;
 static int g_rg_keep, g_rg_kept, g_rg_keep_on = -1; static long long g_rg_kept_n, g_rg_kept_same;   /* capture -> load at the same safe point: threads stay held */
-static int g_rg_deferred; static long long g_rg_defer_n;      /* (load deferral) r1_ring_load gave up for now: a sound thread not at its wait */
 static long long g_rg_caps, g_rg_cap_fail, g_rg_loads, g_rg_overflow;
 static double g_rg_last[2];
 static int g_rgs_on; static long long g_rgv_target; static void rgv_before(int si, long long target); static void rgv_after(void);   /* (simulation / verify, below) */
@@ -156,6 +155,7 @@ static void rg_sweep(void (*fn)(uint32_t id, int w, size_t j)) {
     }
 }
 static RgSlot *g_rg_cur; static int g_rg_fail_now; static int g_rgs_left;
+#include "rb_learned.c"                              /* R4: the learned-set save (the ring on the normal, unmarked game build) */
 /* (R2 round 3) SSBU_RB_SIM_PAGES=1: the captured pages counted per 1 MB block and pass kind (0 real, 1 re-run with the skips, 2 the
  * last re-run pass): which memory a frame writes, and which of it only the presentation writes (absent from the skipped passes). */
 static int g_rgpg_on = -1; static int g_rgpg_kind; static long long g_rgpg_caps[3];
@@ -206,7 +206,8 @@ static uint32_t rg_pool_get_cap(void) {                  /* a buffer for the cap
 static void rg_cb_find(void) {
     if (g_rg_cb_ok >= 0) return;
     uint64_t a = map_sym("g_cbs"), n = map_sym("g_ncbs"), all = map_sym("g_all_cb");
-    g_rg_cb_ok = a && n && all && all - a == 512ull * RG_CBS_SIZE;
+    size_t nvn_gl_r1_cb_size(void);                      /* (R3 pub1) the entry size from nvn_gl.c itself: the compiler of the package exe put g_ncbs between the two arrays */
+    g_rg_cb_ok = a && n && all && (all - a == 512ull * RG_CBS_SIZE || nvn_gl_r1_cb_size() == RG_CBS_SIZE);
     if (g_rg_cb_ok) { g_rg_cbs = (uint8_t *)(uintptr_t)a; g_rg_ncbs = (int *)(uintptr_t)n; }
     LOG("r1: RING: command-buffer save area of nvn_gl.c %s (g_cbs %llx, g_ncbs %llx, g_all_cb %llx)\n", g_rg_cb_ok ? "found: saved per slot" : "NOT found (layout differs): the newest capture's is put back at every load",
         (unsigned long long)a, (unsigned long long)n, (unsigned long long)all);
@@ -370,7 +371,7 @@ int r1_ring_capture(long long frame, Ctx *c) {
     g_cp_cmp = xdiff; cp_run(); g_cp_cmp = NULL;
     if (g_rgpg_on < 0) g_rgpg_on = getenv("SSBU_RB_SIM_PAGES") != NULL;
     g_rgpg_kind = g_ra_phase != 2 ? 0 : g_rgs_left > 1 ? 1 : 2; g_rgpg_caps[g_rgpg_kind]++;
-    rg_sweep(rg_cap_page);
+    if (g_ls_active) ls_capture(rg_cap_page); else rg_sweep(rg_cap_page);      /* R4: the learned set (rb_learned.c) instead of the marks */
     for (size_t e = 0; e < g_rg_nx && !g_rg_fail_now; e++) {             /* extras: the pages that differ from their newest value */
         uint32_t id = (uint32_t)(g_rg_n1 + g_rg_n2 + e);
         if (!xdiff[e]) continue;
@@ -392,6 +393,7 @@ int r1_ring_capture(long long frame, Ctx *c) {
     }
     g_rg_short = 0;
     double t3 = now_ms();
+    ls_capture_end();                                     /* R4 (SSBU_LS_DECAY) */
     fibers_save(); double t3a = now_ms();
     nvn_r1_cb_save(); double t3b = now_ms();
     rg_meta_capture(s, c);
@@ -496,6 +498,7 @@ int r1_ring_rebase(long long frame, Ctx *c) {
     fibers_save();
     nvn_r1_cb_save();
     rg_meta_capture(s, c);
+    ls_rebase();                                          /* R4: the windows read-only again, the learned set emptied */
     unpark();
     g_rg_caps++;
     LOG("r1: RING rebase: base state (frame %lld) made again in %.1f ms (hold %.1f, copy %.1f): %zu window pages copied into the shadow (%.1f MB), %zu pool buffers freed, %zu shadow pages of pages not committed now dropped; extras %d ranges %.1f MB (%zu pages); %d modules got the mark maps\n",
@@ -556,36 +559,14 @@ static void rgc_after(void) {                           /* after the copies and 
     if (deadfix) ReleaseSRWLockShared(&g_bf_lock);
     g_rgc_dropped += dropped; g_rgc_kept += kept; if (dropped || kept) g_rgc_loads_changed++;
 }
+static long long g_rg_refused;                        /* (R3 pub1) loads refused: a thread still running after the hold */
+static long long g_rg_ldpg;                           /* (R3 net3) pages to load, all loads (the written ones: g_cp_wrote) */
 int r1_ring_load(long long frame, Ctx *c) {
     int si = -1;
     for (int i = 0; i < g_rg_count; i++) if (rg_slot(i)->frame == frame) si = i;
     if (si < 0) return 0;
     double t0 = now_ms(); g_rgp_seg = 5;
     RgSlot *g = rg_slot(si);
-    /* (load deferral) the sound threads first: each must be caught at the wait it was held at in that capture within
-     * 40 ms, else nothing is loaded now (g_rg_deferred: the caller keeps the wrong guess and tries again at the next safe
-     * point, one frame deeper). Before, the load held such a thread wherever it was after 500 ms and it then wrote through
-     * a stale pointer (a 6-core PC: nus3::audio update busy ~8 ms a frame). SSBU_RB_LOAD_DEFER=0: the old way. */
-    static int defer = -1; if (defer < 0) { const char *e = getenv("SSBU_RB_LOAD_DEFER"); defer = !(e && e[0] == '0'); }
-    static double defer_ms = -1; if (defer_ms < 0) { const char *e = getenv("SSBU_RB_DEFER_MS"); defer_ms = e ? atof(e) : 8; }      /* short: a long probe slows the game and the sound thread then never catches up */
-    HANDLE probe[8]; int nprobe = 0;
-    if (defer) for (int i = 0; i < g->nth && nprobe < 8; i++) {
-        Th *t = &g->th[i];
-        if (!t->parked || !ra_audio(t->name)) continue;
-        double tp = now_ms(); int ok = 0;
-        while (now_ms() - tp < defer_ms) {
-            if (SuspendThread(t->h) == (DWORD)-1) break;
-            if (t->c->import_from == t->from && t->c->in_import == t->imp && th_blocked(t->h)) { ok = 1; break; }
-            ResumeThread(t->h); SwitchToThread();
-        }
-        if (!ok) {
-            for (int q = 0; q < nprobe; q++) ResumeThread(probe[q]);
-            g_rg_deferred = 1; g_rg_defer_n++;
-            if (g_rg_defer_n <= 20 || g_rg_defer_n % 100 == 0) LOG("r1: RING load of frame %lld deferred (%lld so far): thread %s not back at its wait within %.0f ms\n", frame, g_rg_defer_n, t->name, defer_ms);
-            return 0;
-        }
-        probe[nprobe++] = t->h;
-    }
     int k = g_rg_count - 1 - si;
     static Th cur[256]; int ncur = g_rg_kept ? g_nth : 0;  /* threads still held from the capture just made (g_rg_keep) */
     if (ncur) memcpy(cur, g_th, (size_t)ncur * sizeof *cur);
@@ -607,7 +588,26 @@ int r1_ring_load(long long frame, Ctx *c) {
         for (int i = 0; i < g_nth; i++) if (g_th[i].held) { ResumeThread(g_th[i].h); g_th[i].held = 0; }
         SwitchToThread();
     }
-    for (int q = 0; q < nprobe; q++) ResumeThread(probe[q]);      /* (load deferral) the probe's own suspend: the hold above has its own */
+    /* (R3 pub1: fx2j / fx3h, c0000005 in the sound thread's memcpy right after "nus3::audio update not back at its wait after 500 ms
+     * ... now guest code") a thread that is still RUNNING guest code (not blocked at a wait) after the hold's 500 ms was suspended in
+     * the middle of its code, and the load then changed the memory under its registers. Now such a load is REFUSED: every thread
+     * goes on, nothing was changed yet, the wrong guess stays pending (rb_rollback.c) and the next tick loads again (one frame
+     * further back). SSBU_R1_RUNFIX=0: the old way (loaded anyway). SSBU_RB_NET_TEST_REFUSE=<n> (TEST ONLY): every n-th load is
+     * refused as if a thread were running (the timeline must not change). */
+    {   static int runfix = -1, tn = -1; static long long tc;
+        if (runfix < 0) { const char *e = getenv("SSBU_R1_RUNFIX"); runfix = !(e && e[0] == '0'); e = getenv("SSBU_RB_NET_TEST_REFUSE"); tn = e ? atoi(e) : 0; }
+        int forced = tn > 0 && ++tc % tn == 0;
+        if ((runfix && g_th_running) || forced) {
+            unpark();
+            Ctx *tc2; const char *nm2; HANDLE h2;                  /* the threads made after that frame (stop_born_threads) go on too */
+            for (int i = g_ninfo; guest_thread_info(i, &tc2, &nm2, &h2); i++) if (h2 && GetThreadId(h2) != GetCurrentThreadId()) ResumeThread(h2);
+            g_rg_refused++;
+            if (g_rg_refused <= 20 || g_rg_refused % 100 == 0) LOG("r1: RING load of frame %lld (k %d) REFUSED (%lld so far): %s; every thread goes on, the rollback is tried again next tick\n",
+                frame, k, g_rg_refused, forced ? "test switch SSBU_RB_NET_TEST_REFUSE" : "a thread still running guest code after 500 ms");
+            g_rgp_seg = 1;
+            return -1;
+        }
+    }
     double t1 = now_ms();
     R1_CTR("load (state of frame)", frame, 0);
     rgc_before();
@@ -622,9 +622,9 @@ int r1_ring_load(long long frame, Ctx *c) {
         rg_slot_drop(s, 0);
     }
     g_rg_count = si + 1;
-    rg_sweep(rg_load_page);                                /* written since the newest capture */
+    if (g_ls_active) ls_each(rg_load_page); else rg_sweep(rg_load_page);      /* written since the newest capture (R4: the learned set) */
     for (size_t e = 0; e < g_rg_nx; e++) rg_touch((uint32_t)(g_rg_n1 + g_rg_n2 + e));
-    size_t pages = g_rg_ntl;
+    size_t pages = g_rg_ntl; g_rg_ldpg += (long long)pages;
     for (size_t n = 0; n < g_rg_ntl; n++) {               /* each page once, from its value at `frame` */
         uint32_t id = g_rg_tl[n]; g_rg_touch[id] = 0;
         uint8_t *a = rg_addr(id), *src = rg_src(id);
@@ -632,7 +632,9 @@ int r1_ring_load(long long frame, Ctx *c) {
         if (id < g_rg_n1 && g_dc[id]) { if (!src) continue; VirtualAlloc(a, PG, MEM_COMMIT, PAGE_READWRITE); g_dc[id] = 0; }
         if (!src) memset(a, 0, PG); else cp_add(a, src);
     }
-    cp_run();
+    {   /* (R3 net3) SSBU_RB_LOADCMP=1 (option, default off: measured no faster, na0 / na1): a page is written only if it differs from the value loaded */
+        static int lc = -1; if (lc < 0) { const char *e = getenv("SSBU_RB_LOADCMP"); lc = e && e[0] == '1'; }
+        g_cp_cond = lc; cp_run(); g_cp_cond = 0; }
     double t2 = now_ms();
     g_nfib = g->nfib; memcpy(g_fib, g->fib, (size_t)g->nfib * sizeof *g_fib);
     if (g->fpool_used) memcpy(g_fpool, g->fpool, g->fpool_used);
@@ -683,7 +685,7 @@ static void rgs_step(Ctx *c) {
     }
     if (g_rgs_polls_cur > 1) g_rgs_multi++;
     g_rgs_polls_cur = 0;
-    if (g_ra_off || !ra_fight_on()) { if (g_ra_phase) g_ra_after_quiet = 1; g_ra_phase = 0; g_rgs_left = 0; g_rgs_pass_t0 = 0; if (rbg_on()) rbg_fight_off(); return; }   /* (R3: the report once at the end of each match; hs12: the session reset for the next match) */
+    if (g_ra_off || !ra_fight_on()) { ls_fight_off(); if (g_ra_phase) g_ra_after_quiet = 1; g_ra_phase = 0; g_rgs_left = 0; g_rgs_pass_t0 = 0; if (rbg_on()) rbg_fight_off(); return; }   /* (R3: the report once at the end of each match; hs12: the session reset for the next match) */
     if (rbg_on()) { rbg_step(c); g_rgs_pass_t0 = now_ms(); g_rgs_cyc0 = rgs_cyc_now(); g_ra_t_mark = g_rgs_pass_t0; return; }      /* R3: online rollback */
     long long i = g_rgs_next;                             /* the pass that ended here */
     if (g_rg_keep_on < 0) { const char *e = getenv("SSBU_RB_KEEP"); g_rg_keep_on = !e || atoi(e) != 0; }
@@ -703,7 +705,7 @@ static void rgs_step(Ctx *c) {
         int k = 1 + g_rgs_ki % g_rgs_k;
         long long target = i - k, best = -1;
         for (int s = 0; s < g_rg_count; s++) { long long f = rg_slot(s)->frame; if (f <= target && f > best) best = f; }
-        if (best >= 0 && r1_ring_load(best, c)) {
+        if (best >= 0 && r1_ring_load(best, c) > 0) {
             g_rgs_ki++; g_rgs_real_since = 0; g_rgs_done++;
             g_rgs_left = (int)(i - best); g_rgs_next = best + 1; g_ra_phase = 2;
             if (g_rgs_left < RG_MAXSLOT) g_rgs_ksum[g_rgs_left]++;
@@ -1010,6 +1012,7 @@ static double rg_pct(const double *v, int n, int p) {
 }
 static double rg_mean(const double *v, int n) { double s = 0; for (int i = 0; i < n; i++) s += v[i]; return n ? s / n : 0; }
 static void rgs_report(void) {
+    ls_report();                                          /* R4 */
     if (!g_rg_ready) { if (rbg_on()) rbg_report(); return; }      /* (hs14: a match without the ring has its report at the exit too) */
     rbg_report();
     LOG("r1: RING memory (hs14, fix %s): captures given up for lack of pool memory %lld (pages put back and marked again), old states freed early %lld, captures skipped to keep the oldest needed state %lld; test refusals %lld\n",
@@ -1020,11 +1023,13 @@ static void rgs_report(void) {
     LOG("r1: RING loads right after a capture with the threads kept held: %lld (threads kept at the same wait: %lld); fibers %d (last); stale fiber-block notes refused %lld\n", g_rg_kept_n, g_rg_kept_same, g_nfib, g_r1_fls_stale);
     LOG("r1: RING capture: median %.3f mean %.3f p99 %.3f ms; parts (means): hold %.3f, sweep + undo log %.3f, page copy (parallel) %.3f, fibers + threads + command buffers + let go %.3f; pages %.0f + extras %.0f mean (%.1f MB)\n",
         rg_pct(g_rgc[0], n, 50), rg_mean(g_rgc[0], n), rg_pct(g_rgc[0], n, 99), rg_mean(g_rgc[1], n), rg_mean(g_rgc[2], n), rg_mean(g_rgc[3], n), rg_mean(g_rgc[4], n), n ? pg / n : 0, n ? xp / n : 0, n ? (pg + xp) / n * PG / 1048576.0 : 0);
+    {   long long w = 0; for (int q = 0; q < 9; q++) w += g_cp_wrote[q];
+        LOG("r1: RING loads (net3, SSBU_RB_LOADCMP): pages to load %lld, of them written (they differed) %lld (%.1f%%)\n", g_rg_ldpg, w, g_rg_ldpg ? 100.0 * (double)w / (double)g_rg_ldpg : 0.0); }
     for (int k = 0; k < RG_MAXSLOT; k++) {
         int m = g_rgl_n[k]; if (!m) continue;
         static double v[RG_NL], h[RG_NL], cpy[RG_NL]; double p = 0;
         for (int i = 0; i < m; i++) { v[i] = g_rgl[k][i][0]; h[i] = g_rgl[k][i][1]; cpy[i] = g_rgl[k][i][2]; p += (double)g_rgl_pg[k][i]; }
-        LOG("r1: RING load k %d (%d): median %.3f mean %.3f p99 %.3f ms (hold %.3f, undo + page copy %.3f, rest %.3f); pages copied %.0f mean (%.1f MB)\n",
+        LOG("r1: RING load k %d (%d): median %.3f mean %.3f p99 %.3f ms (hold %.3f, undo + page copy %.3f, rest %.3f); pages to load %.0f mean (%.1f MB)\n",
             k, m, rg_pct(v, m, 50), rg_mean(v, m), rg_pct(v, m, 99), rg_mean(h, m), rg_mean(cpy, m), rg_mean(v, m) - rg_mean(h, m) - rg_mean(cpy, m), p / m, p / m * PG / 1048576.0);
     }
     if (g_rgs_on > 0) {

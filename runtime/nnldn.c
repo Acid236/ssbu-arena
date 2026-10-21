@@ -396,8 +396,14 @@ static void scan(Ctx *c, uint64_t out, uint64_t count_p, int32_t room, uint64_t 
     ReleaseSRWLockExclusive(&L.lock);
     uint64_t t = ms_now();
     int32_t found = 0;
+    uint32_t first = net_match_host();    /* O2: matched to join a room: that host's room comes first in the game's list */
+    int first_at = -1;
     AcquireSRWLockShared(&L.lock);
-    for (int i = 0; i < SEEN_MAX && found < room; i++) {
+    for (int i = 0; first && i < SEEN_MAX && first_at < 0; i++)
+        if (L.seen[i].at && t - L.seen[i].at <= 4000 && L.seen[i].from == first && u32at(L.seen[i].info + NODE(0)) == first) first_at = i;
+    for (int k = first_at >= 0 ? -1 : 0; k < SEEN_MAX && found < room; k++) {
+        int i = k < 0 ? first_at : k;
+        if (k >= 0 && i == first_at) continue;
         const uint8_t *n = L.seen[i].info;
         if (!L.seen[i].at || t - L.seen[i].at > 4000) continue;
         if (L.state == LS_AP_CREATED && !memcmp(n + NI_SESSION, L.net + NI_SESSION, 16)) continue;
@@ -412,7 +418,8 @@ static void scan(Ctx *c, uint64_t out, uint64_t count_p, int32_t room, uint64_t 
     if (count_p) st32(count_p, (uint32_t)found);
     scans++;
     if (LOGL(2) || (LOGL(1) && (found || scans % 20 == 1)))
-        printf("[online] ldn: scan %llu (filter %#x, room for %d): %d room(s)%s\n", (unsigned long long)scans, flags, room, found, answered ? "" : " (no list from the lobby in time)");
+        printf("[online] ldn: scan %llu (filter %#x, room for %d): %d room(s)%s%s\n", (unsigned long long)scans, flags, room, found, answered ? "" : " (no list from the lobby in time)",
+               first_at >= 0 ? ", the matched host's room first" : "");
     if (found) input_mark("ldn:scan-found");
     RET(0);
 }
@@ -476,6 +483,16 @@ int nnldn_players(void) {                 /* players in this player's room, itse
     int s = L.state;
     return s == LS_AP_CREATED || s == LS_STA_CONNECTED ? L.net[NI_NODE_COUNT] : 0;
 }
+/* (R3 pub1, testers 2026-10-20) the address of THE other player of this room (a 1v1 room: exactly one other node), 0 = none or
+ * more than one: net_relay.c sends the rollback messages to it */
+uint32_t nnldn_other_ip(void) {
+    uint32_t me = net_my_ip(), r = 0; int n = 0;
+    AcquireSRWLockShared(&L.lock);
+    if (in_network()) for (int i = 0; i < 8; i++) if (L.net[NODE(i) + 0xb]) { uint32_t ip = u32at(L.net + NODE(i)); if (ip && ip != me) { r = ip; n++; } }
+    ReleaseSRWLockShared(&L.lock);
+    return n == 1 ? r : 0;
+}
+int nnldn_role(void) { int s = L.state; return s == LS_AP_CREATED ? 1 : s == LS_STA_CONNECTED ? 2 : 0; }      /* (R3 pub1) 1 = this game made the room, 2 = it joined one, 0 = no room */
 int nnldn_has_node(uint32_t ip) {
     AcquireSRWLockShared(&L.lock);
     int in = in_network() && node_index(ip) >= 0;

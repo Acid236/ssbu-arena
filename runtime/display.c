@@ -21,7 +21,7 @@ void os_signal_event(uint64_t key);
 
 static HWND g_hwnd;
 #ifdef _WIN32
-static HICON g_icon_small;                /* the title bar's small icon (opensmash.ico), set after the window is made */
+static HICON g_icon_small, g_icon_big;                /* the title bar's small icon (opensmash.ico), set after the window is made */
 #endif
 static volatile LONG g_ready;
 static volatile LONG64 g_frames;
@@ -466,9 +466,9 @@ static HWND g_hwnd_menu;                               /* g_hwnd, for the functi
 void display_set_window_mode(int mode) { if (g_hwnd_menu) PostMessageA(g_hwnd_menu, WM_APP + 0x51, (WPARAM)mode, 0); }
 void display_set_client_size(int w, int h) { if (g_hwnd_menu) PostMessageA(g_hwnd_menu, WM_APP + 0x52, (WPARAM)w, (LPARAM)h); }
 int display_window_mode(void) { return g_full ? (g_topmost ? 2 : 1) : 0; }
+#include "loading_anim.c"                            /* U3: the loading animation until the game's first present */
 static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
-    if (m == WM_PAINT && g_frames == 0) { splash_paint(h); return 0; }
-    if (m == WM_TIMER && w == 1) { if (g_frames) KillTimer(h, 1); else InvalidateRect(h, NULL, FALSE); return 0; }
+    if (la_wndproc(h, m, w)) return 0;
     if (m == WM_EXITSIZEMOVE && !g_full) place_save(h);      /* F11 borderless: not a window place */
     if (m == WM_CLOSE) {                             /* the exit request: nn::oe decides (nnmisc.c oe_exit_request) whether the game ends now or after its exit-request handling section */
         if (!g_full) place_save(h);
@@ -520,6 +520,7 @@ static DWORD WINAPI window_thread(LPVOID arg) {
             strcpy(ico + n, "opensmash.ico");
             wc.hIcon = (HICON)LoadImageA(NULL, ico, IMAGE_ICON, 0, 0, LR_LOADFROMFILE | LR_DEFAULTSIZE);
             g_icon_small = (HICON)LoadImageA(NULL, ico, IMAGE_ICON, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_LOADFROMFILE);
+            g_icon_big = (HICON)LoadImageA(NULL, ico, IMAGE_ICON, 256, 256, LR_LOADFROMFILE);
         }
     }
     RegisterClassA(&wc);
@@ -575,13 +576,14 @@ static DWORD WINAPI window_thread(LPVOID arg) {
                                  r.bottom - r.top, NULL, NULL, wc.hInstance, NULL);
         if (maxed) ShowWindow(g_hwnd, SW_SHOWMAXIMIZED);
         if (g_hwnd && g_icon_small) SendMessageA(g_hwnd, WM_SETICON, ICON_SMALL, (LPARAM)g_icon_small);
+        if (g_hwnd && g_icon_big) SendMessageA(g_hwnd, WM_SETICON, ICON_BIG, (LPARAM)g_icon_big);      /* the 256 px image: the taskbar / Alt+Tab scale it down sharp (the class icon is only 32 px: blurry on a high-DPI screen) */
     } else {
         g_hwnd = CreateWindowExA(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, wc.lpszClassName, g_title, style, -32000, -32000,
                                  r.right - r.left, r.bottom - r.top, NULL, NULL, wc.hInstance, NULL);
         ShowWindow(g_hwnd, SW_SHOWNOACTIVATE);
     }
     g_hwnd_menu = g_hwnd; g_topmost = go->window_mode == 2;      /* U1 (settings menu) */
-    SetTimer(g_hwnd, 1, 50, NULL);                   /* the loading screen's animation, until the first frame */
+    la_start(g_hwnd, visible);                                   /* U3: the loading animation (loading_anim.c) */
     InterlockedExchange(&g_ready, 1);
     MSG msg;
     while (GetMessageA(&msg, NULL, 0, 0) > 0) { TranslateMessage(&msg); DispatchMessageA(&msg); }
@@ -594,6 +596,10 @@ static DWORD WINAPI window_thread(LPVOID arg) {
  * is SDL's, which this thread's event pumping keeps current; nnpad_sdl.c flushes the queue on its own thread, so the
  * close request is caught by an event watch rather than read from the queue. */
 #include <SDL3/SDL.h>
+/* U3: no loading animation in the SDL window yet (the Windows one is loading_anim.c) */
+static volatile LONG g_la_first = 1;
+static void la_stop(void) {}
+static void la_note(const char *note) { (void)note; }
 int oe_exit_request(void);                            /* nnmisc.c */
 static char g_title[96];
 static bool SDLCALL close_watch(void *user, SDL_Event *e) {
@@ -1048,6 +1054,7 @@ static void l1_report(FILE *out) {
  * the refresh that shows this frame, by the same rule as frame_queued, and whether the present is held for it. A frame
  * queued before the tick it is due at (on time) is held until that tick; a late one is presented at once. */
 void display_present_plan(int vulkan) {
+    if (!g_la_first) la_stop();                            /* U3: the first present: the loading animation stops before it (loading_anim.c) */
     if (!vulkan || old_pacing()) return;
     pace_options();
     LONG64 now_n = g_vsync_n, iv = g_interval, prev = g_latch, at = now_n + 1;
@@ -1218,6 +1225,7 @@ int display_wait_refresh(void) {
 /* Before a present: a frame queued earlier that nobody waited for (a caller that does not wait on the window sync). */
 void display_before_present(void) {
     static int said;
+    if (!g_la_first) la_stop();
     if (old_pacing() || !g_latch_pending) return;
     if (!said) { said = 1; printf("display: a present without a wait on the window texture's sync: held at the next present instead%c", 10); }
     display_wait_refresh();
@@ -1226,6 +1234,7 @@ void display_pace(void) {
     static LARGE_INTEGER next, second_start;
     static LONG64 second_frames;
     LARGE_INTEGER now;
+    if (!g_la_first) la_stop();                            /* (a present that came by neither call above) */
     if (!old_pacing()) { frame_queued(); return; }
     QueryPerformanceCounter(&now);
     if (!next.QuadPart) { next = now; second_start = now; }
@@ -1312,6 +1321,7 @@ void display_refresh_info(double *hz, int *lock_k) {
 /* nvn_vk_store.c: a note in the window's title while the first start reads the game data (minutes on a slow disk, before
  * the game shows any frame: issue #57 looked like a black screen); NULL puts the normal title back */
 void display_title_note(const char *note) {
+    la_note(note);                                         /* U3: the line beside the loading animation */
 #ifdef _WIN32
     if (!g_hwnd) return;
     char t[400];

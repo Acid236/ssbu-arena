@@ -1,0 +1,52 @@
+# N3 full match, host: as seq_n3_host.txt to the waiting stage, L+R once; the versus screen (~640 draws), the match;
+# then hold LEFT (runs off the stage: loses every stock, the match ends with a result); run with SSBU_DET_OFF=2
+@movie
+@draws:22-26/30
+@draws:36-44/30
+30:Z
+@draws:700-800/40
+60:W
+60:r/6
+60:r/6
+60:Z
+240:!
+240:Z
+240:!
+@ldn:created
+@draws:55-70/30
+60:Z
+@ldn:station-joined
+@draws:340-370/20
+60:Z
+@draws:295-325/30
+60:Z
+@draws:540-680/40
+30:u/30 20:l/18 30:Z
+90:Z
+90:Z
+@draws:195-230/60
+300:W
+@untilmark:setup-2p:QE/600/120
+@draws:15-45/20
+@draws:150-520/120
+120:W
+20:l/700 10:Z/6
+20:l/700 10:Z/6
+20:l/700 10:Z/6
+20:l/700 10:Z/6
+20:l/700 10:Z/6
+20:l/700 10:Z/6
+20:l/700 10:Z/6
+20:l/700 10:Z/6
+600:W
+600:W
+600:W
+600:W
+600:W
+600:W
+600:W
+600:W
+600:W
+600:W
+600:W
+600:W

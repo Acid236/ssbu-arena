@@ -106,8 +106,8 @@ TOOLS = {   # checked 2026-10-19: SDL3 and glslang equal GitHub's own asset dige
 # The prebuilt runtime package of the GitHub Release of this version (scripts/make_release.py): (URL, SHA-256 of the zip).
 # (None, None) until the maintainer has uploaded the package made from this commit and written its hash here; the
 # download is refused when the hash does not match, and setup.py uses the package only with the tree it was built from.
-RUNTIME_RELEASE = ('https://github.com/Denkishi/ssbu-recomp/releases/download/runtime-1cc878a/ssbu-runtime-1cc878a571.zip',
-                   'f3584d1c931812c660d4fba6863d4630e19d1165bb955cd3a523c82f47ae2143')
+RUNTIME_RELEASE = ('https://github.com/Denkishi/ssbu-recomp/releases/download/runtime-17fe568/ssbu-runtime-17fe568717.zip',
+                   '604f06ffbbdb97506e40c9ea2271cf4437da00fc74164925cc5fdf6f3de3d319')
 
 SETUP_STEPS = ['deps', 'stage', 'convert', 'modules', 'tables', 'lift', 'sdk', 'compile', 'nro', 'link', 'check']
 # expected seconds, measured 2026-10-19 on a PC with 12 jobs and 32 threads (compile and nro scale with 12 / jobs)
@@ -898,8 +898,8 @@ def step_build(cx, P):
                 P.end(s, 'dry', 'would run scripts/setup.py step %s' % s)
         return
     cmd = [sys.executable, os.path.join(HERE, 'setup.py'), '--build', BUILD, '--dump', cx.dump] + cx.setup_args
-    if a.rollback:
-        cmd += ['--rollback']
+    if getattr(a, 'no_inline', False):
+        cmd += ['--no-inline']
     if a.jobs:
         cmd += ['--jobs', str(a.jobs)]
     if cx.rebuild_from and cx.rebuild_from in SETUP_STEPS:
@@ -1045,7 +1045,8 @@ def parse(argv):
                                         '.nsz decompression (about 25 GB; default <repo>\\build). Remembered in build_location.txt, '
                                         'so Resume, setup.py, run.py, Play SSBU.bat and the shortcuts use it too')
     ap.add_argument('--jobs', type=int, help='parallel compiler jobs')
-    ap.add_argument('--rollback', action='store_true', help='also build the rollback netcode pair (setup.py --rollback: a second game DLL, about as long as the first compile)')
+    ap.add_argument('--no-inline', action='store_true', help='a shorter game compile (about 45 %% less), a slower game (setup.py --no-inline)')
+    ap.add_argument('--rollback', action='store_true', help='not needed any more (online rollback runs on the normal build); ignored')
     ap.add_argument('--prepare-only', action='store_true', help='stop before the build (steps 1-7 only)')
     ap.add_argument('--runtime', help='prebuilt runtime package (zip or folder) to use instead of the one of the GitHub Release')
     ap.add_argument('--no-runtime', action='store_true', help='build everything here, the exe too (needs the MSVC Build Tools)')

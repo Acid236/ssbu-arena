@@ -27,6 +27,17 @@
  *  18 ROOM_INFO lobby:  seq u32, host address u32, players u8, most u8, flags u8 (1 open, 2 yours, 4 mods known),
  *                       host name[32], build[40], mod-set block                  (up to 32, joinable first)
  *  19 ROOMS_END lobby:  seq u32, count u8
+ * O2 (2026-10-21, plan\phases\O2_matchmaking.md): matchmaking, "Find an opponent" (F1 > Online). An older lobby ignores
+ * MATCH (the game then says "older lobby"); an older game never sends it and is never matched.
+ *  20 MATCH       client: cookie u64, op u8 (1 search: sent again every 2 s while searching or matched; 0 cancel), search id u32
+ *  21 MATCH_STATE lobby:  search id u32, state u8 (0 idle, 1 searching, 2 matched, 3 timeout, 4 the other cancelled or left,
+ *                         5 both in one room, 6 expired), role u8 (1 you host, 2 you join), flags u8 (1 the host's room is
+ *                         open), the other player's address u32, its name[32], players searching u16, players u16 (both of
+ *                         this build and code), seconds waited u16
+ *   PONG may end with: players searching u16 (this build and code), players u16 (every build of this code)
+ * R3 net3 (lobby 1.4): MATCH op 2 = a search for a ROLLBACK match (rb_net.c: Smash versus with rollback on, no room code, no
+ * Local Wireless room): paired only with another op 2 search, the one that waited longer is player 1 (role 1); the lobby
+ * says TOGETHER once it relayed rollback messages both ways between the two. An older lobby ignores op 2 (= older lobby).
  * The build id is "ssbu-recomp-ldn1-<game version>" plus "+m<8 hex>" when mods are loaded (the hash of the mod set):
  * the lobby keeps parting players by build and code, so different versions or mod sets never share a room.
  * The lobby gives every player its own virtual address and relays a Local Wireless room's datagrams between that room's
@@ -63,6 +74,7 @@
 enum { T_JOIN = 1, T_WELCOME, T_REJECT, T_PING, T_PONG, T_DATA, T_LEAVE, T_LIST, T_LISTING, T_LIST_END,
        T_PEERS, T_PUNCH, T_DIRECT, T_BCAST };
 enum { T_ROOMS = 17, T_ROOM_INFO, T_ROOMS_END };      /* O1 room browser */
+enum { T_MATCH = 20, T_MATCH_STATE };                 /* O2 matchmaking */
 #define PROTO 1
 #define NAME_LEN 32
 #define BUILD_LEN 40
@@ -330,7 +342,7 @@ static void configure(void) {
     static const char *mode_names[] = {"lobby", "lan (no server)", "host (no server)", "join (no server)"};
     printf("[online] on: mode %s%s, lobby %s, code %s, name %s, direct paths %s, build %s\n", mode_names[g_mode], g_auto ? " (auto)" : "",
            g_mode == NET_MODE_LOBBY ? g_server : g_mode == NET_MODE_JOIN ? g_join : "inside this game", g_code, g_name, g_direct ? "allowed" : "off", g_build);
-    printf("[online] mods: %s; rooms of other builds %s\n", g_mods_text, g_list_other ? "shown in the game's list (joining them is refused, with the reason)" : "only in F1 > Online rooms");
+    printf("[online] mods: %s; rooms of other builds %s\n", g_mods_text, g_list_other ? "shown in the game's list (joining them is refused, with the reason)" : "only in F1 > Online");
     fflush(stdout);
 }
 int net_online(void) { configure(); return g_cfg; }
@@ -349,7 +361,7 @@ static void say(const char *fmt, ...) {
 /* ---------------------------------------------------------------- state */
 static SOCKET g_sock = INVALID_SOCKET;
 static struct sockaddr_in g_lobby;
-static volatile LONG g_joined, g_players, g_rooms, g_ping = -1;
+static volatile LONG g_joined, g_players, g_rooms, g_ping = -1, g_searching = -1, g_code_players = -1;
 static volatile uint32_t g_ip;
 static uint64_t g_nonce, g_cookie, g_last_pong, g_unjoined_since;
 static uint32_t g_lan_ip;
@@ -452,10 +464,26 @@ static void tx(const void *p, int n, const struct sockaddr_in *to) {
 void rbn_rx(const uint8_t *p, int n);                  /* rb_net.c */
 static volatile uint32_t g_rb_peer;
 int net_rb_ready(void) { return g_cfg > 0 && g_joined && g_sock != INVALID_SOCKET; }
+/* (R3 pub1, testers 2026-10-20: "messages sent 0, received 0" for 120 s with the other player in the room) the destination was
+ * only learnt from a message received (g_rb_peer), so the joiner's first messages went to "0 = every other player of this lobby
+ * code", which the PUBLIC lobby drops (tools_net/ssbu_lobby.py: destination 0 only with a private code): neither game ever
+ * heard the other (the host answers only a CHOICE). Now the destination is the other player of this Local Wireless room
+ * (nnldn.c), else the address learnt; 0 on the public code of a lobby SERVER = nothing can arrive (the in-game lobbies of HOST / JOIN / LAN pass 0 on): not sent (counted, the notice says so). */
+uint32_t nnldn_other_ip(void);
+static const char *ip_text(uint32_t ip, char *b);
+static volatile uint32_t g_rb_match_peer;              /* (R3 net3) the opponent of the last rollback-match search (lobby 1.4), 0 = none */
+static volatile LONG64 g_rb_rx_other;                  /* (R3 net3) rollback messages from another player than that opponent: dropped */
+static volatile LONG g_rb_nodst; static volatile uint32_t g_rb_dst_said;
+int net_rb_no_destination(void) { return g_rb_nodst; }
 int net_rb_send(const void *p, int n) {
     if (!net_rb_ready() || n <= 0 || n > 1400) return 0;
+    uint32_t dst = nnldn_other_ip(), room = dst;
+    if (!dst) dst = g_rb_match_peer;                    /* (R3 net3) the opponent the lobby found for this rollback match */
+    if (!dst) dst = g_rb_peer;
+    if (!dst && g_mode == NET_MODE_LOBBY && !_stricmp(g_code, "public")) { InterlockedIncrement(&g_rb_nodst); return 0; }
+    if (dst && dst != g_rb_dst_said) { char a[16]; g_rb_dst_said = dst; printf("[rbnet] rollback messages go to %s (%s)\n", ip_text(dst, a), room ? "the other player of this Local Wireless room" : dst == g_rb_match_peer ? "the opponent the lobby found" : "the game that wrote to this one"); fflush(stdout); }
     uint8_t b[1500];
-    hdr(b, T_RB); s64(b + 4, g_cookie); s32(b + 12, g_rb_peer);
+    hdr(b, T_RB); s64(b + 4, g_cookie); s32(b + 12, dst);
     memcpy(b + 16, p, (size_t)n);
     tx(b, 16 + n, &g_lobby);
     return 1;
@@ -733,7 +761,7 @@ static int room_why(const char *b, int known, const ModEntry *m, int nm, char *o
         return 1;
     }
     if (!strchr(b, '+')) { known = 1; nm = 0; }      /* the room's game loads no mods */
-    if (known < 0) { snprintf(out, n, "Different mods: this room uses another set of mods (F1 > Online rooms names them)"); return 1; }
+    if (known < 0) { snprintf(out, n, "Different mods: this room uses another set of mods (F1 > Online names them)"); return 1; }
     if (!known) { snprintf(out, n, "Different mods: this room's game uses other mods (it is an older version that does not name them)"); return 1; }
     char missing[256] = "", other[256] = "", extra[256] = "";
     for (int i = 0; i < nm; i++) {
@@ -845,6 +873,168 @@ int net_room_refusal(uint32_t host, char *why, size_t n) {
     say("refused to join the room of 10.13.%u.%u (build %s): %s", host >> 8 & 255, host & 255, b, why);
     menu_popup(title, why);
     return 1;
+}
+
+/* ---------------------------------------------------------------- O2: matchmaking ("Find an opponent", F1 > Online)
+ * net_match_find() starts a search: the client thread sends MATCH (op 1, a new search id) every 2 s while it searches or
+ * is matched; the lobby answers each with MATCH_STATE (and sends one by itself when something changes). The lobby picks
+ * the host. Nothing is driven in the game's menus: the host is told to create a room (Local Wireless > Create Room), the
+ * other to open Local Wireless > Rooms List, where nnldn.c puts the host's room first (net_match_host). A popup says
+ * each step over the game; F1 > Online shows the state. TEST SWITCH SSBU_MATCH_TEST=1 (default off): the search starts
+ * by itself once the lobby answered (log "[online] match: ..."; input marks @match:host, @match:join, @match:room-open,
+ * @match:together for an input sequence). */
+void input_mark(const char *what);                      /* nnhid.c */
+static SRWLOCK g_mm_lock = SRWLOCK_INIT;
+static NetMatch g_mm = {MM_IDLE};
+static volatile LONG g_mm_want, g_mm_cancel;            /* searching / matched (MATCH op 1 every 2 s); cancels left to send */
+static uint32_t g_mm_id;
+static volatile LONG g_mm_kind = 1;                     /* (R3 net3) MATCH op of the search: 1 a Local Wireless search, 2 a rollback-match search */
+static uint64_t g_mm_tx, g_mm_asked;                    /* (client thread) last MATCH sent; when the search was asked (no answer yet) */
+static int g_mm_room_said;
+static const char *mm_name(int st) {
+    static const char *n[] = {"idle", "searching", "matched", "timeout", "the other player left", "together", "expired", "asking", "older lobby", "off"};
+    return st >= 0 && st <= MM_OFFLINE ? n[st] : "?";
+}
+static void mm_find(int kind) {
+    if (!net_online()) return;
+    AcquireSRWLockExclusive(&g_mm_lock);
+    g_mm_id = (uint32_t)rnd64() | 1;
+    memset(&g_mm, 0, sizeof g_mm);
+    g_mm.state = MM_ASKING;
+    g_mm.kind = kind;
+    g_mm_room_said = 0;
+    InterlockedExchange(&g_mm_kind, kind);
+    g_rb_match_peer = 0;                                /* (a new search: the last opponent's messages are not taken any more) */
+    ReleaseSRWLockExclusive(&g_mm_lock);
+    InterlockedExchange(&g_mm_cancel, 0);
+    InterlockedExchange(&g_mm_want, 1);
+    g_mm_tx = 0;
+    say("match: searching for an opponent%s (build %s, code %s)", kind == 2 ? " for a rollback match (Smash versus)" : "", g_build, g_code);
+}
+void net_match_find(void) { mm_find(1); }
+void net_match_find_rb(void) { mm_find(2); }
+void net_match_cancel(void) {
+    AcquireSRWLockExclusive(&g_mm_lock);
+    int was = g_mm.state;
+    if (was == MM_SEARCHING || was == MM_MATCHED || was == MM_ASKING) g_mm.state = MM_IDLE;
+    ReleaseSRWLockExclusive(&g_mm_lock);
+    if (InterlockedExchange(&g_mm_want, 0)) { InterlockedExchange(&g_mm_cancel, 3); g_mm_tx = 0; say("match: cancelled (%s)", mm_name(was)); }
+}
+uint32_t net_match_host(void) {
+    AcquireSRWLockShared(&g_mm_lock);
+    uint32_t h = g_mm.state == MM_MATCHED && g_mm.role == MM_ROLE_JOIN ? g_mm.peer : 0;
+    ReleaseSRWLockShared(&g_mm_lock);
+    return h;
+}
+void net_match_get(NetMatch *o) {
+    if (g_cfg <= 0) { memset(o, 0, sizeof *o); o->state = MM_OFFLINE; o->players = o->searching = o->code_players = -1; return; }
+    AcquireSRWLockShared(&g_mm_lock);
+    *o = g_mm;
+    ReleaseSRWLockShared(&g_mm_lock);
+    if (!g_joined) { o->players = o->searching = o->code_players = -1; if (o->state == MM_IDLE) o->state = MM_OFFLINE; return; }
+    if (o->state != MM_SEARCHING && o->state != MM_MATCHED) {   /* (the lobby's own counts between searches: PONG) */
+        o->players = (int)g_players; o->searching = (int)g_searching; o->code_players = (int)g_code_players;
+    } else o->code_players = (int)g_code_players;
+}
+static void mm_send(int op) {                           /* (client thread) */
+    uint8_t p[4 + 8 + 1 + 4];
+    hdr(p, T_MATCH);
+    s64(p + 4, g_cookie);
+    p[12] = (uint8_t)op;
+    s32(p + 13, g_mm_id);
+    tx(p, sizeof p, &g_lobby);
+}
+static void mm_tick(uint64_t t) {                       /* (client thread, joined) */
+    static int test = -1;
+    if (test < 0) { const char *e = getenv("SSBU_MATCH_TEST"); test = e && e[0] == '1'; if (test) { say("match: TEST: searching by itself (SSBU_MATCH_TEST=1)"); net_match_find(); } }
+    if (g_mm_cancel > 0) {
+        if (t - g_mm_tx >= 300) { mm_send(0); g_mm_tx = t; InterlockedDecrement(&g_mm_cancel); }
+        return;
+    }
+    if (!g_mm_want || t - g_mm_tx < 2000) return;
+    if (!g_mm_tx) g_mm_asked = t;
+    mm_send((int)g_mm_kind);
+    g_mm_tx = t;
+    AcquireSRWLockExclusive(&g_mm_lock);
+    int old = g_mm.state == MM_ASKING && t - g_mm_asked > 6500;
+    if (old) g_mm.state = MM_OLD_LOBBY;
+    ReleaseSRWLockExclusive(&g_mm_lock);
+    if (old) {
+        InterlockedExchange(&g_mm_want, 0);
+        say("match: the lobby does not answer MATCH%s (an older lobby server): no matchmaking there", g_mm_kind == 2 ? " for a rollback match" : "");
+        if (g_mm_kind != 2) menu_popup("Find an opponent", "This lobby server is an older version: it cannot find opponents.\nCreate a room yourself (Local Wireless > Create Room) or look at F1 > Online.");
+    }
+}
+static void mm_state(const uint8_t *p, uint64_t t) {    /* (client thread) a MATCH_STATE body */
+    uint32_t id = g32(p);
+    int st = p[4], role = p[5], flags = p[6];
+    if (id != g_mm_id || st > MM_EXPIRED) return;
+    char name[NAME_LEN + 1];
+    for (int k = 0; k < NAME_LEN; k++) name[k] = p[11 + k] && p[11 + k] < 0x20 ? '?' : (char)p[11 + k];
+    name[NAME_LEN] = 0;
+    if (!name[0]) snprintf(name, sizeof name, "the other player");
+    AcquireSRWLockExclusive(&g_mm_lock);
+    int was = g_mm.state, want = g_mm_want;
+    if (!want) {                                        /* cancelled (or over): the lobby's IDLE ends the cancel; anything else is late */
+        if (st == MM_IDLE) InterlockedExchange(&g_mm_cancel, 0);
+        ReleaseSRWLockExclusive(&g_mm_lock);
+        return;
+    }
+    int open_before = g_mm.room_open;
+    g_mm.state = st;
+    g_mm.role = role;
+    g_mm.room_open = flags & 1;
+    g_mm.peer = g32(p + 7);
+    memcpy(g_mm.peer_name, name, sizeof g_mm.peer_name);
+    g_mm.searching = g16(p + 43);
+    g_mm.players = g16(p + 45);
+    g_mm.waited_s = g16(p + 47);
+    int room_new = st == MM_MATCHED && role == MM_ROLE_JOIN && g_mm.room_open && (!open_before || was != MM_MATCHED) && !g_mm_room_said;
+    if (room_new) g_mm_room_said = 1;
+    int rbk = g_mm.kind == 2;
+    if (rbk && (st == MM_MATCHED || st == MM_TOGETHER) && g_mm.peer) g_rb_match_peer = g_mm.peer;
+    ReleaseSRWLockExclusive(&g_mm_lock);
+    if (st >= MM_TIMEOUT) InterlockedExchange(&g_mm_want, 0);
+    (void)t;
+    if (rbk) {                                          /* (R3 net3) a rollback-match search: rb_net.c's box shows every step; log lines + a mark only */
+        if (st == MM_MATCHED && was != MM_MATCHED) { uint32_t ip = g32(p + 7);
+            say("match: matched with %s (10.13.%u.%u) for a rollback match: this game is player %d", name, ip >> 8 & 255, ip & 255, role == MM_ROLE_HOST ? 1 : 2); input_mark("match:rb"); }
+        else if (st != was && st >= MM_TIMEOUT) {
+            static const char *line[] = {"", "", "", "no opponent found in time", "the other player cancelled or left", "both games exchange rollback messages", "the match expired"};
+            say("match (rollback): %s%s%s", line[st], st == MM_TIMEOUT ? "" : ": ", st == MM_TIMEOUT ? "" : name);
+        } else if (st == MM_SEARCHING && was == MM_ASKING) say("match: the lobby is searching for a rollback match (%d of %d players of this build searching)", g16(p + 43), g16(p + 45));
+        return;
+    }
+    char text[256], title[96];
+    if (st == MM_MATCHED && was != MM_MATCHED) {
+        uint32_t ip = g32(p + 7);
+        say("match: matched with %s (10.13.%u.%u): %s", name, ip >> 8 & 255, ip & 255, role == MM_ROLE_HOST ? "this game hosts" : "this game joins their room");
+        snprintf(title, sizeof title, "Matched with %s", name);
+        if (role == MM_ROLE_HOST) {
+            snprintf(text, sizeof text, "You host: Local Wireless > Create Room (or keep your open room).\nAccept %s's request when it appears.", name);
+            input_mark("match:host");
+        } else if (flags & 1) {
+            snprintf(text, sizeof text, "%s hosts and their room is open:\nLocal Wireless > Rooms List, their room is first. Join it.", name);
+            input_mark("match:join");
+        } else {
+            snprintf(text, sizeof text, "%s hosts: open Local Wireless > Rooms List,\ntheir room will be first as soon as they create it.", name);
+            input_mark("match:join");
+        }
+        menu_popup(title, text);
+        if (room_new) { say("match: %s's room is open", name); input_mark("match:room-open"); }
+    } else if (room_new) {
+        say("match: %s's room is open", name);
+        snprintf(title, sizeof title, "%s's room is open", name);
+        menu_popup(title, "Local Wireless > Rooms List: their room is first. Join it.");
+        input_mark("match:room-open");
+    } else if (st != was && st >= MM_TIMEOUT) {
+        static const char *line[] = {"", "", "", "no opponent found in time", "the other player cancelled or left", "both in the same room", "the match expired (no room together in time)"};
+        say("match: %s%s%s", line[st], st == MM_TIMEOUT ? "" : ": ", st == MM_TIMEOUT ? "" : name);
+        if (st == MM_TIMEOUT) menu_popup("No opponent found", "Nobody with your version and mods searched in time.\nTry again later (F1 > Online > Find an opponent), or create a room.");
+        else if (st == MM_PEER_LEFT) { snprintf(title, sizeof title, "Match with %s cancelled", name); menu_popup(title, "They cancelled or left the lobby. F1 > Online > Find an opponent searches again."); }
+        else if (st == MM_TOGETHER) { snprintf(title, sizeof title, "In a room with %s", name); menu_popup(title, "Have a good match!"); input_mark("match:together"); }
+        else { snprintf(title, sizeof title, "Match with %s expired", name); menu_popup(title, "You did not meet in a room in time. F1 > Online > Find an opponent searches again."); }
+    } else if (st == MM_SEARCHING && was == MM_ASKING) say("match: the lobby is searching (%d of %d players of this build searching)", g16(p + 43), g16(p + 45));
 }
 
 /* ---------------------------------------------------------------- the client thread */
@@ -1228,6 +1418,7 @@ static DWORD WINAPI client_thread(LPVOID unused) {
         }
         if (g_joined && t - last_tick >= 50) { peers_tick(t); last_tick = t; }
         if (g_joined && t - (uint64_t)g_rooms_wanted < 5000 && t - g_rooms_sent >= 2000) rooms_ask(t);     /* O1: while someone looks */
+        if (g_joined) mm_tick(t);                                                                         /* O2 */
         struct sockaddr_in from;
         int flen = sizeof from;
         int n = recvfrom(g_sock, (char *)buf, sizeof buf, 0, (struct sockaddr *)&from, &flen);
@@ -1262,7 +1453,11 @@ static DWORD WINAPI client_thread(LPVOID unused) {
                 InterlockedExchange(&g_ping, (LONG)(g_last_pong - g64(buf + 4)));
                 InterlockedExchange(&g_players, g16(buf + 12));
                 InterlockedExchange(&g_rooms, g16(buf + 14));
+                if (n >= 20) { InterlockedExchange(&g_searching, g16(buf + 16)); InterlockedExchange(&g_code_players, g16(buf + 18)); }   /* O2 (a newer lobby) */
             }
+            break;
+        case T_MATCH_STATE:
+            if (n >= 4 + 49 && g_joined) mm_state(buf + 4, ms_now());
             break;
         case T_LISTING:
             if (n >= 12 + NI_SIZE && g_joined) {
@@ -1287,7 +1482,9 @@ static DWORD WINAPI client_thread(LPVOID unused) {
             if (g_joined && g_direct) read_peers(buf + 4, n - 4);
             break;
         case T_RB:                                       /* R3: a rollback message of the other player */
-            if (n > 8 && g_joined) { uint32_t src = g32(buf + 4); if (src && src != g_ip) { g_rb_peer = src; rbn_rx(buf + 8, n - 8); } }
+            if (n > 8 && g_joined) { uint32_t src = g32(buf + 4), mp = g_rb_match_peer;
+                if (mp && src != mp && !nnldn_other_ip()) { InterlockedIncrement64(&g_rb_rx_other); break; }     /* (R3 net3) not our opponent */
+                if (src && src != g_ip) { g_rb_peer = src; rbn_rx(buf + 8, n - 8); } }
             break;
         }
     }
@@ -1367,6 +1564,8 @@ void net_status(char *out, size_t n) {
     if (!net_online()) { if (n) out[0] = 0; return; }
     if (!g_joined) { snprintf(out, n, "online: %s", g_reject[0] ? g_reject : "connecting to the lobby"); return; }
     static const char *m[] = {"lobby", "LAN", "host", "join"};
-    snprintf(out, n, "online (%s): %ld players, %ld rooms, 10.13.%u.%u, ping %ld ms%s%s", m[g_mode], (long)g_players, (long)g_rooms, g_ip >> 8 & 255, g_ip & 255,
+    char srch[32] = "";
+    if (g_searching >= 0) snprintf(srch, sizeof srch, " (%ld searching)", (long)g_searching);
+    snprintf(out, n, "online (%s): %ld players%s, %ld rooms, 10.13.%u.%u, ping %ld ms%s%s", m[g_mode], (long)g_players, srch, (long)g_rooms, g_ip >> 8 & 255, g_ip & 255,
              (long)g_ping, g_mode == NET_MODE_HOST && g_room_code[0] ? ", room code " : "", g_mode == NET_MODE_HOST ? g_room_code : "");
 }
