@@ -968,7 +968,11 @@ static DWORD WINAPI osk_name_thread(LPVOID arg) {          /* the player's name 
     InterlockedExchange(&g_osk_busy, 0);
     return 0;
 }
-static DWORD WINAPI restart_thread(LPVOID) { Sleep(100); exit(0); return 0; }      /* the exit handlers run */
+/* (2026-10-21, a Linux tester: Exit game / Restart -> SIGSEGV, then the process stayed and grew until the OOM killer) exit()
+ * ran the exit handlers while the game's threads still ran: a thread jumped into what they had freed. Here (Linux / macOS:
+ * no UPnP or lobby handlers to run) the end is report_and_exit: the reports, the log flushed, then _exit, as the window's X does. */
+extern "C" void report_and_exit(int code);                 /* hostrt.c */
+static DWORD WINAPI restart_thread(LPVOID) { Sleep(100); report_and_exit(0); return 0; }
 static void restart_game(void) {                           /* this exe again, same arguments, environment and standard handles */
     char pid[16], exe[MAX_PATH], path[MAX_PATH];
     snprintf(pid, sizeof pid, "%d", (int)getpid());
