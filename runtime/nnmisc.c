@@ -236,7 +236,7 @@ static LARGE_INTEGER g_start;
  * The operation mode never changes on a PC (always the TV mode), so MessageOperationModeChanged (30) and
  * MessagePerformanceModeChanged (31) never occur; the enable flags are kept as the game sets them.
  * (close4: the state now follows the applet manager's table, see oe_track_focus: not in focus = 2 only while the window is
- * visible; minimised = 3 for a NoSuspend application and no change at all in the suspending modes.)
+ * visible, and since 2026-10-21 only with SSBU_FOCUS_OBSCURED=1 (a window behind another one runs); minimised = 3 for a NoSuspend application and no change at all in the suspending modes.)
  * The watcher below also suspends guest threads in the suspending modes (0, 2, 3). A window that has never
  * been in the foreground (the automated tests keep theirs off screen) is treated as in focus.
  * Closing the window is the exit request: see oe_exit_request below.
@@ -347,6 +347,7 @@ static DWORD WINAPI oe_watch(LPVOID unused) {
     }
     return 0;
 }
+long long nvn_front_frame_next(void);                     /* nvn_front.c */
 static void oe_track_focus(void) {
     static int enabled = -1;
     static ULONGLONG last;
@@ -369,15 +370,26 @@ static void oe_track_focus(void) {
      * (something else has the input, as under an overlay or a library applet); minimised = Background (as behind the HOME menu).
      * The handling mode is what [sdk 0x32c3d0, table 0xa7ff70] sends for the oe mode: 0 = (notify 0, suspend 1), 1 = (notify 1,
      * suspend 0) NoSuspend, 2 = (notify 1, suspend 1), 3 = (notify 0, suspend 1) + SetOutOfFocusSuspendingEnabled(1) AlwaysSuspend. */
+    /* (boot freeze of 2026-10-21) OBSCURED IS IN FOCUS on a PC. The game (handling mode 2) answers NotInFocus by clearing the
+     * event its main loop waits on at every frame (main loop 0x7103747bf0, message thread 0x7103754940): the loop stops until
+     * the window is in front again. A player who switched to another window while the shaders loaded (15-60 s at frame 1) got
+     * a black window "frozen" at game frame 2; with two game windows (rollback tests, two players on one PC) the one behind
+     * never ran. Under a real overlay the console does the same, but a PC window behind another one is still on screen and
+     * should run like any PC game. SSBU_FOCUS_OBSCURED=1: the console rule (NotInFocus while obscured) as before. */
+    static int obscured_rule = -1;
+    if (obscured_rule < 0) { const char *e = getenv("SSBU_FOCUS_OBSCURED"); obscured_rule = e && e[0] == '1'; }
     int minimised = g_oe_window && IsIconic(g_oe_window);
     int state = ours ? 1                                                    /* InFocus */
               : g_oe_focus_mode == 3 ? 1                                    /* AlwaysSuspend: the application never learns it */
-              : !minimised ? 2                                              /* obscured: NotInFocus in the other three modes */
+              : !minimised ? (obscured_rule ? 2 : 1)                        /* obscured: NotInFocus in the other three modes (console rule, opt-in) */
               : g_oe_focus_mode == 1 ? 3 : 1;                               /* background: Background (3) for a NoSuspend application, else unchanged */
     if (state != g_oe_focus_state) {
         g_oe_focus_state = state;
         g_oe_focus_pending = 1;                                             /* m_has_focus_state_changed */
         trace_printf("     nn::oe: focus state -> %d (%s; handling mode %d)\n", state, state == 1 ? "in focus" : state == 2 ? "not in focus" : "background", g_oe_focus_mode);
+        printf("nn::oe: focus state -> %d (%s; handling mode %d, game frame %lld)\n", state, state == 1 ? "in focus" : state == 2 ? "not in focus: the game holds its main loop until the window is in front again" : "background",
+               g_oe_focus_mode, nvn_front_frame_next());
+        fflush(stdout);
     }
     if (g_oe_focus_pending && (g_oe_focus_mode == 1 || g_oe_focus_mode == 2)) { g_oe_focus_pending = 0; oe_push(OE_MSG_FOCUS_STATE_CHANGED); }   /* delivered only while notification is enabled */
     LeaveCriticalSection(&g_oe_lock);

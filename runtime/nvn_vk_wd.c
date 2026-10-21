@@ -173,6 +173,7 @@ static void wd_dump(double stall_s, LONG64 tries_since) {
         if (!any) wdp("  waits of ours (stage / library / pipeline being made by another thread, queues): none entered\n");
     }
 #ifdef _WIN32
+    { void os_wait_print(void (*pr)(const char *fmt, ...)); os_wait_print(wdp); }       /* os_threads.c: which event each guest thread waits on, who signalled it last */
     for (int pass = 0; pass < 2; pass++) {         /* CPU time of every thread, twice, 300 ms apart: who is running and who is blocked */
         HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
         THREADENTRY32 te;

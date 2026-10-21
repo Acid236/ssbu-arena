@@ -52,6 +52,9 @@ typedef struct Obj {
     uint64_t retval;                         /* pthread_create threads: start routine's result, for pthread_join */
     DWORD rw_owner;                          /* reader/writer locks: host thread holding the write lock, 0 = none */
     int rw_readers, rw_wcount, rw_wreads;    /* reader/writer locks: readers, write recursion, reads taken by the writer */
+    volatile LONG64 nsig, nreset;            /* events / condition variables: signals and re-inits so far (os_wait_report) */
+    volatile ULONGLONG sig_ms;               /* GetTickCount64 of the last signal */
+    volatile DWORD sig_tid; uint64_t sig_lr; /* who gave it: host thread, guest return address (0 = host code) */
 } Obj;
 
 #define BUCKETS 65536
@@ -92,6 +95,7 @@ static Obj *obj(uint64_t key) {
 static void obj_reset(uint64_t key) {
     Obj *o = obj(key);
     EnterCriticalSection(&o->cs);
+    o->nreset++;
     o->signaled = o->autoclear = o->count = o->max = 0;
     o->len = o->head = 0;
     o->holder_count = 0;
@@ -527,10 +531,43 @@ static void pmtx_trylock(Ctx *c) { RET(TryEnterCriticalSection(&obj(A0)->cs) ? 0
 /* ---------------------------------------------------------------- events (Event, LightEvent, SystemEvent) */
 /* nn::os::EventClearMode: 0 = ManualClear, 1 = AutoClear */
 static void ev_init(Ctx *c) { obj_reset(A0); Obj *o = obj(A0); o->signaled = (int)(A1 & 1); o->autoclear = A2 == 1; }
+/* (boot stall at game frame 2, 2026-10-21) every guest thread's current wait on an event / condition variable, and each
+ * object's last signal: nvn_vk_wd.c prints them in its NO FRAME PRESENTED report (os_wait_report), so a stall names the
+ * object everybody waits on and who signalled it last. A slot per host thread, taken at its first wait. */
+typedef struct { volatile DWORD tid; volatile uint64_t key, lr; volatile ULONGLONG since; const char *volatile what; } OsWait;
+static OsWait g_osw[512];
+static volatile LONG g_osw_n;
+static __declspec(thread) int t_osw = -1;
+static void osw_enter(const char *what, uint64_t key, uint64_t lr) {
+    if (t_osw < 0) { LONG k = InterlockedIncrement(&g_osw_n) - 1; if (k >= 512) { t_osw = 9999; return; } t_osw = (int)k; g_osw[k].tid = GetCurrentThreadId(); }
+    if (t_osw >= 512) return;
+    OsWait *w = &g_osw[t_osw];
+    w->what = what; w->lr = lr; w->since = GetTickCount64(); w->key = key;
+}
+static void osw_leave(void) { if (t_osw >= 0 && t_osw < 512) g_osw[t_osw].key = 0; }
+static void obj_note_signal(Obj *o, uint64_t lr) { o->nsig++; o->sig_ms = GetTickCount64(); o->sig_tid = GetCurrentThreadId(); o->sig_lr = lr; }
+void os_wait_print(void (*pr)(const char *fmt, ...)) {      /* (the Linux freeze report has its own os_wait_report below) */
+    ULONGLONG now = GetTickCount64();
+    int n = g_osw_n < 512 ? (int)g_osw_n : 512, any = 0;
+    for (int i = 0; i < n; i++) {
+        OsWait w = g_osw[i];
+        if (!w.key) continue;
+        Obj *o = obj(w.key);
+        const char *tn = guest_thread_name_of(w.tid), *sn = o->sig_tid ? guest_thread_name_of(o->sig_tid) : NULL;
+        if (!any) pr("  guest waits (os_threads.c): thread, what, object, called from, for how long; the object's state and its last signal\n");
+        any = 1;
+        pr("    thread %lu (%s) %s %llx from %llx for %.1f s | signaled %d autoclear %d, %lld signals, %lld re-inits, last signal %s%.1f s ago by thread %lu (%s) from %llx\n",
+           (unsigned long)w.tid, tn ? tn : "?", w.what ? w.what : "?", (unsigned long long)w.key, (unsigned long long)w.lr, (double)(now - w.since) / 1000.0,
+           o->signaled, o->autoclear, (long long)o->nsig, (long long)o->nreset, o->sig_ms ? "" : "(never) ", o->sig_ms ? (double)(now - o->sig_ms) / 1000.0 : 0.0,
+           (unsigned long)o->sig_tid, sn ? sn : "host", (unsigned long long)o->sig_lr);
+    }
+    if (!any) pr("  guest waits (os_threads.c): no guest thread in an event or condition-variable wait\n");
+}
 static void ev_signal(Ctx *c) {
     L1O("event SIGNAL", A0);
     Obj *o = obj(A0);
     EnterCriticalSection(&o->cs);
+    obj_note_signal(o, c->x[30]);
     o->signaled = 1;
     WakeAllConditionVariable(&o->cv);
     LeaveCriticalSection(&o->cs);
@@ -540,6 +577,7 @@ void os_init_event(uint64_t key, int autoclear) { obj_reset(key); Obj *o = obj(k
 void os_signal_event(uint64_t key) {
     Obj *o = obj(key);
     EnterCriticalSection(&o->cs);
+    obj_note_signal(o, 0);
     o->signaled = 1;
     WakeAllConditionVariable(&o->cv);
     LeaveCriticalSection(&o->cs);
@@ -555,17 +593,17 @@ static int ev_wait_ms(Obj *o, DWORD ms) {
     LeaveCriticalSection(&o->cs);
     return ok;
 }
-static void ev_wait(Ctx *c) { L1O("event wait >", A0); ev_wait_ms(obj(A0), INFINITE); L1O("event wait <", A0); }
+static void ev_wait(Ctx *c) { L1O("event wait >", A0); osw_enter("event wait", A0, c->x[30]); ev_wait_ms(obj(A0), INFINITE); osw_leave(); L1O("event wait <", A0); }
 static void ev_trywait(Ctx *c) { RET(ev_wait_ms(obj(A0), 0)); }
-static void ev_timedwait(Ctx *c) { uint64_t k_ = A0; L1O("event timedwait >", k_); RET(ev_wait_ms(obj(A0), ns_to_ms((int64_t)A1))); L1O("event timedwait <", k_); }
+static void ev_timedwait(Ctx *c) { uint64_t k_ = A0; L1O("event timedwait >", k_); osw_enter("event timed wait", k_, c->x[30]); RET(ev_wait_ms(obj(A0), ns_to_ms((int64_t)A1))); osw_leave(); L1O("event timedwait <", k_); }
 
 /* ---------------------------------------------------------------- condition variables */
-static void cv_wait(Ctx *c) { uint64_t k_ = A0; L1O("cv wait >", k_); SleepConditionVariableCS(&obj(A0)->cv, &obj(A1)->cs, INFINITE); L1O("cv wait <", k_); }
+static void cv_wait(Ctx *c) { uint64_t k_ = A0; L1O("cv wait >", k_); osw_enter("condition wait", k_, c->x[30]); SleepConditionVariableCS(&obj(A0)->cv, &obj(A1)->cs, INFINITE); osw_leave(); L1O("cv wait <", k_); }
 static void cv_timedwait(Ctx *c) {                    /* returns ConditionVariableStatus: 0 timeout, 1 signalled */
     RET(SleepConditionVariableCS(&obj(A0)->cv, &obj(A1)->cs, ns_to_ms((int64_t)A2)) ? 1 : 0);
 }
-static void cv_signal(Ctx *c) { L1O("cv SIGNAL", A0); WakeConditionVariable(&obj(A0)->cv); }
-static void cv_broadcast(Ctx *c) { L1O("cv BROADCAST", A0); WakeAllConditionVariable(&obj(A0)->cv); }
+static void cv_signal(Ctx *c) { L1O("cv SIGNAL", A0); Obj *o = obj(A0); obj_note_signal(o, c->x[30]); WakeConditionVariable(&o->cv); }
+static void cv_broadcast(Ctx *c) { L1O("cv BROADCAST", A0); Obj *o = obj(A0); obj_note_signal(o, c->x[30]); WakeAllConditionVariable(&o->cv); }
 /* std::condition_variable: the argument is a unique_lock<mutex> whose first word is the mutex pointer */
 static void std_cv_wait(Ctx *c) { uint64_t k_ = A0; L1O("std cv wait >", k_); SleepConditionVariableCS(&obj(A0)->cv, &obj(rd64(A1))->cs, INFINITE); L1O("std cv wait <", k_); }
 static void std_cv_timedwait(Ctx *c) {                /* deadline: system_clock nanoseconds since 1970 */
