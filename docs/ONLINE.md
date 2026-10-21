@@ -81,7 +81,7 @@ python tools/net/ssbu_lobby.py --bind 0.0.0.0 --port 39500 [--verbose]
 - On a Linux server (for example an Oracle Cloud Always Free Ubuntu VM): copy `tools/net/ssbu_lobby.py` and
   `tools/net/deploy_lobby.sh` to it and run `sudo bash deploy_lobby.sh [port]`. It installs a systemd service and opens
   the VM's firewall; open the same UDP port in the cloud's own firewall (Oracle: VCN Security List ingress rule).
-- Matchmaking needs lobby 1.3 or newer (`curl -s http://127.0.0.1:8080/status` on the server shows the version).
+- Matchmaking needs lobby 1.3 or newer, the rollback "finding an opponent" of Smash (versus) lobby 1.4 or newer (`curl -s http://127.0.0.1:8080/status` on the server shows the version).
 - Update a running server: copy the new `tools/net/ssbu_lobby.py` next to `deploy_lobby.sh` and run
   `sudo bash deploy_lobby.sh [port]` again (add `DOMAIN=...` if you used it), or just
   `sudo install -m 644 ssbu_lobby.py /opt/ssbu-lobby/ && sudo systemctl restart ssbu-lobby`. Players reconnect by themselves.
@@ -160,15 +160,21 @@ game back a few frames and replays them, instead of slowing both players down.
    each fight, which memory it writes). An older install's second copy for rollback (`ssbu_game_r1.dll`,
    `ssbu_native_rb.exe`, the folder `nro_bin_eh_o2r1`) is not used any more and can be deleted.
 2. **Both players** need it on, the same game update (13.0.4 or 13.0.5) and the same version of this project.
-3. **Connect the two games with a room code** (section 2 above): one player uses `online_mode = host` and gives the code,
-   the other `online_mode = join` with that code.
-4. **Both open Smash (versus)**, each picks only their own fighter (player 2's panel can be anything), and both start the
-   match. The two games agree on the stage, the rules and a shared random seed first (a box "Online match" shows while
-   one waits for the other; Esc or holding B stops waiting).
+3. **No code needed on the lobby:** with online play on its default (the public lobby) or any lobby server, just **open
+   Smash (versus)**, pick your own fighter (player 2's panel can be anything) and start the match. The box "Online match:
+   finding an opponent..." shows while the lobby looks for another player who does the same (same game version, same
+   mods, same lobby code); once found, the two games agree on the stage, the rules and a shared random seed, and the match
+   starts with rollback. The player who searched first is player 1. Esc or holding B stops waiting; nobody found in
+   2 minutes = back to the character select. This needs lobby 1.4 or newer (an older lobby: the box says so; use a room code).
+4. **Or with a room code** (section 2 above): one player uses `online_mode = host` and gives the code, the other
+   `online_mode = join` with that code; both open Smash (versus) as above (no search: the code already connects the two).
 
 **Local Wireless rooms do not use rollback.** A fight started from a Local Wireless room (the room's match and its waiting
 stage) is always played with the game's own online netcode, whatever the two players' rollback setting: a short message
 says so once. Two players with different rollback settings can therefore still play together in a room.
+
+Input delay is chosen from the best measured round trip: 1 frame below about 117 ms, 2 frames from about 117 ms, 3 from 150 ms,
+4 from about 184 ms (the rest of the trip is covered by rollback).
 
 Limits today: rollbacks of 3 or more frames take a little longer than one frame (a short hitch at very high ping);
 Windows only; tested between two games on one PC with simulated 150 ms ping and loss (0 desyncs), not yet much between

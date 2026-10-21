@@ -30,5 +30,6 @@ const char *net_build_id(void) { return ""; }
 const char *net_mods_text(void) { return "none"; }
 uint32_t net_match_host(void) { return 0; }
 void net_match_find(void) {}
+void net_match_find_rb(void) {}
 void net_match_cancel(void) {}
 void net_match_get(NetMatch *o) { memset(o, 0, sizeof *o); o->state = MM_OFFLINE; o->players = o->searching = o->code_players = -1; }

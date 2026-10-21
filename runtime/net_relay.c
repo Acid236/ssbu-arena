@@ -35,6 +35,9 @@
  *                         open), the other player's address u32, its name[32], players searching u16, players u16 (both of
  *                         this build and code), seconds waited u16
  *   PONG may end with: players searching u16 (this build and code), players u16 (every build of this code)
+ * R3 net3 (lobby 1.4): MATCH op 2 = a search for a ROLLBACK match (rb_net.c: Smash versus with rollback on, no room code, no
+ * Local Wireless room): paired only with another op 2 search, the one that waited longer is player 1 (role 1); the lobby
+ * says TOGETHER once it relayed rollback messages both ways between the two. An older lobby ignores op 2 (= older lobby).
  * The build id is "ssbu-recomp-ldn1-<game version>" plus "+m<8 hex>" when mods are loaded (the hash of the mod set):
  * the lobby keeps parting players by build and code, so different versions or mod sets never share a room.
  * The lobby gives every player its own virtual address and relays a Local Wireless room's datagrams between that room's
@@ -468,14 +471,17 @@ int net_rb_ready(void) { return g_cfg > 0 && g_joined && g_sock != INVALID_SOCKE
  * (nnldn.c), else the address learnt; 0 on the public code of a lobby SERVER = nothing can arrive (the in-game lobbies of HOST / JOIN / LAN pass 0 on): not sent (counted, the notice says so). */
 uint32_t nnldn_other_ip(void);
 static const char *ip_text(uint32_t ip, char *b);
+static volatile uint32_t g_rb_match_peer;              /* (R3 net3) the opponent of the last rollback-match search (lobby 1.4), 0 = none */
+static volatile LONG64 g_rb_rx_other;                  /* (R3 net3) rollback messages from another player than that opponent: dropped */
 static volatile LONG g_rb_nodst; static volatile uint32_t g_rb_dst_said;
 int net_rb_no_destination(void) { return g_rb_nodst; }
 int net_rb_send(const void *p, int n) {
     if (!net_rb_ready() || n <= 0 || n > 1400) return 0;
-    uint32_t dst = nnldn_other_ip();
+    uint32_t dst = nnldn_other_ip(), room = dst;
+    if (!dst) dst = g_rb_match_peer;                    /* (R3 net3) the opponent the lobby found for this rollback match */
     if (!dst) dst = g_rb_peer;
     if (!dst && g_mode == NET_MODE_LOBBY && !_stricmp(g_code, "public")) { InterlockedIncrement(&g_rb_nodst); return 0; }
-    if (dst && dst != g_rb_dst_said) { char a[16]; g_rb_dst_said = dst; printf("[rbnet] rollback messages go to %s (%s)\n", ip_text(dst, a), dst == g_rb_peer ? "the game that wrote to this one" : "the other player of this Local Wireless room"); fflush(stdout); }
+    if (dst && dst != g_rb_dst_said) { char a[16]; g_rb_dst_said = dst; printf("[rbnet] rollback messages go to %s (%s)\n", ip_text(dst, a), room ? "the other player of this Local Wireless room" : dst == g_rb_match_peer ? "the opponent the lobby found" : "the game that wrote to this one"); fflush(stdout); }
     uint8_t b[1500];
     hdr(b, T_RB); s64(b + 4, g_cookie); s32(b + 12, dst);
     memcpy(b + 16, p, (size_t)n);
@@ -882,25 +888,31 @@ static SRWLOCK g_mm_lock = SRWLOCK_INIT;
 static NetMatch g_mm = {MM_IDLE};
 static volatile LONG g_mm_want, g_mm_cancel;            /* searching / matched (MATCH op 1 every 2 s); cancels left to send */
 static uint32_t g_mm_id;
+static volatile LONG g_mm_kind = 1;                     /* (R3 net3) MATCH op of the search: 1 a Local Wireless search, 2 a rollback-match search */
 static uint64_t g_mm_tx, g_mm_asked;                    /* (client thread) last MATCH sent; when the search was asked (no answer yet) */
 static int g_mm_room_said;
 static const char *mm_name(int st) {
     static const char *n[] = {"idle", "searching", "matched", "timeout", "the other player left", "together", "expired", "asking", "older lobby", "off"};
     return st >= 0 && st <= MM_OFFLINE ? n[st] : "?";
 }
-void net_match_find(void) {
+static void mm_find(int kind) {
     if (!net_online()) return;
     AcquireSRWLockExclusive(&g_mm_lock);
     g_mm_id = (uint32_t)rnd64() | 1;
     memset(&g_mm, 0, sizeof g_mm);
     g_mm.state = MM_ASKING;
+    g_mm.kind = kind;
     g_mm_room_said = 0;
+    InterlockedExchange(&g_mm_kind, kind);
+    g_rb_match_peer = 0;                                /* (a new search: the last opponent's messages are not taken any more) */
     ReleaseSRWLockExclusive(&g_mm_lock);
     InterlockedExchange(&g_mm_cancel, 0);
     InterlockedExchange(&g_mm_want, 1);
     g_mm_tx = 0;
-    say("match: searching for an opponent (build %s, code %s)", g_build, g_code);
+    say("match: searching for an opponent%s (build %s, code %s)", kind == 2 ? " for a rollback match (Smash versus)" : "", g_build, g_code);
 }
+void net_match_find(void) { mm_find(1); }
+void net_match_find_rb(void) { mm_find(2); }
 void net_match_cancel(void) {
     AcquireSRWLockExclusive(&g_mm_lock);
     int was = g_mm.state;
@@ -941,7 +953,7 @@ static void mm_tick(uint64_t t) {                       /* (client thread, joine
     }
     if (!g_mm_want || t - g_mm_tx < 2000) return;
     if (!g_mm_tx) g_mm_asked = t;
-    mm_send(1);
+    mm_send((int)g_mm_kind);
     g_mm_tx = t;
     AcquireSRWLockExclusive(&g_mm_lock);
     int old = g_mm.state == MM_ASKING && t - g_mm_asked > 6500;
@@ -949,8 +961,8 @@ static void mm_tick(uint64_t t) {                       /* (client thread, joine
     ReleaseSRWLockExclusive(&g_mm_lock);
     if (old) {
         InterlockedExchange(&g_mm_want, 0);
-        say("match: the lobby does not answer MATCH (an older lobby server): no matchmaking there");
-        menu_popup("Find an opponent", "This lobby server is an older version: it cannot find opponents.\nCreate a room yourself (Local Wireless > Create Room) or look at F1 > Online.");
+        say("match: the lobby does not answer MATCH%s (an older lobby server): no matchmaking there", g_mm_kind == 2 ? " for a rollback match" : "");
+        if (g_mm_kind != 2) menu_popup("Find an opponent", "This lobby server is an older version: it cannot find opponents.\nCreate a room yourself (Local Wireless > Create Room) or look at F1 > Online.");
     }
 }
 static void mm_state(const uint8_t *p, uint64_t t) {    /* (client thread) a MATCH_STATE body */
@@ -979,9 +991,20 @@ static void mm_state(const uint8_t *p, uint64_t t) {    /* (client thread) a MAT
     g_mm.waited_s = g16(p + 47);
     int room_new = st == MM_MATCHED && role == MM_ROLE_JOIN && g_mm.room_open && (!open_before || was != MM_MATCHED) && !g_mm_room_said;
     if (room_new) g_mm_room_said = 1;
+    int rbk = g_mm.kind == 2;
+    if (rbk && (st == MM_MATCHED || st == MM_TOGETHER) && g_mm.peer) g_rb_match_peer = g_mm.peer;
     ReleaseSRWLockExclusive(&g_mm_lock);
     if (st >= MM_TIMEOUT) InterlockedExchange(&g_mm_want, 0);
     (void)t;
+    if (rbk) {                                          /* (R3 net3) a rollback-match search: rb_net.c's box shows every step; log lines + a mark only */
+        if (st == MM_MATCHED && was != MM_MATCHED) { uint32_t ip = g32(p + 7);
+            say("match: matched with %s (10.13.%u.%u) for a rollback match: this game is player %d", name, ip >> 8 & 255, ip & 255, role == MM_ROLE_HOST ? 1 : 2); input_mark("match:rb"); }
+        else if (st != was && st >= MM_TIMEOUT) {
+            static const char *line[] = {"", "", "", "no opponent found in time", "the other player cancelled or left", "both games exchange rollback messages", "the match expired"};
+            say("match (rollback): %s%s%s", line[st], st == MM_TIMEOUT ? "" : ": ", st == MM_TIMEOUT ? "" : name);
+        } else if (st == MM_SEARCHING && was == MM_ASKING) say("match: the lobby is searching for a rollback match (%d of %d players of this build searching)", g16(p + 43), g16(p + 45));
+        return;
+    }
     char text[256], title[96];
     if (st == MM_MATCHED && was != MM_MATCHED) {
         uint32_t ip = g32(p + 7);
@@ -1459,7 +1482,9 @@ static DWORD WINAPI client_thread(LPVOID unused) {
             if (g_joined && g_direct) read_peers(buf + 4, n - 4);
             break;
         case T_RB:                                       /* R3: a rollback message of the other player */
-            if (n > 8 && g_joined) { uint32_t src = g32(buf + 4); if (src && src != g_ip) { g_rb_peer = src; rbn_rx(buf + 8, n - 8); } }
+            if (n > 8 && g_joined) { uint32_t src = g32(buf + 4), mp = g_rb_match_peer;
+                if (mp && src != mp && !nnldn_other_ip()) { InterlockedIncrement64(&g_rb_rx_other); break; }     /* (R3 net3) not our opponent */
+                if (src && src != g_ip) { g_rb_peer = src; rbn_rx(buf + 8, n - 8); } }
             break;
         }
     }
