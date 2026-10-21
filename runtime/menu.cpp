@@ -49,6 +49,7 @@ extern char **environ;
 #endif
 #include "imgui.h"
 #include "net_stats.h"
+extern "C" uint32_t net_match_host(void);      /* net_relay.c / net_off.c: the matched host (the F1 table marks its room) */
 extern "C" {
 #include "gfx_options.h"
 #include "menu.h"
@@ -1373,6 +1374,7 @@ static void draw_stats(void) {
 
 /* ------------------------------------------------------------------ O2: Find an opponent (net_relay.c net_match_*)
  * Returns the matched host's address while this game is matched to join (its row in the table below says so). */
+static uint32_t sec_match(void) __attribute__((unused));
 static uint32_t sec_match(void) {
     NetMatch m;
     net_match_get(&m);
@@ -1441,7 +1443,7 @@ static void sec_rooms(void) {
         ImGui::TextColored(ImVec4(0.45f, 0.9f, 0.45f, 1), "%.*s", (int)(end - d), d); }
     ImGui::SameLine(); ImGui::Text("  mods:"); ImGui::SameLine();
     ImGui::PushTextWrapPos(0.0f); ImGui::TextUnformatted(net_mods_text()); ImGui::PopTextWrapPos();
-    uint32_t match_host = sec_match();
+    uint32_t match_host = net_match_host();      /* (owner 2026-10-22: no matchmaking from F1; the game's own Online menu will do it) */
     ImGui::Separator();
     help("Every room of your lobby, any version or mod set. Join a room from the game: Local Wireless > Rooms List. "
          "Rooms of another version or mod set are listed there too, but joining one is refused and says why. Select a row for details.");

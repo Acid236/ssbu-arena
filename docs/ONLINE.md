@@ -9,8 +9,8 @@ This is the game's own Local Wireless mode, played over a network. You only open
 4. Both players vote on a stage and pick their fighters.
 5. The host starts the match with L+R.
 
-No room to join? **F1 -> Online -> Find an opponent** asks the lobby for another player who is searching too (see
-[Find an opponent](#find-an-opponent-f1)).
+No room to join? With rollback on, **Smash (versus)** finds an opponent on the lobby by itself (see Rollback below).
+The game's own Online menu (Quickplay, Battle Arenas) on our servers is in progress.
 
 Online play is experimental and ON by default: the game joins the project's public lobby
 (`opensmash-lobby.duckdns.org:39500`) when it starts. To turn it off: F1 -> Experimental -> Online play: OFF
@@ -110,23 +110,6 @@ python tools/net/ssbu_lobby.py --bind 0.0.0.0 --port 39500 [--verbose]
   but they cannot be joined: trying shows a box with the reason, for example
   "Different version: this room is 13.0.4, you have 13.0.5" or "MISSING: <mod names>".
 - For lobby and LAN, the lobby code must match.
-
-## Find an opponent (F1)
-
-F1 -> **Online** shows how many players are online with your version and mods, and how many are searching.
-Press **Find an opponent**: the lobby pairs you with another player of the same game version, the same mods and the
-same lobby code who is searching too, and says who hosts. You can keep playing meanwhile: a box at the top of the
-picture tells you when an opponent is found.
-
-- **You host:** open Local Wireless -> Create Room (a room you already have open counts), and accept the other player's
-  request when "wants to join!" appears.
-- **They host:** open Local Wireless -> Rooms List: their room is shown first (the box tells you when it is open).
-  Join it.
-
-The menus are not driven for you: you create or join the room in the game as usual. **Cancel** stops the search (or
-the match: the other player is told). A search with nobody to pair with ends after 2 minutes ("No opponent found");
-a match ends when you are both in the room, or after 3 minutes if you never meet there. Players of an older version
-of this project never search, so they are never matched; an older lobby server cannot match (F1 says so).
 
 ## Online rooms (F1)
 
