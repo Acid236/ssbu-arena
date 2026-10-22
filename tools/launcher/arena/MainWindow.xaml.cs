@@ -700,11 +700,15 @@ namespace Arena
                 SetPrepBar(1); PrepPct.Text = "";
                 var p = t.Result;
                 p.EnableRaisingEvents = true;
-                p.Exited += (s, e) => Dispatcher.BeginInvoke(new Action(() =>
+                p.Exited += (s, e) =>
                 {
-                    Process.Start(new ProcessStartInfo(Updater.ExePath) { UseShellExecute = false });
-                    Application.Current.Shutdown();
-                }));
+                    Updater.WaitInstallerWindow(System.IO.Path.GetDirectoryName(Updater.ExePath));
+                    Dispatcher.BeginInvoke(new Action(() =>
+                    {
+                        Process.Start(new ProcessStartInfo(Updater.ExePath) { UseShellExecute = false });
+                        Application.Current.Shutdown();
+                    }));
+                };
             }, TaskScheduler.FromCurrentSynchronizationContext());
         }
 

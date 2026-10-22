@@ -206,6 +206,26 @@ namespace Arena
             return RunInstaller(root);
         }
 
+        /// <summary>bootstrap.ps1 opens the installer window in a process of its own and ends: wait until no
+        /// scripts\installer_window.ps1 of this folder runs any more</summary>
+        public static void WaitInstallerWindow(string root)
+        {
+            string want = Path.Combine(root, @"scripts\installer_window.ps1").ToLowerInvariant();
+            for (;;)
+            {
+                bool running = false;
+                try
+                {
+                    using (var q = new System.Management.ManagementObjectSearcher("SELECT CommandLine FROM Win32_Process WHERE Name='powershell.exe'"))
+                        foreach (var o in q.Get())
+                            if (((o["CommandLine"] as string) ?? "").ToLowerInvariant().Contains(want)) { running = true; break; }
+                }
+                catch { return; }
+                if (!running) return;
+                System.Threading.Thread.Sleep(2000);
+            }
+        }
+
         /// <summary>Install SSBU.bat's work: scripts\bootstrap.ps1 (a private Python, then the installer window); its output
         /// goes to build\bootstrap.log</summary>
         public static Process RunInstaller(string root)
