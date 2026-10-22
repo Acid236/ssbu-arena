@@ -361,9 +361,11 @@ static const char *const k_prepare[] = {"first_run", "background", "off"};
 static const char *const k_load[] = {"start", "loading"};
 static const char *const k_console[] = {"docked", "handheld"};
 static const char *const k_onoff[] = {"off", "on"};
-static const char *const k_lang[] = {"auto", "ja", "en-US", "en-GB", "fr", "fr-CA", "de", "it", "es", "es-419", "zh-Hans", "zh-Hant", "ko", "nl", "ru"};
-static const char *const k_lang_name[] = {"auto (Windows display language)", "Japanese", "English (US)", "English (UK)", "French", "French (Canada)", "German", "Italian",
-                                          "Spanish (Spain)", "Spanish (Latin America)", "Chinese (simplified)", "Chinese (traditional)", "Korean", "Dutch", "Russian"};
+/* the languages the open-source system fonts can show (runtime/fonts_open: Latin and Cyrillic, no Chinese, Japanese or
+ * Korean; nnmisc.c desired_language gives English for those) */
+static const char *const k_lang[] = {"auto", "en-US", "en-GB", "fr", "fr-CA", "de", "it", "es", "es-419", "nl", "ru"};
+static const char *const k_lang_name[] = {"auto (Windows display language)", "English (US)", "English (UK)", "French", "French (Canada)", "German", "Italian",
+                                          "Spanish (Spain)", "Spanish (Latin America)", "Dutch", "Russian"};
 static const int k_sizes[][2] = {{1280, 720}, {1600, 900}, {1920, 1080}, {2560, 1440}, {3840, 2160}};
 static const char *const k_size_name[] = {"1280 x 720", "1600 x 900", "1920 x 1080", "2560 x 1440", "3840 x 2160"};
 #define N(a) ((int)(sizeof(a) / sizeof((a)[0])))
@@ -1149,6 +1151,36 @@ static bool onoff(const char *id, bool on, bool enabled) {     /* a big ON / OFF
     return c && enabled;
 }
 static int online_differs(void);
+/* SSBU Arena (the launcher starts it with SSBU_COMPETITIVE_UI=1): online play is the launcher's (Settings > Online): the
+ * signed-in account's name, an Arena server chosen by region, relay only (no player ever sees another's address),
+ * rollback. Shown here, not changed: the other modes (LAN, host / join by code, any lobby, direct paths) stay in the
+ * code for the plain build. 1 when it drew the section. */
+static const struct { const char *host, *name; } k_arena_servers[] = {{"eu-germany.ssbuarena.com", "Europe"}};
+static int arena_online(void) {
+    const char *ui = getenv("SSBU_COMPETITIVE_UI");
+    if (!ui || strcmp(ui, "1")) return 0;
+    const char *srv = getenv("SSBU_ONLINE"), *name = getenv("SSBU_ONLINE_NAME"), *rb = getenv("SSBU_RB_NET");
+    int on = srv && srv[0] && !off_word(srv);
+    const char *region = "another server";
+    for (size_t i = 0; on && i < sizeof k_arena_servers / sizeof k_arena_servers[0]; i++)
+        if (!_strnicmp(srv, k_arena_servers[i].host, strlen(k_arena_servers[i].host))) region = k_arena_servers[i].name;
+    NetStats ns;
+    net_stats_get(&ns);
+    ImGui::Text("Online play"); ImGui::SameLine();
+    if (!on) ImGui::TextDisabled("off (turn it on in the launcher: Settings > Online)");
+    else {
+        ImGui::TextColored(ns.state == NET_CONNECTED ? ImVec4(0.45f, 0.9f, 0.45f, 1) : ImVec4(1, 0.8f, 0.2f, 1), "%s",
+                           ns.state == NET_CONNECTED ? "connected" : ns.state == NET_CONNECTING ? "connecting..." : "not connected");
+        if (ns.state == NET_CONNECTED && ns.ping_ms >= 0) { ImGui::SameLine(); ImGui::Text("  ping %d ms", ns.ping_ms); }
+        ImGui::Text("Server: %s", region);
+        ImGui::Text("Player: %s", name && name[0] ? name : "-");
+        ImGui::Text("Rollback netcode: %s", rb && rb[0] ? "on" : "off");
+        ImGui::TextDisabled("Everything goes through the Arena server (relay only): no player ever sees another player's address.");
+    }
+    help("These are set in the SSBU Arena launcher (Settings > Online) and used when the game starts.");
+    return 1;
+}
+
 static void sec_experimental(void) {
     if (!g_online_inited) online_init();
     help("Features still being tested. Each is saved to config\\graphics.ini and used from the next start.");
@@ -1161,6 +1193,7 @@ static void sec_experimental(void) {
     if (ra_build()) ImGui::TextDisabled("one frame less input delay in fights; costs a second pass of each frame on the CPU");
     else ImGui::TextDisabled("not ready yet: it is being moved onto the normal build (like rollback)");
     ImGui::Separator();
+    if (arena_online()) return;                          /* SSBU Arena: name, server and netcode come from the launcher */
     /* (2) your name: the console user's nickname (nnfs.c) and the name the lobby shows (net_relay.c); graphics.ini player_name */
     static char pname[33], pname0[33];
     static int pname_read;

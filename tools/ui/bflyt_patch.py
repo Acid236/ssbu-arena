@@ -80,9 +80,29 @@ def patch_parts(d, o, edits, materials):
             if key in EXTRA_KEYS:
                 continue
             if key == 'visible':
+                if values:                          # the button's own hidden override (basic info, flag bit 1): dropped
+                    d[r + 25] &= ~1
                 if not prop:
-                    raise ValueError('no existing property pane for ' + name)
+                    if not basic:
+                        raise ValueError('no existing property pane for ' + name)
+                    d[o + basic] = 1 if values else 0
+                    d[r + 25] |= 0 if values else 1
+                    continue
                 d[o + prop + 8] = (d[o + prop + 8] | 1) if values else (d[o + prop + 8] & ~1)
+                continue
+            if key in ('line_space', 'text_id'):
+                if not prop or d[o + prop:o + prop + 4] != b'txt1':
+                    raise ValueError('no existing text property for ' + name)
+                if key == 'line_space':
+                    struct.pack_into('<f', d, o + prop + 0x7C, float(values))
+                else:                               # (old, new) message label: the new one fits the old's padded field
+                    old, new = (v.encode('ascii') for v in values)
+                    size = struct.unpack_from('<I', d, o + prop + 4)[0]
+                    at = d.find(old + b'\0', o + prop, o + prop + size)
+                    field = len(old) + 1 + (-(len(old) + 1)) % 4
+                    if at < 0 or len(new) + 1 > field:
+                        raise ValueError('text id %r does not fit for %s' % (values, name))
+                    d[at:at + field] = new + bytes(field - len(new))
                 continue
             if key == 'alpha':
                 if not prop:

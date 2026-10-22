@@ -234,7 +234,9 @@ namespace Arena
             CodeBox.Text = Core.Code;
             RollbackBox.IsChecked = Core.Rollback;
             PingBox.IsChecked = Core.Ping;
-            ServerBox.Text = Core.Server;
+            ServerBox.Items.Clear();
+            foreach (var s in Core.Servers) ServerBox.Items.Add(s.Name);
+            ServerBox.SelectedIndex = Core.ServerIndex(Core.Server);
             WinBox.SelectedIndex = Core.WindowMode;
             SizeBox.Text = Core.WindowSize;
             SizeBox.IsEnabled = Core.WindowMode == 0;
@@ -257,7 +259,7 @@ namespace Arena
             Core.Code = CodeBox.Text.Trim();
             Core.Rollback = RollbackBox.IsChecked == true;
             Core.Ping = PingBox.IsChecked == true;
-            Core.Server = ServerBox.Text.Trim();
+            Core.Server = Core.Servers[Math.Max(0, ServerBox.SelectedIndex)].Address;
             Core.WindowMode = Math.Max(0, WinBox.SelectedIndex);
             Core.WindowSize = SizeBox.Text.Trim();
             Core.Aspect = Math.Max(0, AspectBox.SelectedIndex);
@@ -308,7 +310,7 @@ namespace Arena
             Field_Changed(sender, e);
         }
 
-        void DefaultServer_Click(object sender, RoutedEventArgs e) { ServerBox.Text = Core.DefaultServer; }
+        void Server_Changed(object sender, SelectionChangedEventArgs e) { Field_Changed(sender, e); }
 
         void FindPads_Click(object sender, RoutedEventArgs e) { FindPads(); }
 

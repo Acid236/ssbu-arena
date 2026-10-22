@@ -31,6 +31,15 @@ namespace Arena
     public static class Core
     {
         public const string DefaultServer = "eu-germany.ssbuarena.com:39010";      // our lobby (tools/net/rb_lobby.c, relay only)
+        /// <summary>the Arena servers the player picks from (Settings > Online), by region: relay only, never another
+        /// player's address</summary>
+        public static readonly (string Name, string Address)[] Servers = { ("Europe", DefaultServer) };
+        /// <summary>a saved server -> its place in Servers (an address no longer offered: the first one)</summary>
+        public static int ServerIndex(string address)
+        {
+            for (int i = 0; i < Servers.Length; i++) if (string.Equals(Servers[i].Address, (address ?? "").Trim(), StringComparison.OrdinalIgnoreCase)) return i;
+            return 0;
+        }
         public const string Site = "https://ssbuarena.com/";
 
         // the exe at the repository's root (the downloaded launcher after its first install) or in its build\ folder (setup.py
@@ -114,7 +123,7 @@ namespace Arena
             Saves = Get(L, "saves") ?? defSaves;
             Nickname = Get(O, "nickname") ?? Get(L, "nickname") ?? "";
             Online = L.ContainsKey("online") ? L["online"] == "on" : (Get(O, "server") != null && Get(O, "room") != null);
-            Server = Get(L, "server") ?? DefaultServer;
+            Server = Servers[ServerIndex(Get(L, "server") ?? DefaultServer)].Address;
             Code = Get(L, "code") ?? Get(O, "room") ?? "";
             Rollback = Get(L, "rollback") != "off";
             Ping = Get(L, "ping") != "off";
@@ -544,9 +553,9 @@ namespace Arena
             else env["SSBU_ONLINE"] = "off";
             // Arena's native menu uses the same game DLL (including the rollback pair selected above).
             // Keep the original hosts available when the optional menu override has not been prepared.
-            if (Competitive && File.Exists(UiExe) && Directory.Exists(Path.Combine(Build, @"characters\arena_menu")))
+            if (Competitive && Directory.Exists(Path.Combine(Build, @"characters\arena_menu")))
             {
-                run = UiExe;
+                if (run == Exe && File.Exists(UiExe)) run = UiExe;      // (the same exe: an older install's copy; the game exe otherwise)
                 env["SSBU_COMPETITIVE_UI"] = "1";
                 env["SSBU_MENU"] = "1"; // the Settings tile opens the existing PC settings overlay
             }

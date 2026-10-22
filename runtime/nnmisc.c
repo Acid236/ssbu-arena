@@ -549,6 +549,12 @@ static uint64_t desired_language(void) {
             for (size_t i = 0; i < sizeof supported / sizeof supported[0]; i++) if (!_stricmp(two, supported[i])) strcpy(pick, supported[i]);
         }
     }
+    /* SSBU Arena: the open-source system fonts (runtime/fonts_open) have no Chinese, Japanese or Korean characters, so
+     * those languages would show empty text: English instead */
+    if (!strcmp(pick, "ja") || !strcmp(pick, "ko") || !strncmp(pick, "zh", 2)) {
+        printf("nn::oe::GetDesiredLanguage: \"%s\" needs Chinese / Japanese / Korean characters the open fonts lack: \"en-US\"\n", pick);
+        strcpy(pick, "en-US");
+    }
     uint64_t v = 0;
     memcpy(&v, pick, strlen(pick));
     printf("nn::oe::GetDesiredLanguage: Windows display language \"%s\" -> \"%s\"\n", name, pick);

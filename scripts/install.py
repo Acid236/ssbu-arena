@@ -113,12 +113,13 @@ SETUP_STEPS = ['deps', 'stage', 'convert', 'modules', 'tables', 'lift', 'sdk', '
 # expected seconds, measured 2026-10-19 on a PC with 12 jobs and 32 threads (compile and nro scale with 12 / jobs)
 EST = {'update': 10, 'precheck': 10, 'packages': 30, 'inputs': 10, 'dump': 600, 'tools': 30, 'media': 20, 'dlc': 1,
        'deps': 5, 'stage': 3, 'convert': 3, 'modules': 4, 'tables': 1, 'lift': 20, 'sdk': 2, 'compile': 2217, 'nro': 880,
-       'link': 60, 'check': 30, 'shortcuts': 3, 'unblock': 5}
+       'link': 60, 'check': 30, 'menu': 40, 'shortcuts': 3, 'unblock': 5}
 TITLES = {'update': 'Update this program', 'precheck': 'Check this PC', 'packages': 'Python packages',
           'inputs': 'Find your game files', 'dump': 'Prepare the game files', 'dlc': 'Add-on contents (DLC)', 'tools': 'Build tools', 'media': 'Music and movies',
           'deps': 'Check tools and game files', 'stage': 'Lay out the sources', 'convert': 'Convert the game code',
           'modules': 'Script modules', 'tables': 'Tables', 'lift': 'Translate the game code', 'sdk': 'System library',
           'compile': 'Compile the game', 'nro': 'Compile the script modules', 'link': 'Link the game', 'check': 'Self-tests',
+          'menu': 'SSBU Arena menu',
           'shortcuts': 'Shortcuts', 'unblock': 'Unblock files'}
 
 
@@ -976,6 +977,19 @@ def step_build(cx, P):
         P.end(cur['id'], 'done')
 
 
+# ------------------------------------------------------------------------------------------------------ 8b. menu
+def step_menu(cx):
+    """SSBU Arena's main menu (tools/ui/prepare_menu_classic.py): made from this dump's own menu files into
+    build/characters/arena_menu, where the launcher looks for it (nothing of the game is in the repository)"""
+    out = os.path.join(BUILD, 'characters', 'arena_menu')
+    cmd = [sys.executable, os.path.join(REPO, 'tools', 'ui', 'prepare_menu_classic.py'), '--out', out]
+    if cx.a.dry_run:
+        return 'dry', 'would make the Arena menu in ' + out
+    if stream(cmd, cwd=REPO)[0] != 0:
+        return 'skip', 'the Arena menu was not made (the game keeps its own menu); see the lines above'
+    return 'done', out
+
+
 # ------------------------------------------------------------------------------------------------------ 9. shortcuts, 10. unblock
 def step_shortcuts(cx):
     import shortcuts
@@ -1038,7 +1052,7 @@ def make_plan(cx):
     a = cx.a
     ids = ['update', 'precheck', 'packages', 'inputs', 'dump', 'tools', 'media', 'dlc']
     if not a.prepare_only:
-        ids += SETUP_STEPS
+        ids += SETUP_STEPS + ['menu']
         if not a.no_shortcuts:
             ids.append('shortcuts')
         ids.append('unblock')
@@ -1138,6 +1152,7 @@ def main(argv=None):
             return 0
         say('== Build the game')
         step_build(cx, P)
+        run_step(cx, P, 'menu', step_menu)
         if not a.no_shortcuts:
             run_step(cx, P, 'shortcuts', step_shortcuts)
         run_step(cx, P, 'unblock', step_unblock)

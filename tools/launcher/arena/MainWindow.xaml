@@ -468,10 +468,7 @@
                     </StackPanel>
                   </CheckBox>
                   <TextBlock Text="SERVER" Style="{StaticResource FieldLabel}" Margin="0,24,0,6"/>
-                  <StackPanel Orientation="Horizontal">
-                    <TextBox x:Name="ServerBox" Width="360" TextChanged="Field_Changed"/>
-                    <Button Style="{StaticResource Link}" Margin="16,0,0,0" VerticalAlignment="Center" Click="DefaultServer_Click" FontSize="14">Default</Button>
-                  </StackPanel>
+                  <ComboBox x:Name="ServerBox" Width="300" HorizontalAlignment="Left" SelectionChanged="Server_Changed"/>
                 </StackPanel>
                 <TextBlock x:Name="OnlineHelp" Style="{StaticResource Small}" Margin="0,20,0,0" Foreground="{StaticResource Accent}"/>
               </StackPanel>

@@ -69,6 +69,7 @@ ESHOP_GROUP = (158, -615)                            # the eShop group's offset 
 LDN_X = 515                                          # LDN's button (its icon and name), right of the centre circle
 RANKED_LEFT = -93                                    # Online Ranked's visible left edge
 SETTINGS_BG = 105
+LDN_LINE = -45                                       # Online / LDN: the gap between the lines 60% smaller (measured)
 RING = (6, 36, 280)                                  # the centre circle's ring: Battle Arena's cut (centre, radius; measured)
 FONT = [62, 146.9]                                   # every tile's name: Online Ranked's height, narrower
 _lx, _ly, _lw, _lh = (LDN_LEFT + RIGHT_EDGE) / 2, (TOP + MID_BOTTOM) / 2, RIGHT_EDGE - LDN_LEFT, TOP - MID_BOTTOM
@@ -96,9 +97,11 @@ EDIT_MAIN['main_menu.bflyt'].update({
     # the frame and hit box on the tile, offset from the button (which stays right of the centre circle)
     'set_parts_btn_other': {'parts': dict({'frame': {'pos': [LDN_PANE[0] - LDN_X, LDN_PANE[1] - _ly], 'size': LDN_PANE[2:]},
                                            # its name on two lines: the icon higher, the name lower
-                                           'icon_positoin': {'pos': [-61, 74]}, 'txt_position': {'pos': [-58, -110]},
+                                           'icon_positoin': {'pos': [-61, 60]}, 'txt_position': {'pos': [-58, -80]},
+                                           'txt_on': {'font_size': FONT, 'line_space': LDN_LINE},
+                                           'txt_off': {'font_size': FONT, 'line_space': LDN_LINE},
                                            'circle_position': {'scale': [0, 0]}},
-                                          **_hits(_lw / 2, _lh / 2, _lx - LDN_X), **_font)},
+                                          **_hits(_lw / 2, _lh / 2, _lx - LDN_X))},
     'mask_colle': {'pos': [_sx, _sy], 'size': [_sw, _sh], 'alpha': 255},
     'set_parts_bg_colle': {'alpha': SETTINGS_BG},   # the Vault's art is lighter than the others' (over the black page)
     # Settings at scale 1, its frame the tile; its icon (above the centre) and name (below) smaller inside the button
@@ -116,7 +119,13 @@ EDIT_MAIN['main_menu.bflyt'].update({
     # Exit: its mask and button on the rectangle (inside the eShop group), the frame and hit box the tile's
     'mask_eshop': {'pos': [_ex - ESHOP_GROUP[0], _ey - ESHOP_GROUP[1]], 'size': [_ew, _eh]},
     'set_parts_btn_eshop': {'pos': [_ex - ESHOP_GROUP[0], _ey - ESHOP_GROUP[1]], 'parts': {
-        'frame': {'pos': [0, 0], 'size': [_ew, _eh]}, 'icon_positoin': {'pos': [45, -76]},   # the icon centred
+        'frame': {'pos': [0, 0], 'size': [_ew, _eh]}, 'icon_positoin': {'pos': [45, -40]},
+        # its name (hidden in the game, an eShop tile): shown, read from mnu_top_notices (the hidden news ticker's;
+        # its own label, mnu_top_online, is Online Ranked's) under the icon
+        'txt_position': {'visible': True, 'pos': [40, -110], 'scale': [0.42, 0.42]},
+        'txt_sdw': {'visible': True},
+        'txt_on': {'font_size': FONT, 'size': [600, 96], 'text_id': ['mnu_top_online', 'mnu_top_notices']},
+        'txt_off': {'font_size': FONT, 'size': [600, 96], 'text_id': ['mnu_top_online', 'mnu_top_notices']},
         **_hits(_ew / 2, _eh / 2)}},
     # Online Ranked: the frame is redrawn on its own pane (menu_shapes); its hit box ends at the straight edge
     'set_parts_btn_online': {'parts': dict(_font, **_hits(_rw / 2, 155, _rx - RANKED_PANE[0], 5))},
@@ -174,13 +183,42 @@ LABELS = {
            'mnu_top_online': 'Online Ranked', 'mnu_top_help_online': 'Partite classificate online (presto disponibile).',
            'mnu_top_other': 'Online' + chr(10) + 'LDN', 'mnu_top_help_other': 'Stanze Local Wireless via internet, con il rollback.',
            'mnu_top_collection': 'Impostazioni', 'mnu_top_help_collection': 'Impostazioni del gioco. Dentro, premi + per le impostazioni di SSBU Arena.',
-           'mnu_top_tip_eshop': 'Esci', 'mnu_top_help_eshop': 'Chiudi SSBU Arena.'},
+           'mnu_top_tip_eshop': 'Esci', 'mnu_top_notices': 'Esci', 'mnu_top_help_eshop': 'Chiudi SSBU Arena.'},
     'en': {'mnu_top_spirits': 'Battle Arena', 'mnu_top_help_spirits': 'Battle Arena with SSBU Arena players (coming soon).',
            'mnu_top_online': 'Online Ranked', 'mnu_top_help_online': 'Ranked online matches (coming soon).',
            'mnu_top_other': 'Online' + chr(10) + 'LDN', 'mnu_top_help_other': 'Local Wireless rooms over the internet, with rollback.',
            'mnu_top_collection': 'Settings', 'mnu_top_help_collection': "The game's settings. Inside, press + for the SSBU Arena settings.",
-           'mnu_top_tip_eshop': 'Exit', 'mnu_top_help_eshop': 'Close SSBU Arena.'},
+           'mnu_top_tip_eshop': 'Exit', 'mnu_top_notices': 'Exit', 'mnu_top_help_eshop': 'Close SSBU Arena.'},
+    'fr': {'mnu_top_spirits': 'Battle Arena', 'mnu_top_help_spirits': 'Battle Arena avec les joueurs de SSBU Arena (bientôt disponible).',
+           'mnu_top_online': 'Online Ranked', 'mnu_top_help_online': 'Matchs classés en ligne (bientôt disponible).',
+           'mnu_top_other': 'Online' + chr(10) + 'LDN', 'mnu_top_help_other': 'Salles Local Wireless par Internet, avec le rollback.',
+           'mnu_top_collection': 'Paramètres', 'mnu_top_help_collection': "Paramètres du jeu. À l'intérieur, appuyez sur + pour les paramètres de SSBU Arena.",
+           'mnu_top_tip_eshop': 'Quitter', 'mnu_top_notices': 'Quitter', 'mnu_top_help_eshop': 'Fermer SSBU Arena.'},
+    'es': {'mnu_top_spirits': 'Battle Arena', 'mnu_top_help_spirits': 'Battle Arena con jugadores de SSBU Arena (próximamente).',
+           'mnu_top_online': 'Online Ranked', 'mnu_top_help_online': 'Partidas clasificatorias en línea (próximamente).',
+           'mnu_top_other': 'Online' + chr(10) + 'LDN', 'mnu_top_help_other': 'Salas de Local Wireless por internet, con rollback.',
+           'mnu_top_collection': 'Ajustes', 'mnu_top_help_collection': 'Ajustes del juego. Dentro, pulsa + para los ajustes de SSBU Arena.',
+           'mnu_top_tip_eshop': 'Salir', 'mnu_top_notices': 'Salir', 'mnu_top_help_eshop': 'Cerrar SSBU Arena.'},
+    'de': {'mnu_top_spirits': 'Battle Arena', 'mnu_top_help_spirits': 'Battle Arena mit SSBU-Arena-Spielern (bald verfügbar).',
+           'mnu_top_online': 'Online Ranked', 'mnu_top_help_online': 'Ranglistenspiele online (bald verfügbar).',
+           'mnu_top_other': 'Online' + chr(10) + 'LDN', 'mnu_top_help_other': 'Local-Wireless-Räume über das Internet, mit Rollback.',
+           'mnu_top_collection': 'Optionen', 'mnu_top_help_collection': 'Die Spieloptionen. Drücke darin +, um die Einstellungen von SSBU Arena zu öffnen.',
+           'mnu_top_tip_eshop': 'Beenden', 'mnu_top_notices': 'Beenden', 'mnu_top_help_eshop': 'SSBU Arena schließen.'},
+    'nl': {'mnu_top_spirits': 'Battle Arena', 'mnu_top_help_spirits': 'Battle Arena met SSBU Arena-spelers (binnenkort beschikbaar).',
+           'mnu_top_online': 'Online Ranked', 'mnu_top_help_online': 'Online ranglijstwedstrijden (binnenkort beschikbaar).',
+           'mnu_top_other': 'Online' + chr(10) + 'LDN', 'mnu_top_help_other': 'Local Wireless-kamers via internet, met rollback.',
+           'mnu_top_collection': 'Opties', 'mnu_top_help_collection': 'De opties van het spel. Druk daarin op + voor de instellingen van SSBU Arena.',
+           'mnu_top_tip_eshop': 'Afsluiten', 'mnu_top_notices': 'Afsluiten', 'mnu_top_help_eshop': 'SSBU Arena afsluiten.'},
+    'ru': {'mnu_top_spirits': 'Battle Arena', 'mnu_top_help_spirits': 'Battle Arena с игроками SSBU Arena (скоро).',
+           'mnu_top_online': 'Online Ranked', 'mnu_top_help_online': 'Рейтинговые онлайн-матчи (скоро).',
+           'mnu_top_other': 'Online' + chr(10) + 'LDN', 'mnu_top_help_other': 'Комнаты Local Wireless через интернет, с роллбэком.',
+           'mnu_top_collection': 'Настройки', 'mnu_top_help_collection': 'Настройки игры. Внутри нажмите +, чтобы открыть настройки SSBU Arena.',
+           'mnu_top_tip_eshop': 'Выход', 'mnu_top_notices': 'Выход', 'mnu_top_help_eshop': 'Закрыть SSBU Arena.'},
 }
+# the message file's regions (data.arc ui/message, checked by their Vault name) -> the game language and LABELS' key;
+# Japanese (1), Korean (12) and Chinese (13, 14) are left out: the open-source fonts have none of their characters
+REGIONS = {2: ('en-US', 'en'), 3: ('fr-CA', 'fr'), 4: ('es-419', 'es'), 5: ('en-GB', 'en'), 6: ('fr', 'fr'), 7: ('es', 'es'),
+           8: ('de', 'de'), 9: ('nl', 'nl'), 10: ('it', 'it'), 11: ('ru', 'ru')}
 
 
 # Exit's cursor windows (a slanted left and right frame) drawn as Settings' (one rectangular frame): (window, from)
@@ -235,12 +273,37 @@ def tile_shapes(data):
 
 
 def default_region():
-    """10 (Italian) when Windows shows Italian, else 2 (US English): the language the game picks (nnmisc.c GetDesiredLanguage)"""
+    """the message region of the language the game will use (nnmisc.c desired_language): graphics.ini language when set,
+    else the Windows display language; US English for any other (Chinese, Japanese and Korean too)"""
+    ini = REPO / 'build' / 'config' / 'graphics.ini'
+    code = ''
     try:
-        lang = ctypes.windll.kernel32.GetUserDefaultUILanguage() & 0x3ff
-    except (AttributeError, OSError):
-        return 2
-    return 10 if lang == 0x10 else 2
+        for line in ini.read_text(encoding='utf-8', errors='replace').splitlines():
+            k, _, v = line.partition('=')
+            if k.strip() == 'language' and v.strip() and v.strip() != 'auto':
+                code = v.strip()
+    except OSError:
+        pass
+    if not code:
+        try:
+            lid = ctypes.windll.kernel32.GetUserDefaultUILanguage()
+        except (AttributeError, OSError):
+            return 2
+        primary = lid & 0x3ff
+        code = {0x07: 'de', 0x10: 'it', 0x13: 'nl', 0x19: 'ru'}.get(primary, '')
+        if primary == 0x09:
+            code = 'en-US' if lid in (0x0409, 0x1009) else 'en-GB'
+        elif primary == 0x0c:
+            code = 'fr-CA' if lid == 0x0c0c else 'fr'
+        elif primary == 0x0a:
+            code = 'es' if lid in (0x040a, 0x0c0a) else 'es-419'
+    for region, (lang, _) in REGIONS.items():
+        if lang.lower() == code.lower():
+            return region
+    for region, (lang, _) in REGIONS.items():
+        if lang.split('-')[0].lower() == code.split('-')[0].lower():
+            return region
+    return 2
 
 
 def recolour_archive(data):
@@ -313,7 +376,7 @@ def main():
         if Chunk(source).dump() != source:
             raise ValueError('Lua chunk round-trip changed ' + name)
         outputs[SCRIPTS + name + '.lc'] = transform(source)
-    outputs[MESSAGES] = msbt_patch.apply_grow(arc.get(MESSAGES, a.region), LABELS['it' if a.region == 10 else 'en'])
+    outputs[MESSAGES] = msbt_patch.apply_grow(arc.get(MESSAGES, a.region), LABELS[REGIONS.get(a.region, ('en-US', 'en'))[1]])
     print('routes: Arena, Online Ranked (not yet), Online LDN, Settings, Exit; labels for region %d' % a.region)
     for relative, content in outputs.items():
         dest = a.out / relative
