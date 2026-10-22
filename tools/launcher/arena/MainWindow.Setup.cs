@@ -485,5 +485,74 @@ namespace Arena
             if (game != null || prep != null || updating != null) { Show("Setup", "Close the game first.", null, ("OK", null, true)); return; }
             StartSetup(false);
         }
+
+        /// <summary>Settings > Game files > Check and repair (FileCheck.cs): the check, then the repair through the setup
+        /// screen (scripts/verify.py repair, then install.py, which remakes only what was removed)</summary>
+        void FileCheck_Click(object sender, RoutedEventArgs e)
+        {
+            if (game != null || prep != null || updating != null || setupRunning) { Show("Check and repair", "Close the game first.", null, ("OK", null, true)); return; }
+            bool full = FileCheckFull.IsChecked == true;
+            FileCheckButton.IsEnabled = false;
+            FileCheckText.Foreground = Res("Muted");
+            FileCheckText.Text = FileCheck.HasList ? "Checking..." : "No list of the files yet: making it from the files as they are now...";
+            Task.Run(() =>
+            {
+                if (!FileCheck.HasList) return Tuple.Create((List<FileProblem>)null, FileCheck.Write());
+                var bad = FileCheck.Check(!full, (i, n) => { if (i % 10 == 0 || i == n) Dispatcher.BeginInvoke(new Action(() => FileCheckText.Text = "Checking " + i + " / " + n + "...")); });
+                return Tuple.Create(bad, 0);
+            }).ContinueWith(t =>
+            {
+                FileCheckButton.IsEnabled = true;
+                if (t.IsFaulted) { FileCheckText.Foreground = Res("Bad"); FileCheckText.Text = "The check stopped: " + t.Exception.GetBaseException().Message; return; }
+                var bad = t.Result.Item1;
+                Updater.Log("file check (" + (full ? "full" : "sizes") + "): " + (bad == null ? "list made, " + t.Result.Item2 + " files" : bad.Count + " problem(s)"));
+                if (bad == null)
+                {
+                    FileCheckText.Foreground = Res("Good");
+                    FileCheckText.Text = "List made: " + t.Result.Item2 + " files, taken as they are now. The next check compares against it.";
+                    return;
+                }
+                if (bad.Count == 0)
+                {
+                    FileCheckText.Foreground = Res("Good");
+                    FileCheckText.Text = "All the files are fine" + (full ? "." : " (sizes; the full check also reads their content).");
+                    return;
+                }
+                FileCheckText.Foreground = Res("Warn");
+                FileCheckText.Text = bad.Count + " file(s) to repair:\n" + string.Join("\n", bad.Take(8)) + (bad.Count > 8 ? "\n..." : "");
+                if (!FileCheck.CanRepair)
+                {
+                    FileCheckText.Text += "\nThis copy has no setup (a portable copy): copy these files again from the copy it was made from.";
+                    return;
+                }
+                Show("Repair the game files", null, bad.Take(12).Select(b => b.ToString()).Concat(bad.Count > 12 ? new[] { "..." } : new string[0]),
+                     ("Repair", () => StartRepair(full), true), ("Not now", null, false));
+            }, TaskScheduler.FromCurrentSynchronizationContext());
+        }
+
+        void StartRepair(bool full)
+        {
+            setupPy = Installer.Python;
+            if (setupPy == null) { Show("Repair", "The setup's Python is missing: use Run the setup again.", null, ("OK", null, true)); return; }
+            FileCheckText.Text = "Repairing: the setup remakes the files...";
+            Task.Run(() =>
+            {
+                var psi = new ProcessStartInfo(setupPy, "-u scripts\\verify.py repair --build \"" + Core.Build + "\"" + (full ? "" : " --quick"))
+                { WorkingDirectory = Core.Repo, UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
+                using (var p = Process.Start(psi))
+                {
+                    string o = p.StandardOutput.ReadToEnd() + p.StandardError.ReadToEnd();
+                    p.WaitForExit();
+                    Updater.Log("verify.py repair (" + p.ExitCode + "):\n" + o.Trim());
+                    if (p.ExitCode != 0) throw new Exception(o.Trim().Split('\n').LastOrDefault());
+                }
+            }).ContinueWith(t =>
+            {
+                if (t.IsFaulted) { FileCheckText.Foreground = Res("Bad"); FileCheckText.Text = "The repair stopped: " + t.Exception.GetBaseException().Message; return; }
+                choice = new SetupChoice { Location = Core.Build };
+                SetupOverlay.Visibility = Visibility.Visible;
+                RunSetup();
+            }, TaskScheduler.FromCurrentSynchronizationContext());
+        }
     }
 }

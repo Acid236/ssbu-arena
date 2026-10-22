@@ -113,13 +113,13 @@ SETUP_STEPS = ['deps', 'stage', 'convert', 'modules', 'tables', 'lift', 'sdk', '
 # expected seconds, measured 2026-10-19 on a PC with 12 jobs and 32 threads (compile and nro scale with 12 / jobs)
 EST = {'update': 10, 'precheck': 10, 'packages': 30, 'inputs': 10, 'dump': 600, 'tools': 30, 'media': 20, 'dlc': 1,
        'deps': 5, 'stage': 3, 'convert': 3, 'modules': 4, 'tables': 1, 'lift': 20, 'sdk': 2, 'compile': 2217, 'nro': 880,
-       'link': 60, 'check': 30, 'menu': 40, 'shortcuts': 3, 'unblock': 5}
+       'link': 60, 'check': 30, 'menu': 40, 'files': 60, 'shortcuts': 3, 'unblock': 5}
 TITLES = {'update': 'Update this program', 'precheck': 'Check this PC', 'packages': 'Python packages',
           'inputs': 'Find your game files', 'dump': 'Prepare the game files', 'dlc': 'Add-on contents (DLC)', 'tools': 'Build tools', 'media': 'Music and movies',
           'deps': 'Check tools and game files', 'stage': 'Lay out the sources', 'convert': 'Convert the game code',
           'modules': 'Script modules', 'tables': 'Tables', 'lift': 'Translate the game code', 'sdk': 'System library',
           'compile': 'Compile the game', 'nro': 'Compile the script modules', 'link': 'Link the game', 'check': 'Self-tests',
-          'menu': 'SSBU Arena menu',
+          'menu': 'SSBU Arena menu', 'files': 'Record the files (for Check and repair)',
           'shortcuts': 'Shortcuts', 'unblock': 'Unblock files'}
 
 
@@ -990,6 +990,16 @@ def step_menu(cx):
     return 'done', out
 
 
+def step_files(cx):
+    """build/files.sha256 (scripts/verify.py): the files of the finished install, which the launcher's Check and repair
+    compares against"""
+    if cx.a.dry_run:
+        return 'dry', 'would list the files in files.sha256'
+    import verify
+    verify.write(BUILD)
+    return 'done', os.path.join(BUILD, verify.LIST)
+
+
 # ------------------------------------------------------------------------------------------------------ 9. shortcuts, 10. unblock
 def step_shortcuts(cx):
     import shortcuts
@@ -1052,7 +1062,7 @@ def make_plan(cx):
     a = cx.a
     ids = ['update', 'precheck', 'packages', 'inputs', 'dump', 'tools', 'media', 'dlc']
     if not a.prepare_only:
-        ids += SETUP_STEPS + ['menu']
+        ids += SETUP_STEPS + ['menu', 'files']
         if not a.no_shortcuts:
             ids.append('shortcuts')
         ids.append('unblock')
@@ -1153,6 +1163,7 @@ def main(argv=None):
         say('== Build the game')
         step_build(cx, P)
         run_step(cx, P, 'menu', step_menu)
+        run_step(cx, P, 'files', step_files)
         if not a.no_shortcuts:
             run_step(cx, P, 'shortcuts', step_shortcuts)
         run_step(cx, P, 'unblock', step_unblock)

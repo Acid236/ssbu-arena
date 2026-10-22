@@ -551,6 +551,14 @@
                   <Button Style="{StaticResource Outline}" Height="42" Margin="0,0,10,10" Click="OpenLog_Click" FontSize="15">Open game log</Button>
                   <Button Style="{StaticResource Outline}" Height="42" Margin="0,0,10,10" Click="Reinstall_Click" FontSize="15">Run the setup again</Button>
                 </WrapPanel>
+                <TextBlock Text="CHECK AND REPAIR" Style="{StaticResource FieldLabel}" Margin="0,24,0,6"/>
+                <TextBlock Style="{StaticResource Small}" Margin="0,0,0,12" TextWrapping="Wrap"
+                           Text="Every file of the game against the list made when it was built: a missing or damaged one is made again by the setup (only that one)."/>
+                <WrapPanel>
+                  <Button x:Name="FileCheckButton" Style="{StaticResource Outline}" Height="42" Margin="0,0,10,10" Click="FileCheck_Click" FontSize="15">Check and repair</Button>
+                  <CheckBox x:Name="FileCheckFull" Style="{StaticResource Switch}" VerticalAlignment="Center" Margin="6,0,0,10" Content="Full check (reads every file: a few minutes)"/>
+                </WrapPanel>
+                <TextBlock x:Name="FileCheckText" Style="{StaticResource Small}" TextWrapping="Wrap" Margin="0,4,0,0"/>
               </StackPanel>
             </Grid>
           </ScrollViewer>
