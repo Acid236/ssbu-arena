@@ -150,6 +150,8 @@ def audit_exe_build(work, exe, llvm):
     allowed = {n[:-2] + '.obj' for n in build.HOST_SOURCES + ['gamedll.c', 'menu_stub.c']}
     # the settings menu (C++): menu.cpp and Dear ImGui's own four files, objects named <name>_cxx.obj by build.py
     allowed |= {os.path.splitext(os.path.basename(s))[0] + '_cxx.obj' for s in getattr(build, 'CXX_SOURCES', [])}
+    # the Windows resources build.py arena_resource compiles from its own text (the name "SSBU Arena", the Arena icon)
+    allowed.add('arena.res')
     # "Publics by Value" lines of link.exe's map end with the object: "boot.obj" for an object of the link line,
     # "libcmt:xyz.obj" / "kernel32:KERNEL32.dll" for a member of a library
     owners = set()
