@@ -529,33 +529,42 @@ namespace Arena
             LoginError.Text = error ?? "";
             LoginError.Visibility = string.IsNullOrEmpty(error) ? Visibility.Collapsed : Visibility.Visible;
             LoginOverlay.Visibility = Visibility.Visible;
-            LoginEmail.Focus();
+            LoginButton.Focus();
         }
 
+        System.Threading.CancellationTokenSource browserLogin;
+
+        /// <summary>sign-in in the browser (Account.SignInWithBrowser): ssbuarena.com/launcher, with its CAPTCHA; a second press
+        /// starts it again (a new page, the old wait is dropped)</summary>
         void Login_Click(object sender, RoutedEventArgs e)
         {
-            string email = LoginEmail.Text.Trim(), pw = LoginPassword.Password;
-            if (email == "" || pw == "") { ShowLogin("Write your email and password."); return; }
-            LoginButton.IsEnabled = false; LoginButtonText.Text = "SIGNING IN...";
-            Task.Run(() => Account.SignIn(email, pw)).ContinueWith(t =>
+            browserLogin?.Cancel();
+            var cts = browserLogin = new System.Threading.CancellationTokenSource();
+            LoginError.Visibility = Visibility.Collapsed;
+            LoginWaiting.Visibility = Visibility.Visible;
+            LoginButtonText.Text = "OPEN AGAIN";
+            Task.Run(() => Account.SignInWithBrowser(cts.Token)).ContinueWith(t =>
             {
-                LoginButton.IsEnabled = true; LoginButtonText.Text = "SIGN IN";
+                if (cts.IsCancellationRequested) return;          // a newer attempt took over
+                browserLogin = null;
+                LoginWaiting.Visibility = Visibility.Collapsed;
+                LoginButtonText.Text = "SIGN IN";
                 if (t.IsFaulted) { ShowLogin(t.Exception.GetBaseException().Message); return; }
-                LoginPassword.Clear();
                 LoginOverlay.Visibility = Visibility.Collapsed;
                 ApplyAccount();
                 SetState();
                 Status("Signed in as " + Account.Me.Display, "good");
+                Activate();
             }, TaskScheduler.FromCurrentSynchronizationContext());
         }
-
-        void Login_KeyDown(object sender, System.Windows.Input.KeyEventArgs e) { if (e.Key == System.Windows.Input.Key.Enter) Login_Click(sender, e); }
         void CreateAccount_Click(object sender, RoutedEventArgs e) { Core.Open(Account.SignUpPage); }
         void ManageAccount_Click(object sender, RoutedEventArgs e) { Core.Open(Account.AccountPage); }
         void ShowLogin_Click(object sender, RoutedEventArgs e) { ShowLogin(); }
 
         void PlayOffline_Click(object sender, RoutedEventArgs e)
         {
+            browserLogin?.Cancel(); browserLogin = null;
+            LoginWaiting.Visibility = Visibility.Collapsed; LoginButtonText.Text = "SIGN IN";
             LoginOverlay.Visibility = Visibility.Collapsed;
             Status("Offline: local play only", "warn");
             RefreshOnline();

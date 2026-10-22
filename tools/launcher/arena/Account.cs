@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// SSBU Arena accounts (Supabase, the same project as ssbuarena.com): sign in with email and password, keep the session
+// SSBU Arena accounts (Supabase, the same project as ssbuarena.com): sign in through the website in the browser (its
+// CAPTCHA needs one: SignInWithBrowser) or with email and password where no CAPTCHA is asked, keep the session
 // (the refresh token, encrypted for this Windows user with DPAPI, in config\session.dat), read the player's profile and
 // ask for a lobby ticket. The ticket ("<user id>|<name>|<expiry>.<HMAC>") is signed by the database (public.lobby_ticket)
 // and checked by the lobby server (tools/net/rb_lobby.c): online play needs a signed-in player. The publishable key below
@@ -27,6 +28,7 @@ namespace Arena
         public const string Key = "sb_publishable_v5DkzLiVBpTnDMy6BdpI7A_rqZSSQWz";
         public const string SignUpPage = "https://ssbuarena.com/signup";
         public const string AccountPage = "https://ssbuarena.com/account";
+        public static string LauncherSignInPage => Environment.GetEnvironmentVariable("SSBU_ARENA_SIGNIN_PAGE") ?? "https://ssbuarena.com/launcher";   // (test: a local site)
 
         static readonly string SessionFile = Path.Combine(Core.Cfg, "session.dat");
         static readonly JavaScriptSerializer Json = new JavaScriptSerializer();
@@ -61,6 +63,63 @@ namespace Arena
                     : "Wrong email or password.");
             }
             LoadProfile();
+        }
+
+        /// <summary>sign-in on ssbuarena.com/launcher in the player's browser, where Supabase's CAPTCHA (Cloudflare Turnstile)
+        /// can run: the page signs in with a session of its own that it does not keep, then sends the browser to
+        /// http://127.0.0.1:&lt;port&gt;/callback?state=..&amp;refresh_token=.. (a loopback redirect, RFC 8252). This listens there
+        /// (only this PC can reach it), checks the state and turns the refresh token into this launcher's session.
+        /// Throws with a message for the player; cancel stops the wait.</summary>
+        public static void SignInWithBrowser(System.Threading.CancellationToken cancel)
+        {
+            var listener = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+            listener.Start();
+            try
+            {
+                int port = ((IPEndPoint)listener.LocalEndpoint).Port;
+                var raw = new byte[24];
+                using (var rng = RandomNumberGenerator.Create()) rng.GetBytes(raw);
+                string state = BitConverter.ToString(raw).Replace("-", "").ToLowerInvariant();
+                Core.Open(LauncherSignInPage + "?port=" + port + "&state=" + state);
+                DateTime until = DateTime.UtcNow.AddMinutes(10);
+                while (true)
+                {
+                    var accept = listener.AcceptTcpClientAsync();
+                    while (!accept.Wait(250))
+                    {
+                        cancel.ThrowIfCancellationRequested();
+                        if (DateTime.UtcNow > until) throw new Exception("The sign-in in the browser took too long: try again.");
+                    }
+                    using (var client = accept.Result)
+                    using (var stream = client.GetStream())
+                    {
+                        stream.ReadTimeout = 5000;
+                        string line = new StreamReader(stream, Encoding.ASCII).ReadLine() ?? "";   // GET /callback?.. HTTP/1.1
+                        var parts = line.Split(' ');
+                        string target = parts.Length >= 2 ? parts[1] : "";
+                        var q = System.Web.HttpUtility.ParseQueryString(target.Contains("?") ? target.Substring(target.IndexOf('?') + 1) : "");
+                        bool ours = parts[0] == "GET" && target.StartsWith("/callback?") && q["state"] == state && !string.IsNullOrEmpty(q["refresh_token"]);
+                        Reply(stream, ours ? "Signed in: go back to the SSBU Arena launcher. You can close this tab."
+                                           : "This is the SSBU Arena launcher's sign-in: nothing to do here.");
+                        if (!ours) continue;                      // a stray request (favicon, another page): keep waiting
+                        TokenRequest("refresh_token", new Dictionary<string, object> { { "refresh_token", q["refresh_token"] } });
+                        LoadProfile();
+                        return;
+                    }
+                }
+            }
+            finally { listener.Stop(); }
+        }
+
+        static void Reply(Stream s, string text)
+        {
+            string html = "<!doctype html><meta charset=utf-8><title>SSBU Arena</title><body style=\"background:#0a1424;color:#e8f1fa;" +
+                          "font:18px system-ui;display:grid;place-items:center;height:90vh\"><p>" + WebUtility.HtmlEncode(text) + "</p>";
+            byte[] body = Encoding.UTF8.GetBytes(html);
+            byte[] head = Encoding.ASCII.GetBytes("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\n" +
+                                                  "Connection: close\r\nContent-Length: " + body.Length + "\r\n\r\n");
+            s.Write(head, 0, head.Length);
+            s.Write(body, 0, body.Length);
         }
 
         public static void SignOut()
