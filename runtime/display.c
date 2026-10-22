@@ -562,7 +562,8 @@ static DWORD WINAPI window_thread(LPVOID arg) {
     char exe[MAX_PATH] = "";
     GetModuleFileNameA(NULL, exe, sizeof exe);
     const char *base = strrchr(exe, '\\') ? strrchr(exe, '\\') + 1 : exe, *show = getenv("SSBU_SHOW");
-    int visible = show ? atoi(show) != 0 : (!_stricmp(base, "ssbu_native.exe") || !_stricmp(base, "ssbu_user.exe") || !_stricmp(base, "ssbu_native_rb.exe"));      /* (_rb: the rollback pair a player starts) */
+    int visible = show ? atoi(show) != 0 : (!_stricmp(base, "ssbu_native.exe") || !_stricmp(base, "ssbu_user.exe") || !_stricmp(base, "ssbu_native_rb.exe") ||
+                                          !_stricmp(base, "ssbu_ui_native.exe"));      /* (_rb: the rollback pair a player starts; _ui: the Arena menu's host) */
     snprintf(g_title, sizeof g_title, "%s", getenv("SSBU_TITLE") ? getenv("SSBU_TITLE") : "SSBU Arena");
     int maxed = 0;
     if (visible && !go->window_mode) {

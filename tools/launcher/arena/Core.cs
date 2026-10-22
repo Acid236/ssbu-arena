@@ -522,6 +522,7 @@ namespace Arena
             var psi = new ProcessStartInfo(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "cmd.exe")) { WorkingDirectory = Work, UseShellExecute = false, CreateNoWindow = true };
             var env = psi.EnvironmentVariables;
             GameEnv(env);
+            env["SSBU_SHOW"] = "1";          // the window, whatever the exe is called (display.c shows it by default only for some names)
             string run = Exe;
             // online through the lobby server (runtime/net_relay.c), relay only; rollback (runtime/rb_net.c) in Smash > Versus
             if (Online && HasOnline && Account.SignedIn)
