@@ -362,7 +362,7 @@
                 <Button Style="{StaticResource Outline}" Height="44" Margin="10,0,0,0" VerticalAlignment="Center" Click="Configure_Click" FontSize="15">Change</Button>
               </StackPanel>
               <TextBlock x:Name="CodeHelp" Style="{StaticResource Small}" FontSize="16" Margin="0,8,0,0" MaxWidth="760" HorizontalAlignment="Left"
-                         Text="Players with the same code find each other: the same rooms in Local Wireless and the same opponents in rollback matches (Smash > Versus)."/>
+                         Text="Players with the same code find each other: the same rooms in Local Wireless and the same opponents in Smash > Versus. Without a code, rooms are open to everyone."/>
             </StackPanel>
           </Grid>
         </Border>
@@ -458,7 +458,7 @@
                   <CheckBox x:Name="RollbackBox" Style="{StaticResource Switch}" Checked="Online_Changed" Unchecked="Online_Changed">
                     <StackPanel>
                       <TextBlock Text="Rollback netcode" FontSize="15"/>
-                      <TextBlock Style="{StaticResource Small}" Margin="0,3,0,0" Text="Smash > Versus finds an opponent with your code. Local Wireless rooms use the game's own netcode."/>
+                      <TextBlock Style="{StaticResource Small}" Margin="0,3,0,0" Text="1-on-1 matches in Local Wireless rooms play with rollback; with a code, Smash > Versus finds an opponent with the same code."/>
                     </StackPanel>
                   </CheckBox>
                   <CheckBox x:Name="PingBox" Style="{StaticResource Switch}" Margin="0,18,0,0" Checked="Field_Changed" Unchecked="Field_Changed">

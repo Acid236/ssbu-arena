@@ -147,7 +147,7 @@ namespace Arena
             OnlineFields.IsEnabled = on;
             OnlineFields.Opacity = on ? 1 : 0.45;
             OnlineHelp.Text = !Core.HasOnline ? "This build of the game has no online." : !on ? "Online off: local play only."
-                            : RollbackBox.IsChecked == true ? "Rollback: Smash > Versus. Rooms: Local Wireless (the game's netcode)." : "Local Wireless rooms through the server (the game's netcode).";
+                            : RollbackBox.IsChecked == true ? "Rollback: 1-on-1 in Local Wireless rooms, and Smash > Versus with a code." : "Local Wireless rooms through the server (the game's netcode).";
         }
 
         void SetPadState()

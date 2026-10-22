@@ -111,8 +111,8 @@ def main():
     with open(cp, 'w', encoding='utf-8', newline='\n') as f:
         f.write(c)
     git('add', ip, cp)
-    git('-c', 'user.name=%s' % (git('log', '-1', '--format=%an') or 'SSBU Arena'), '-c', 'user.email=%s' % git('log', '-1', '--format=%ae'),
-        'commit', '-q', '-m', 'Release %s: prebuilt runtime %s' % (tag, base[:10]))
+    who = ['-c', 'user.name=%s' % (git('log', '-1', '--format=%an') or 'SSBU Arena'), '-c', 'user.email=%s' % git('log', '-1', '--format=%ae')]
+    git(*(who + ['commit', '-q', '-m', 'Release %s: prebuilt runtime %s' % (tag, base[:10])]))
     commit = git('rev-parse', 'HEAD')
 
     # 3. the launcher and the release description
@@ -135,7 +135,7 @@ def main():
         return 0
     remote = arena_remote()
     run(['git', 'push', remote, 'HEAD:main'])
-    run(['git', 'tag', '-a', tag, '-m', 'SSBU Arena ' + a.version])
+    run(['git'] + who + ['tag', '-a', tag, '-m', 'SSBU Arena ' + a.version])
     run(['git', 'push', remote, tag])
     notes = a.notes or ('SSBU Arena %s. Download **SSBU-Arena.exe** only: it installs and updates everything else.' % a.version)
     run(['gh', 'release', 'create', tag, '--repo', GITHUB, '--title', 'SSBU Arena ' + a.version, '--notes', notes, exe, pkg, rel_json])

@@ -242,7 +242,7 @@ function S([double]$v) { return [int][Math]::Round($v * $scale) }
 $script:wrapLabels = New-Object System.Collections.ArrayList
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = 'SSBU native - installer'
+$form.Text = 'SSBU Arena - installer'
 $form.AutoScaleMode = [System.Windows.Forms.AutoScaleMode]::None      # sizes below are in 96-dpi units times $scale; fonts are in points
 $form.Font = $fontUi
 $form.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
@@ -1016,7 +1016,7 @@ function Start-Job([string]$kind, [bool]$dry) {
         $problems = @()
         if (-not $b) { $problems += 'the base game' } elseif (-not ((Is-File $b) -or (Is-Dir $b))) { $problems += 'a base game that exists' }
         if ($problems.Count -gt 0 -and -not $dry) {
-            [void][System.Windows.Forms.MessageBox]::Show("Please choose $($problems -join ', ') first.", 'SSBU native - installer', 'OK', 'Information'); return
+            [void][System.Windows.Forms.MessageBox]::Show("Please choose $($problems -join ', ') first.", 'SSBU Arena - installer', 'OK', 'Information'); return
         }
         $isDump = Is-Dir $b
         $miss = @()
@@ -1025,31 +1025,31 @@ function Start-Job([string]$kind, [bool]$dry) {
             if (-not $script:F['prodkeys'].Box.Text.Trim()) { $miss += 'prod.keys' }
         }
         if ($miss.Count -gt 0 -and -not $dry) {
-            $r = [System.Windows.Forms.MessageBox]::Show("Not chosen: $($miss -join ', ').`n`nThe installer may stop at the step that needs it (you can add it and press Resume). Start anyway?", 'SSBU native - installer', 'YesNo', 'Question')
+            $r = [System.Windows.Forms.MessageBox]::Show("Not chosen: $($miss -join ', ').`n`nThe installer may stop at the step that needs it (you can add it and press Resume). Start anyway?", 'SSBU Arena - installer', 'YesNo', 'Question')
             if ($r -ne 'Yes') { return }
         }
         $lv = $script:F['buildloc'].Box.Text.Trim().Trim('"')
         if ($lv -and -not ($lv -match '^[A-Za-z]:\\' -or $lv.StartsWith('\\'))) {
-            [void][System.Windows.Forms.MessageBox]::Show('The install location must be a full folder path, such as D:\SSBU.', 'SSBU native - installer', 'OK', 'Information'); return
+            [void][System.Windows.Forms.MessageBox]::Show('The install location must be a full folder path, such as D:\SSBU.', 'SSBU Arena - installer', 'OK', 'Information'); return
         }
         $loc = Get-ChosenBuild
         $need = Get-NeedGB; $free = Get-FreeGB $loc
         if ($null -ne $free -and $free -lt $need[0] -and -not $dry) {
-            $r = [System.Windows.Forms.MessageBox]::Show(("The install location {0} has {1:N0} GB free; about {2:N0} GB are needed ({3}).`n`nChoose a folder on another drive (Install location, Choose...), or free some space. Start anyway?" -f $loc, $free, $need[0], $need[1]), 'SSBU native - installer', 'YesNo', 'Warning')
+            $r = [System.Windows.Forms.MessageBox]::Show(("The install location {0} has {1:N0} GB free; about {2:N0} GB are needed ({3}).`n`nChoose a folder on another drive (Install location, Choose...), or free some space. Start anyway?" -f $loc, $free, $need[0], $need[1]), 'SSBU Arena - installer', 'YesNo', 'Warning')
             if ($r -ne 'Yes') { return }
         }
         if ($storedBuild -and -not (Same-Path $loc $storedBuild) -and (Test-Path -LiteralPath ([IO.Path]::Combine($storedBuild, 'state.json'))) -and -not $dry) {
-            $r = [System.Windows.Forms.MessageBox]::Show(("The last install is in {0}.`n`nWith the new location {1} the installation starts from the beginning there (the game files are unpacked and built again); the old folder is not deleted, you can delete it yourself afterwards.`n`nUse the new location?" -f $storedBuild, $loc), 'SSBU native - installer', 'YesNo', 'Question')
+            $r = [System.Windows.Forms.MessageBox]::Show(("The last install is in {0}.`n`nWith the new location {1} the installation starts from the beginning there (the game files are unpacked and built again); the old folder is not deleted, you can delete it yourself afterwards.`n`nUse the new location?" -f $storedBuild, $loc), 'SSBU Arena - installer', 'YesNo', 'Question')
             if ($r -ne 'Yes') { return }
         }
         $fail = @($script:preResults | Where-Object { $_.level -eq 'fail' -and -not ($_.what -eq 'Disk space' -and $null -ne $free) })   # (the disk was asked about just above)
         if ($fail.Count -gt 0 -and -not $dry) {
-            $r = [System.Windows.Forms.MessageBox]::Show("The PC check found a problem:`n`n" + (($fail | ForEach-Object { $_.what + ': ' + $_.msg }) -join "`n") + "`n`nStart anyway?", 'SSBU native - installer', 'YesNo', 'Warning')
+            $r = [System.Windows.Forms.MessageBox]::Show("The PC check found a problem:`n`n" + (($fail | ForEach-Object { $_.what + ': ' + $_.msg }) -join "`n") + "`n`nStart anyway?", 'SSBU Arena - installer', 'YesNo', 'Warning')
             if ($r -ne 'Yes') { return }
         }
         $cmdArgs = Build-InstallArgs $dry
         if ($cmdArgs.Length -gt 30000) {
-            [void][System.Windows.Forms.MessageBox]::Show('The list of DLC files is too long for one command line (Windows allows about 32000 characters). Remove some DLC packages (Remove / Clear) and try again.', 'SSBU native - installer', 'OK', 'Warning'); return
+            [void][System.Windows.Forms.MessageBox]::Show('The list of DLC files is too long for one command line (Windows allows about 32000 characters). Remove some DLC packages (Remove / Clear) and try again.', 'SSBU Arena - installer', 'OK', 'Warning'); return
         }
         $exeArgs = $cmdArgs
     } else {
@@ -1134,15 +1134,15 @@ $script:cbRuntime.Add_CheckedChanged({ if (-not $script:running -and $script:pre
 $script:btnMsvc.Add_Click({
     $cmd = 'winget install --id Microsoft.VisualStudio.2022.BuildTools -e --accept-package-agreements --accept-source-agreements --override "--passive --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"'
     if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
-        [void][System.Windows.Forms.MessageBox]::Show('winget is not on this PC. Install "Build Tools for Visual Studio" (workload "Desktop development with C++") from https://aka.ms/vs/17/release/vs_BuildTools.exe , then press Resume.', 'SSBU native - installer', 'OK', 'Information')
+        [void][System.Windows.Forms.MessageBox]::Show('winget is not on this PC. Install "Build Tools for Visual Studio" (workload "Desktop development with C++") from https://aka.ms/vs/17/release/vs_BuildTools.exe , then press Resume.', 'SSBU Arena - installer', 'OK', 'Information')
         return
     }
-    $r = [System.Windows.Forms.MessageBox]::Show("Install the Microsoft C++ Build Tools now?`n`n- free, about 3 GB on C:, 5-15 minutes`n- Yes accepts the Microsoft licence terms of the Build Tools and of the winget source`n- Windows asks for administrator rights; Microsoft's installer shows its progress`n`nA console window opens and shows what happens; when it says it is finished, close it and press Resume here.`n`nCommand: $cmd", 'SSBU native - installer', 'YesNo', 'Question')
+    $r = [System.Windows.Forms.MessageBox]::Show("Install the Microsoft C++ Build Tools now?`n`n- free, about 3 GB on C:, 5-15 minutes`n- Yes accepts the Microsoft licence terms of the Build Tools and of the winget source`n- Windows asks for administrator rights; Microsoft's installer shows its progress`n`nA console window opens and shows what happens; when it says it is finished, close it and press Resume here.`n`nCommand: $cmd", 'SSBU Arena - installer', 'YesNo', 'Question')
     if ($r -ne 'Yes') { return }
     try {
         Start-Process -FilePath 'cmd.exe' -ArgumentList ('/k echo Installing the Microsoft C++ Build Tools (5-15 minutes; a Microsoft window shows the progress)... & ' + $cmd + ' & echo. & echo Finished: read the lines above. Close this window and press Resume in the installer.')
         Log-Add ('started in a console: ' + $cmd)
-    } catch { [void][System.Windows.Forms.MessageBox]::Show('Could not start the console: ' + $_.Exception.Message, 'SSBU native - installer', 'OK', 'Warning') }
+    } catch { [void][System.Windows.Forms.MessageBox]::Show('Could not start the console: ' + $_.Exception.Message, 'SSBU Arena - installer', 'OK', 'Warning') }
 })
 
 function Apply-Found {
@@ -1349,14 +1349,14 @@ $script:btnLogs.Add_Click({
 })
 $script:btnPlay.Add_Click({
     $bat = Join-Path $repo 'Play SSBU.bat'
-    if (Test-Path -LiteralPath $bat) { Start-Process -FilePath $bat -WorkingDirectory $repo } else { [void][System.Windows.Forms.MessageBox]::Show('Play SSBU.bat was not found.', 'SSBU native - installer', 'OK', 'Warning') }
+    if (Test-Path -LiteralPath $bat) { Start-Process -FilePath $bat -WorkingDirectory $repo } else { [void][System.Windows.Forms.MessageBox]::Show('Play SSBU.bat was not found.', 'SSBU Arena - installer', 'OK', 'Warning') }
 })
 $script:btnClose.Add_Click({ $form.Close() })
 $script:allowClose = $false
 $form.Add_FormClosing({
     param($sender, $e)
     if ($script:running -and $script:job -and -not $script:job.Done -and -not $testMode) {
-        $r = [System.Windows.Forms.MessageBox]::Show('The installation is running. Stop it?' + "`n`n" + '(The next start goes on from where it stopped.)', 'SSBU native - installer', 'YesNo', 'Question')
+        $r = [System.Windows.Forms.MessageBox]::Show('The installation is running. Stop it?' + "`n`n" + '(The next start goes on from where it stopped.)', 'SSBU Arena - installer', 'YesNo', 'Question')
         if ($r -ne 'Yes') { $e.Cancel = $true; return }
         $script:job.Kill()            # only the process tree this window started, by its PID
     }
