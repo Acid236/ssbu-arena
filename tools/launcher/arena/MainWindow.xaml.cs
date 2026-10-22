@@ -34,7 +34,12 @@ namespace Arena
             RefreshOnline();
             SetPadState();
             StateChanged += (s, e) => Root.Margin = WindowState == WindowState.Maximized ? new Thickness(7) : new Thickness(0);
-            Closing += (s, e) => { SaveQuiet(); if (prep != null) { prepCancelled = true; try { prep.Kill(); } catch { } } };
+            Closing += (s, e) =>
+            {
+                SaveQuiet();
+                if (prep != null) { prepCancelled = true; try { prep.Kill(); } catch { } }
+                if (setupProc != null) SetupStop_Click(null, null);      // install.py is resumable
+            };
             var poll = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
             poll.Tick += (s, e) => { int n = Core.XInputCount(); if (n != xinput) { xinput = n; SetPadState(); } };
             poll.Start();
@@ -608,9 +613,11 @@ namespace Arena
                 {
                     if (release == null) Show("SSBU Arena", "The first install downloads SSBU Arena from GitHub: no connection or no release found. Check the internet connection and start the launcher again.", null, ("OK", null, true));
                     else Show("Install SSBU Arena", "SSBU Arena " + release.Version + " is installed in this folder:\n" + System.IO.Path.GetDirectoryName(Updater.ExePath) +
-                              "\n\nThe installer then asks for your own game files (about 25 GB of space).", null, ("Install", () => FirstInstall(), true), ("Not now", null, false));
+                              "\n\nThe setup then asks for your own game files (about 25 GB of space).", null, ("Install", () => StartSetup(true), true), ("Not now", null, false));
                     return;
                 }
+                // installed but not finished (the setup was stopped or failed): its screen again, it goes on from where it was
+                if (!Updater.DevCopy && !System.IO.File.Exists(Core.Exe)) { StartSetup(false); return; }
                 if (release == null || Updater.DevCopy) return;
                 if (Updater.LauncherOutdated(release)) { UpdateLauncher(); return; }
                 if (Updater.GameOutdated(release))
@@ -718,28 +725,6 @@ namespace Arena
             if (code == 0) { Status("SSBU Arena updated to " + release.Version, "good"); return; }
             Show("Update failed", "SSBU Arena could not update to " + release.Version + " (exit code " + code + "). The game you had is still there. Last lines of build\\update_last.log:",
                  Updater.UpdateLogTail(8), ("Try again", () => UpdateGame(), false), ("OK", null, true));
-        }
-
-        void FirstInstall()
-        {
-            ShowBusy("INSTALLING", "Downloading...", "Then the installer asks for your own game files.");
-            Task.Run(() => Updater.FirstInstall(release, s => Dispatcher.BeginInvoke(new Action(() => PrepDetail.Text = s)))).ContinueWith(t =>
-            {
-                if (t.Exception != null) { HideBusy(); Show("Install", t.Exception.GetBaseException().Message, null, ("OK", null, true)); return; }
-                PrepDetail.Text = "The installer is open: follow it, then this launcher starts again.";
-                SetPrepBar(1); PrepPct.Text = "";
-                var p = t.Result;
-                p.EnableRaisingEvents = true;
-                p.Exited += (s, e) =>
-                {
-                    Updater.WaitInstallerWindow(System.IO.Path.GetDirectoryName(Updater.ExePath));
-                    Dispatcher.BeginInvoke(new Action(() =>
-                    {
-                        Process.Start(new ProcessStartInfo(Updater.ExePath) { UseShellExecute = false });
-                        Application.Current.Shutdown();
-                    }));
-                };
-            }, TaskScheduler.FromCurrentSynchronizationContext());
         }
 
         // ---------------------------------------------------------------- shader preparation

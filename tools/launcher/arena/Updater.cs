@@ -7,8 +7,8 @@
 // - another commit than the installed one (build\update_manifest.json, scripts/update.py): scripts/install.py runs without
 //   its window; it brings the sources to the release (update.py follows the latest release), takes the release's prebuilt
 //   runtime (install.py RUNTIME_RELEASE, SHA-256 checked) and rebuilds here only what the change needs;
-// - not installed yet (no scripts\ beside the exe): the sources of the release are unpacked beside the exe and the installer
-//   (Install SSBU.bat: a private Python, then the installer window that asks for the game files) is started.
+// - not installed yet (no scripts\ beside the exe): the sources of the release are unpacked beside the exe; the launcher's
+//   setup screen (Installer.cs, MainWindow.Setup.cs) then prepares the tools and asks for the game files.
 // A git checkout (a developer's copy) is never changed; SSBU_ARENA_UPDATE=off skips everything, =force checks a git checkout too.
 // Tests: SSBU_ARENA_RELEASE=<folder> reads arena-release.json and its files from a folder instead of GitHub;
 // SSBU_ARENA_UPDATE_DRY=1 runs install.py with --dry-run.
@@ -180,9 +180,8 @@ namespace Arena
             catch { return new List<string>(); }
         }
 
-        /// <summary>first start of the downloaded launcher: the release's sources beside the exe, then the installer
-        /// (Install SSBU.bat). Returns the installer's process (the window asks for the game files).</summary>
-        public static Process FirstInstall(Release r, Action<string> say)
+        /// <summary>first start of the downloaded launcher: the release's sources beside the exe (the setup screen goes on)</summary>
+        public static void FirstInstall(Release r, Action<string> say)
         {
             string root = Path.GetDirectoryName(ExePath);
             say("Downloading SSBU Arena " + r.Version + "...");
@@ -213,49 +212,6 @@ namespace Arena
             };
             Directory.CreateDirectory(Path.Combine(root, "build"));
             File.WriteAllText(Path.Combine(root, @"build\update_manifest.json"), new JavaScriptSerializer().Serialize(manifest));
-            say("Starting the installer...");
-            return RunInstaller(root);
-        }
-
-        /// <summary>bootstrap.ps1 opens the installer window in a process of its own and ends: wait until no
-        /// scripts\installer_window.ps1 of this folder runs any more</summary>
-        public static void WaitInstallerWindow(string root)
-        {
-            string want = Path.Combine(root, @"scripts\installer_window.ps1").ToLowerInvariant();
-            for (;;)
-            {
-                bool running = false;
-                try
-                {
-                    using (var q = new System.Management.ManagementObjectSearcher("SELECT CommandLine FROM Win32_Process WHERE Name='powershell.exe'"))
-                        foreach (var o in q.Get())
-                            if (((o["CommandLine"] as string) ?? "").ToLowerInvariant().Contains(want)) { running = true; break; }
-                }
-                catch { return; }
-                if (!running) return;
-                System.Threading.Thread.Sleep(2000);
-            }
-        }
-
-        /// <summary>Install SSBU.bat's work: scripts\bootstrap.ps1 (a private Python, then the installer window); its output
-        /// goes to build\bootstrap.log</summary>
-        public static Process RunInstaller(string root)
-        {
-            var psi = new ProcessStartInfo("powershell.exe", "-NoProfile -ExecutionPolicy Bypass -File \"" + Path.Combine(root, @"scripts\bootstrap.ps1") + "\"")
-            {
-                WorkingDirectory = root, UseShellExecute = false, CreateNoWindow = true,
-                RedirectStandardOutput = true, RedirectStandardError = true,
-            };
-            var p = new Process { StartInfo = psi, EnableRaisingEvents = true };
-            var w = new StreamWriter(Path.Combine(root, @"build\bootstrap.log"), false, Encoding.UTF8) { AutoFlush = true };
-            DataReceivedEventHandler on = (s, e) => { if (e.Data != null) lock (w) try { w.WriteLine(e.Data); } catch (ObjectDisposedException) { } };
-            p.OutputDataReceived += on;
-            p.ErrorDataReceived += on;
-            p.Exited += (s, e) => { p.WaitForExit(); lock (w) w.Dispose(); };
-            p.Start();
-            p.BeginOutputReadLine();
-            p.BeginErrorReadLine();
-            return p;
         }
     }
 }

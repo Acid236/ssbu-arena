@@ -552,6 +552,7 @@
                   <Button Style="{StaticResource Outline}" Height="42" Margin="0,0,10,10" Click="Recheck_Click" FontSize="15">Check again</Button>
                   <Button Style="{StaticResource Outline}" Height="42" Margin="0,0,10,10" Click="PrepareNow_Click" FontSize="15">Prepare shaders now</Button>
                   <Button Style="{StaticResource Outline}" Height="42" Margin="0,0,10,10" Click="OpenLog_Click" FontSize="15">Open game log</Button>
+                  <Button Style="{StaticResource Outline}" Height="42" Margin="0,0,10,10" Click="Reinstall_Click" FontSize="15">Run the setup again</Button>
                 </WrapPanel>
               </StackPanel>
             </Grid>
@@ -613,6 +614,151 @@
             <Button Style="{StaticResource Bare}" HorizontalAlignment="Right" Click="PlayOffline_Click" Foreground="{StaticResource Muted}">
               <TextBlock Text="Play offline" FontSize="15" Foreground="{StaticResource Muted}" TextDecorations="Underline"/>
             </Button>
+          </Grid>
+        </StackPanel>
+      </Border>
+    </Grid>
+
+    <!-- setup (Installer.cs, MainWindow.Setup.cs): the first install and an unfinished one, in three stages -->
+    <Grid x:Name="SetupOverlay" Grid.RowSpan="3" Visibility="Collapsed">
+      <Grid.Background>
+        <RadialGradientBrush Center="0.5,0.3" GradientOrigin="0.5,0.3" RadiusX="0.8" RadiusY="0.9">
+          <GradientStop Color="#FA112236" Offset="0"/>
+          <GradientStop Color="#FF0B1018" Offset="0.75"/>
+        </RadialGradientBrush>
+      </Grid.Background>
+      <Path Data="{StaticResource BrandMarkGeometry}" Width="760" Stretch="Uniform" HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="0,0,-120,-140" Opacity="0.05" Fill="{StaticResource Accent}" IsHitTestVisible="False"/>
+      <Border Style="{StaticResource Panel}" Background="#F00F1620" Width="1120" HorizontalAlignment="Center" VerticalAlignment="Center" Padding="52,40,52,36">
+        <Border.Effect><DropShadowEffect BlurRadius="60" ShadowDepth="0" Opacity="0.55" Color="Black"/></Border.Effect>
+        <StackPanel>
+          <Grid>
+            <StackPanel Orientation="Horizontal">
+              <Path Data="{StaticResource BrandMarkGeometry}" Fill="{StaticResource Accent}" Width="46" Height="40" Stretch="Uniform"/>
+              <TextBlock Text="SET UP SSBU ARENA" Style="{StaticResource SectionTitle}" FontSize="46" Margin="18,0,0,0" VerticalAlignment="Center"/>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
+              <TextBlock x:Name="SetupStage1" Text="1  TOOLS" FontSize="14" FontWeight="SemiBold" Foreground="{StaticResource Dim}"/>
+              <Border Width="34" Height="1" Background="{StaticResource Line}" Margin="14,0" VerticalAlignment="Center"/>
+              <TextBlock x:Name="SetupStage2" Text="2  GAME FILES" FontSize="14" FontWeight="SemiBold" Foreground="{StaticResource Dim}"/>
+              <Border Width="34" Height="1" Background="{StaticResource Line}" Margin="14,0" VerticalAlignment="Center"/>
+              <TextBlock x:Name="SetupStage3" Text="3  INSTALL" FontSize="14" FontWeight="SemiBold" Foreground="{StaticResource Dim}"/>
+            </StackPanel>
+          </Grid>
+          <TextBlock x:Name="SetupIntro" Style="{StaticResource Small}" FontSize="16" Margin="0,12,0,26" TextWrapping="Wrap"/>
+
+          <!-- stage 1 (and the download before it): one bar and what happens -->
+          <StackPanel x:Name="SetupBusy">
+            <TextBlock x:Name="SetupBusyTitle" FontFamily="{StaticResource Display}" FontStyle="Italic" FontWeight="ExtraBold" FontSize="28"/>
+            <Grid Height="6" Margin="0,16,0,0">
+              <Grid.ColumnDefinitions><ColumnDefinition x:Name="SetupBusyDone" Width="0*"/><ColumnDefinition x:Name="SetupBusyLeft" Width="1*"/></Grid.ColumnDefinitions>
+              <Border Grid.ColumnSpan="2" Background="{StaticResource Line}" CornerRadius="3"/>
+              <Border x:Name="SetupBusyFill" Background="{StaticResource Accent}" CornerRadius="3"/>
+            </Grid>
+            <TextBlock x:Name="SetupBusyDetail" Style="{StaticResource Small}" FontSize="15" Margin="0,14,0,0" TextWrapping="Wrap"/>
+            <TextBlock x:Name="SetupBusyLog" FontFamily="Consolas" FontSize="13" Foreground="{StaticResource Dim}" Margin="0,8,0,0" TextTrimming="CharacterEllipsis"/>
+            <StackPanel x:Name="SetupBusyButtons" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,26,0,0" Visibility="Collapsed">
+              <Button Style="{StaticResource Primary}" Height="48" Click="SetupRetry_Click">
+                <TextBlock Text="TRY AGAIN" FontFamily="{StaticResource Display}" FontWeight="ExtraBold" FontStyle="Italic" FontSize="22" Margin="26,0"
+                           Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+              </Button>
+            </StackPanel>
+          </StackPanel>
+
+          <!-- stage 2: the game files (found by the scan, each can be changed) and this PC -->
+          <Grid x:Name="SetupFiles" Visibility="Collapsed">
+            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="40"/><ColumnDefinition Width="330"/></Grid.ColumnDefinitions>
+            <StackPanel>
+              <TextBlock Text="YOUR GAME" Style="{StaticResource FieldLabel}"/>
+              <DockPanel>
+                <Button DockPanel.Dock="Right" Style="{StaticResource Outline}" Height="40" Padding="14,0" Margin="8,0,0,0" FontSize="14" Click="SetupGameFolder_Click" ToolTip="A dump folder (exefs and romfs inside)">Folder</Button>
+                <Button DockPanel.Dock="Right" Style="{StaticResource Outline}" Height="40" Padding="14,0" Margin="10,0,0,0" FontSize="14" Click="SetupGameFile_Click">File</Button>
+                <TextBox x:Name="SetupGame" Height="40" VerticalContentAlignment="Center" TextChanged="SetupField_Changed"/>
+              </DockPanel>
+              <StackPanel Orientation="Horizontal" Margin="0,7,0,0"><ContentControl x:Name="SetupGameMark"/><TextBlock x:Name="SetupGameText" Style="{StaticResource Small}" Margin="10,0,0,0" VerticalAlignment="Center" TextWrapping="Wrap" MaxWidth="640"/></StackPanel>
+
+              <StackPanel x:Name="SetupPackageFields">
+                <TextBlock Text="UPDATE 13.0.4 OR 13.0.5" Style="{StaticResource FieldLabel}" Margin="0,20,0,6"/>
+                <DockPanel>
+                  <Button DockPanel.Dock="Right" Style="{StaticResource Outline}" Height="40" Padding="14,0" Margin="10,0,0,0" FontSize="14" Click="SetupUpdateFile_Click">File</Button>
+                  <TextBox x:Name="SetupUpdate" Height="40" VerticalContentAlignment="Center" TextChanged="SetupField_Changed"/>
+                </DockPanel>
+                <StackPanel Orientation="Horizontal" Margin="0,7,0,0"><ContentControl x:Name="SetupUpdateMark"/><TextBlock x:Name="SetupUpdateText" Style="{StaticResource Small}" Margin="10,0,0,0" VerticalAlignment="Center" TextWrapping="Wrap" MaxWidth="640"/></StackPanel>
+
+                <TextBlock Text="PROD.KEYS" Style="{StaticResource FieldLabel}" Margin="0,20,0,6"/>
+                <DockPanel>
+                  <Button DockPanel.Dock="Right" Style="{StaticResource Outline}" Height="40" Padding="14,0" Margin="10,0,0,0" FontSize="14" Click="SetupKeysFile_Click">File</Button>
+                  <TextBox x:Name="SetupKeys" Height="40" VerticalContentAlignment="Center" TextChanged="SetupField_Changed"/>
+                </DockPanel>
+                <StackPanel Orientation="Horizontal" Margin="0,7,0,0"><ContentControl x:Name="SetupKeysMark"/><TextBlock x:Name="SetupKeysText" Style="{StaticResource Small}" Margin="10,0,0,0" VerticalAlignment="Center" TextWrapping="Wrap" MaxWidth="640"/></StackPanel>
+
+                <CheckBox x:Name="SetupDlc" Style="{StaticResource Switch}" Margin="0,20,0,0" Checked="SetupField_Changed" Unchecked="SetupField_Changed">
+                  <StackPanel>
+                    <TextBlock x:Name="SetupDlcTitle" Text="Your DLC" FontSize="15"/>
+                    <TextBlock x:Name="SetupDlcText" Style="{StaticResource Small}" Margin="0,3,0,0"/>
+                  </StackPanel>
+                </CheckBox>
+              </StackPanel>
+
+              <TextBlock Text="FIRMWARE (OPTIONAL)" Style="{StaticResource FieldLabel}" Margin="0,20,0,6"/>
+              <DockPanel>
+                <Button DockPanel.Dock="Right" Style="{StaticResource Outline}" Height="40" Padding="14,0" Margin="10,0,0,0" FontSize="14" Click="SetupFirmware_Click">Folder</Button>
+                <TextBox x:Name="SetupFirmware" Height="40" VerticalContentAlignment="Center" TextChanged="SetupField_Changed"/>
+              </DockPanel>
+              <StackPanel Orientation="Horizontal" Margin="0,7,0,0"><ContentControl x:Name="SetupFirmwareMark"/><TextBlock x:Name="SetupFirmwareText" Style="{StaticResource Small}" Margin="10,0,0,0" VerticalAlignment="Center" TextWrapping="Wrap" MaxWidth="640"/></StackPanel>
+
+              <TextBlock Text="INSTALL LOCATION" Style="{StaticResource FieldLabel}" Margin="0,20,0,6"/>
+              <DockPanel>
+                <Button DockPanel.Dock="Right" Style="{StaticResource Outline}" Height="40" Padding="14,0" Margin="10,0,0,0" FontSize="14" Click="SetupLocation_Click">Folder</Button>
+                <TextBox x:Name="SetupLocation" Height="40" VerticalContentAlignment="Center" TextChanged="SetupLocation_Changed"/>
+              </DockPanel>
+            </StackPanel>
+
+            <StackPanel Grid.Column="2">
+              <TextBlock Text="THIS PC" Style="{StaticResource FieldLabel}"/>
+              <ItemsControl x:Name="SetupPc" Margin="0,4,0,0"/>
+              <Button Style="{StaticResource Link}" HorizontalAlignment="Left" Margin="0,14,0,0" FontSize="14" Click="SetupRescan_Click">Look for the files again</Button>
+            </StackPanel>
+
+          </Grid>
+
+          <!-- stage 3: install.py's steps, one bar, the log -->
+          <Grid x:Name="SetupRun" Visibility="Collapsed">
+            <Grid.ColumnDefinitions><ColumnDefinition Width="380"/><ColumnDefinition Width="40"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+            <ScrollViewer MaxHeight="430" VerticalScrollBarVisibility="Auto">
+              <ItemsControl x:Name="SetupSteps"/>
+            </ScrollViewer>
+            <StackPanel Grid.Column="2">
+              <Grid>
+                <TextBlock x:Name="SetupRunTitle" FontFamily="{StaticResource Display}" FontStyle="Italic" FontWeight="ExtraBold" FontSize="28" VerticalAlignment="Bottom"/>
+                <TextBlock x:Name="SetupPct" HorizontalAlignment="Right" FontFamily="{StaticResource Display}" FontWeight="ExtraBold" FontSize="40" Foreground="{StaticResource Accent}"/>
+              </Grid>
+              <Grid Height="6" Margin="0,12,0,0">
+                <Grid.ColumnDefinitions><ColumnDefinition x:Name="SetupRunDone" Width="0*"/><ColumnDefinition x:Name="SetupRunLeft" Width="1*"/></Grid.ColumnDefinitions>
+                <Border Grid.ColumnSpan="2" Background="{StaticResource Line}" CornerRadius="3"/>
+                <Border Background="{StaticResource Accent}" CornerRadius="3"/>
+              </Grid>
+              <Grid Margin="0,12,0,0">
+                <TextBlock x:Name="SetupRunDetail" Style="{StaticResource Small}" FontSize="15" TextTrimming="CharacterEllipsis" Margin="0,0,180,0"/>
+                <TextBlock x:Name="SetupEta" Style="{StaticResource Small}" FontSize="15" HorizontalAlignment="Right"/>
+              </Grid>
+              <TextBlock x:Name="SetupError" Foreground="{StaticResource Bad}" FontSize="15" TextWrapping="Wrap" Margin="0,16,0,0" Visibility="Collapsed"/>
+              <TextBox x:Name="SetupLog" Height="230" Margin="0,18,0,0" IsReadOnly="True" FontFamily="Consolas" FontSize="12" Foreground="{StaticResource Muted}"
+                       TextWrapping="NoWrap" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" VerticalContentAlignment="Top"/>
+            </StackPanel>
+          </Grid>
+
+          <!-- the buttons of stages 2 and 3 -->
+          <Grid x:Name="SetupFooter" Margin="0,30,0,0" Visibility="Collapsed">
+            <Button x:Name="SetupLogButton" Style="{StaticResource Link}" HorizontalAlignment="Left" VerticalAlignment="Center" FontSize="14" Click="SetupOpenLog_Click">Open the log</Button>
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+              <Button x:Name="SetupBack" Style="{StaticResource Outline}" Height="52" MinWidth="130" FontSize="15" Margin="0,0,12,0" Click="SetupBack_Click">Change files</Button>
+              <Button x:Name="SetupTools" Style="{StaticResource Outline}" Height="52" MinWidth="130" FontSize="15" Margin="0,0,12,0" Click="SetupBuildTools_Click" Visibility="Collapsed">Install Build Tools</Button>
+              <Button x:Name="SetupStop" Style="{StaticResource Outline}" Height="52" MinWidth="130" FontSize="15" Margin="0,0,12,0" Click="SetupStop_Click">Stop</Button>
+              <Button x:Name="SetupGo" Style="{StaticResource Primary}" Height="52" MinWidth="190" Click="SetupGo_Click">
+                <TextBlock x:Name="SetupGoText" Text="INSTALL" FontFamily="{StaticResource Display}" FontWeight="ExtraBold" FontStyle="Italic" FontSize="26" Margin="30,0"
+                           Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+              </Button>
+            </StackPanel>
           </Grid>
         </StackPanel>
       </Border>
