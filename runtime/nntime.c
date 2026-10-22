@@ -41,7 +41,13 @@ static void read_calendar(uint64_t in, struct tm *t) {
 
 void host_clock_caller(const char *what, uint64_t lr);       /* nnsdk.c: SSBU_TICK_CALLERS */
 int host_fixed_clock(uint64_t lr);                            /* nnsdk.c: SSBU_FIXED_SEED */
-static void time_GetCurrentTime(Ctx *c) { host_clock_caller("GetCurrentTime", c->x[30]); wr64(A0, host_fixed_clock(c->x[30]) ? 1700000000ULL : (uint64_t)now_posix()); RET(0); }
+uint64_t host_match_clock(uint64_t lr);                       /* nnsdk.c: a room's rollback match */
+static void time_GetCurrentTime(Ctx *c) {
+    host_clock_caller("GetCurrentTime", c->x[30]);
+    uint64_t m = host_match_clock(c->x[30]);
+    wr64(A0, host_fixed_clock(c->x[30]) ? 1700000000ULL : m ? m : (uint64_t)now_posix());
+    RET(0);
+}
 /* ------------------------------------------------------------------------------------------------------------------
  * Time zone rule (close4, 2026-10-09).
  * On the console: [sdk 0x391820] ToCalendarTime(out, info, posix) = ITimeZoneService slot +0x60 (ToCalendarTimeWithMyRule),

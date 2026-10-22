@@ -45,12 +45,29 @@ int host_fixed_clock(uint64_t lr) {
     static int on = -1;
     if (on < 0) { const char *e = getenv("SSBU_FIXED_SEED"); on = e && *e; if (on) printf("fixed seed: the clock reads at %llx, %llx, %llx, %llx return a constant (SSBU_FIXED_SEED)\n",
         (unsigned long long)GA(0x7100047d20ULL), (unsigned long long)GA(0x7100138534ULL), (unsigned long long)GA(0x710366d1f0ULL), (unsigned long long)GA(0x710366d388ULL)); }
+    static int log = -1;
+    if (log < 0) log = getenv("SSBU_SEED_LOG") != NULL;  /* (Arena, test) every read of these four clocks, with the game frame */
+    if (log && (lr == GA(0x7100047d20ULL) || lr == GA(0x7100138534ULL) || lr == GA(0x710366d1f0ULL) || lr == GA(0x710366d388ULL))) {
+        long long nvn_front_frame_next(void);
+        printf("seed clock: read at %llx, game frame %lld\n", (unsigned long long)(lr - GA(0x7100000000ULL) + 0x7100000000ULL), nvn_front_frame_next()); fflush(stdout);
+    }
     return on && (lr == GA(0x7100047d20ULL) || lr == GA(0x7100138534ULL) || lr == GA(0x710366d1f0ULL) || lr == GA(0x710366d388ULL));
+}
+/* (Arena, 2026-10-22) a Local Wireless room's match played with rollback: the two clock reads of the match set-up (710366d1f0,
+ * 710366d388: the game's Mersenne-twister generators at 710366d12c / d418) come AFTER the handshake, so they give a value made
+ * from the agreed match seed, the same on both PCs. Read from each PC's own clock they made the two games differ from the
+ * match's first frame (run lw18: 1519 of 1664 frames; with the clock fixed, run lw19: 4 of 1216). 0 = not such a match. */
+uint64_t host_match_clock(uint64_t lr) {
+    int rbn_room_rollback(void); uint64_t rbn_match_seed(void);
+    if (lr != GA(0x710366d1f0ULL) && lr != GA(0x710366d388ULL)) return 0;
+    uint64_t s = rbn_room_rollback() ? rbn_match_seed() : 0;
+    return s ? 1600000000ULL + (s % 100000000ULL) : 0;
 }
 static void os_GetSystemTick(Ctx *c) {
     LARGE_INTEGER now, freq;
     host_clock_caller("GetSystemTick", c->x[30]);
     if (host_fixed_clock(c->x[30])) { RET(0x123456789ULL); return; }
+    { uint64_t m = host_match_clock(c->x[30]); if (m) { RET(m * TICK_HZ); return; } }
     QueryPerformanceCounter(&now);
     QueryPerformanceFrequency(&freq);
     RET((uint64_t)((double)now.QuadPart * (double)TICK_HZ / (double)freq.QuadPart));

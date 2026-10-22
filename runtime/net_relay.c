@@ -325,10 +325,10 @@ static void configure(void) {
     if (!g_host_port) g_host_port = VNET_DEFAULT_PORT;
     if (g_mode == NET_MODE_JOIN && !g_join[0]) { printf("[online] join mode without a room code (SSBU_ONLINE=join:<code> or online_join): online play off\n"); fflush(stdout); return; }
     if ((e = getenv("SSBU_ONLINE_NAME")) && *e) snprintf(g_name, sizeof g_name, "%s", e);
-    if ((e = getenv("SSBU_ONLINE_TICKET")) && *e) snprintf(g_ticket, sizeof g_ticket, "%s", e);
     else if (ini_value("online_name", v, sizeof v) && *v) snprintf(g_name, sizeof g_name, "%s", v);
     else if (ini_value("player_name", v, sizeof v) && *v) snprintf(g_name, sizeof g_name, "%s", v);    /* F1 > Experimental > Your name */
     else snprintf(g_name, sizeof g_name, "Player-%04x", (unsigned)(rnd64() & 0xffff));
+    if ((e = getenv("SSBU_ONLINE_TICKET")) && *e) snprintf(g_ticket, sizeof g_ticket, "%s", e);
     if ((e = getenv("SSBU_ONLINE_CODE")) && *e) snprintf(g_code, sizeof g_code, "%s", e);
     else if (ini_value("online_code", v, sizeof v) && *v) snprintf(g_code, sizeof g_code, "%s", v);
     if ((e = getenv("SSBU_ONLINE_DIRECT"))) g_direct = !is_off(e);

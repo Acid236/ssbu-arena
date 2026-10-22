@@ -1164,6 +1164,8 @@ int rbn_handshake_wanted(void); uint64_t rbn_match_seed(void);   /* rb_net.c (R3
 static ImportFn g_fh_orig;
 static struct { uint64_t boma; int entry; long long frame; } g_fh_f[8];
 static int g_fh_n, g_fh_det, g_fh_detoff;
+static uint64_t g_fh_seeded;                            /* the agreed match seed the generators were last set from */
+int rbn_match_cancelled(void);                          /* rb_net.c */
 static FILE *g_fh_out;
 static uint64_t g_fh_run = 0xcbf29ce484222325ull;
 static long long g_fh_poll_hist[4]; static unsigned long g_fh_poll_tid;
@@ -1182,6 +1184,14 @@ static void fh_hook(Ctx *c, void *user) {
     if (boma && (rd32(boma + 8) >> 28) == 0) {
         int k = 0;
         while (k < g_fh_n && g_fh_f[k].boma != boma) k++;
+        /* (Arena, 2026-10-22) a new fighter of a rollback match with a seed not used yet is the first battle frame of THAT match:
+         * the room's match comes after its waiting-stage fight in the same process (and a rematch after the first match), so the
+         * table is started again and the generators below are set from the new seed (without this, each game kept its own:
+         * DESYNC at frame 1 in every room match out of SSBU_DETERMINISTIC, run lw16). */
+        if (k == g_fh_n && g_fh_n && g_fh_det && rbn_match_seed() && rbn_match_seed() != g_fh_seeded && rbn_match_cancelled() != 2) {
+            printf("[fight] a new rollback match (seed %016llx): its first battle frame\n", (unsigned long long)rbn_match_seed());
+            g_fh_n = 0; k = 0;
+        }
         if (k == g_fh_n && g_fh_n < 8) {
             double id = 0;
             g_fh_f[k].boma = boma; g_fh_f[k].frame = 0; g_fh_f[k].entry = -1;
@@ -1196,6 +1206,7 @@ static void fh_hook(Ctx *c, void *user) {
                 if (g_fh_det && !(g_fh_detoff & 1) && rb && !(rbn_match_cancelled() == 2 && !getenv("SSBU_DETERMINISTIC"))) {      /* (R3 pub2) a room fight with only rollback mode on: the game's own generators */
                     uint64_t ms = rbn_match_seed();    /* R3: the seed of the online match handshake (0 without one: the fixed state below) */
                     if (ms) {
+                        g_fh_seeded = ms;
                         for (int i = 0; i < 9; i++) {
                             uint64_t z = ms + 0x9E3779B97F4A7C15ull * (uint64_t)(i + 1); z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull; z = (z ^ (z >> 27)) * 0x94D049BB133111EBull; z ^= z >> 31;
                             uint64_t y = z * 0xD1342543DE82EF95ull + 1;
