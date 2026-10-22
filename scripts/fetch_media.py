@@ -48,7 +48,7 @@ SYSTEM_DLLS = {'kernel32.dll', 'ntdll.dll', 'user32.dll', 'advapi32.dll', 'ucrtb
 # Opus decoders, built by scripts/ffmpeg/build_ffmpeg_win.sh and packed by scripts/ffmpeg/package_ffmpeg.py (bin/ with the
 # five DLLs, include/ with the headers the runtime is compiled against, COPYING.LGPLv2.1, README.txt).
 FFMPEG_ZIP = 'ssbu-ffmpeg-8.1.3-lgpl-win64.zip'
-FFMPEG_URL = 'https://github.com/Denkishi/ssbu-recomp/releases/download/ffmpeg-8.1.3-lgpl/' + FFMPEG_ZIP
+FFMPEG_URL = 'https://github.com/OpenSmash-Ultimate/ssbu-recomp/releases/download/ffmpeg-8.1.3-lgpl/' + FFMPEG_ZIP
 FFMPEG_ZIP_SHA256 = '47f0bb9ec3e1d3095625bb3272e7005d203b33e415d475fe051e9fe66ea69171'
 FFMPEG_DLLS = {     # load order: each one imports only the ones before it and Windows' own DLLs
     'avutil-60.dll': '5e492b29140b9cb5801ba2c0c4a5c6b2f29984638ee488c0c520991ad83f34c6',

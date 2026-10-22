@@ -15,7 +15,7 @@ mode, and a launcher that sets it all up.
 
 </div>
 
-> **SSBU Arena is based on [OpenSmash-Ultimate (`Denkishi/ssbu-recomp`)](https://github.com/Denkishi/ssbu-recomp)** by
+> **SSBU Arena is based on [OpenSmash-Ultimate (`OpenSmash-Ultimate/ssbu-recomp`)](https://github.com/OpenSmash-Ultimate/ssbu-recomp)** by
 > Denkishi and its contributors: the static recompilation of the game, the runtime that replaces the console, the
 > Vulkan renderer, the installer and the rollback snapshot ring all come from there. Arena started as a fork of it and
 > is now developed on its own, because the two projects went in different directions. See [Credits](#credits).
@@ -90,7 +90,7 @@ sees a virtual address of the server's network.
 SSBU Arena is made by **[Acid236](https://github.com/Acid236)**: Local Wireless over the internet, the relay lobby
 servers, online rollback through the relay, the ping overlay, the competitive mode and light archive, the launchers.
 
-It exists because of **[OpenSmash-Ultimate / ssbu-recomp](https://github.com/Denkishi/ssbu-recomp)**.
+It exists because of **[OpenSmash-Ultimate / ssbu-recomp](https://github.com/OpenSmash-Ultimate/ssbu-recomp)**.
 Thank you to **Denkishi**, who created it and wrote most of it, and to its contributors: **Stephen Jayakar**,
 **xtlg511**, **v1Ta44**, **Frank Fly**, **Victor Navega** and **jfb112697**. The full history of their work is kept in
 this repository's git history. Details, and the open-source projects both projects build on, are in

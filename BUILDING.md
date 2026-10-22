@@ -43,7 +43,7 @@ The rest of this page is the same build done by hand, step by step.
 ## By hand
 
 ```
-git clone https://github.com/Denkishi/ssbu-recomp
+git clone https://github.com/OpenSmash-Ultimate/ssbu-recomp
 cd ssbu-recomp
 python scripts/setup.py --dump <your dump folder> --suyu <folder> [--llvm ... --sdl3 ... --vulkan-headers ... --glslang ...]
 ```

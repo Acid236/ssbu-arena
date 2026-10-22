@@ -25,7 +25,7 @@ build has no GPL or non-free parts (configure: "License: LGPL version 2.1 or lat
 Source: https://ffmpeg.org/releases/ffmpeg-8.1.3.tar.xz
   SHA-256 7138d28c96d9d3e3af4ee3d8cad72741f8ffb40da90c1112235dea3ecd3178a3
   signed by the FFmpeg release key FCF9 86EA 15E6 E293 A564 4F10 B432 2F04 D676 58D8. Not modified.
-Built with scripts/ffmpeg/build_ffmpeg_win.sh of https://github.com/Denkishi/ssbu-recomp (MSYS2 UCRT64 gcc 15.2.0,
+Built with scripts/ffmpeg/build_ffmpeg_win.sh of https://github.com/OpenSmash-Ultimate/ssbu-recomp (MSYS2 UCRT64 gcc 15.2.0,
 nasm 3.02). The configure line is in that script; anyone can rebuild these DLLs from the source above.
 """
 

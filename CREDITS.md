@@ -2,7 +2,7 @@
 
 ## OpenSmash-Ultimate (ssbu-recomp)
 
-SSBU Arena is built on **[OpenSmash-Ultimate, `Denkishi/ssbu-recomp`](https://github.com/Denkishi/ssbu-recomp)**,
+SSBU Arena is built on **[OpenSmash-Ultimate, `OpenSmash-Ultimate/ssbu-recomp`](https://github.com/OpenSmash-Ultimate/ssbu-recomp)**,
 licensed under the GPL-3.0. Arena started as a fork of it (`Acid236/ssbu-recomp-ldnOnline`) and became a separate
 project on 2026-10-21; everything up to that point, theirs and ours, is in this repository's git history with its
 original authors.

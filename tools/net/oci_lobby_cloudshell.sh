@@ -2,7 +2,7 @@
 # Creates the online lobby server on Oracle Cloud "Always Free" from Oracle Cloud Shell (the terminal inside the Oracle
 # console, already signed in to your account: no API key leaves it), then installs the lobby on it.
 #   In the Oracle console: the ">_" Cloud Shell button (top right), then paste:
-#     curl -fsSL https://raw.githubusercontent.com/Denkishi/ssbu-recomp/main/tools/net/oci_lobby_cloudshell.sh | bash
+#     curl -fsSL https://raw.githubusercontent.com/OpenSmash-Ultimate/ssbu-recomp/main/tools/net/oci_lobby_cloudshell.sh | bash
 # What it does, each step skipped when already done (run it again after a stop or a Cloud Shell time-out):
 #   1. the network: the VCN named $VCN_NAME (default ssbu-vcn) with its public subnet; if there is none, it says how to
 #      make one (console: Networking > Virtual cloud networks > Start VCN Wizard > "Create VCN with Internet Connectivity");
@@ -17,7 +17,7 @@
 set -euo pipefail
 VCN_NAME="${VCN_NAME:-ssbu-vcn}"; SHAPE="${SHAPE:-VM.Standard.A1.Flex}"; OCPUS="${OCPUS:-1}"; MEMORY_GB="${MEMORY_GB:-6}"
 PORT="${PORT:-39500}"; RETRY="${RETRY:-120}"; NAME=ssbu-lobby
-REPO_RAW="${REPO_RAW:-https://raw.githubusercontent.com/Denkishi/ssbu-recomp/main}"
+REPO_RAW="${REPO_RAW:-https://raw.githubusercontent.com/OpenSmash-Ultimate/ssbu-recomp/main}"
 C="${OCI_TENANCY:?run this in Oracle Cloud Shell (OCI_TENANCY is not set)}"
 say() { printf '%s  %s\n' "$(date +%H:%M:%S)" "$*"; }
 

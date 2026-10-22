@@ -95,7 +95,7 @@ TOOLS = {   # checked 2026-10-19: SDL3 and glslang equal GitHub's own asset dige
     # LLVM 9 as a plain zip (no installer: no administrator prompt, and nothing to uninstall when another LLVM is on the
     # PC, which made the official installer fail with "uninstall failed"): the files of the official LLVM-9.0.0-win64.exe
     # (SHA-256 71ed99a6...8863, signed) extracted with 7-Zip, unchanged, only what the build uses (README.txt inside)
-    'llvm': ('https://github.com/Denkishi/ssbu-recomp/releases/download/llvm-9.0.0-portable/llvm-9.0.0-win64-portable.zip',
+    'llvm': ('https://github.com/OpenSmash-Ultimate/ssbu-recomp/releases/download/llvm-9.0.0-portable/llvm-9.0.0-win64-portable.zip',
              '0e0c34046589a73efef3e2a4c06335815681afbc7c883b665cdbed98669a22e3', 'llvm', os.path.join('bin', 'clang.exe')),
     # Dear ImGui (MIT), optional: GitHub publishes no digest for tag archives, so this hash is the archive checked on
     # 2026-10-19 (2,021,831 bytes)

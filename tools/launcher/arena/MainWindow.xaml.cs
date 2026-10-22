@@ -420,7 +420,7 @@ namespace Arena
         void Site_Click(object sender, RoutedEventArgs e) { Core.Open(Core.Site); }
         void Project_Click(object sender, RoutedEventArgs e) { Core.Open(Core.Site + "project"); }
         void Started_Click(object sender, RoutedEventArgs e) { Core.Open(Core.Site + "getting-started"); }
-        void Recomp_Click(object sender, RoutedEventArgs e) { Core.Open("https://github.com/Denkishi/ssbu-recomp"); }
+        void Recomp_Click(object sender, RoutedEventArgs e) { Core.Open("https://github.com/OpenSmash-Ultimate/ssbu-recomp"); }
         void FrameData_Click(object sender, RoutedEventArgs e) { Core.Open("https://ultimateframedata.com/"); }
 
         void CopyCode_Click(object sender, RoutedEventArgs e)
