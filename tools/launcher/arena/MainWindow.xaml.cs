@@ -586,10 +586,15 @@ namespace Arena
         void CheckUpdates()
         {
             Updater.CleanUp();
-            if (Updater.Off) return;
-            Task.Run(() => { try { return Updater.Latest(); } catch { return null; } }).ContinueWith(t =>
+            try { System.IO.File.Delete(System.IO.Path.Combine(Core.Repo ?? System.IO.Path.GetDirectoryName(Updater.ExePath), Core.Repo != null ? @"build\launcher_update.log" : "launcher_update.log")); } catch { }
+            Updater.Log("launcher " + Updater.Current + ", repo " + (Core.Repo ?? "(not installed)") + ", build " + Core.Build + (Updater.DevCopy ? ", git checkout" : ""));
+            if (Updater.Off) { Updater.Log("SSBU_ARENA_UPDATE=off"); return; }
+            Task.Run(() => { try { return Updater.Latest(); } catch (Exception ex) { Updater.Log("release check failed: " + ex.Message); return null; } }).ContinueWith(t =>
             {
                 release = t.Result;
+                if (release != null)
+                    Updater.Log("latest release " + release.Tag + " (version " + release.Version + ", commit " + release.Commit + "); installed commit " +
+                                (Updater.Installed ? Updater.InstalledCommit() ?? "unknown" : "-") + "; game exe " + (System.IO.File.Exists(Core.Exe) ? "there" : "missing"));
                 if (!Updater.Installed)
                 {
                     if (release == null) Show("SSBU Arena", "The first install downloads SSBU Arena from GitHub: no connection or no release found. Check the internet connection and start the launcher again.", null, ("OK", null, true));
@@ -633,9 +638,25 @@ namespace Arena
             SetState();
         }
 
-        void UpdateGame()
+        void UpdateGame() { UpdateGame(0); }
+
+        void UpdateGame(int attempt)
         {
-            if (updating != null || prep != null || game != null || Core.GameRunning()) return;
+            // the launcher's own short runs of the game (FindPads: --pad-list at the start) count as running: wait for them
+            if (updating == null && prep == null && game == null && Core.GameRunning() && attempt < 20)
+            {
+                var again = new DispatcherTimer { Interval = TimeSpan.FromSeconds(3) };
+                again.Tick += (s, e) => { again.Stop(); UpdateGame(attempt + 1); };
+                again.Start();
+                return;
+            }
+            if (updating != null || prep != null || game != null || Core.GameRunning())
+            {
+                Updater.Log("game update not started: " + (updating != null ? "already updating" : prep != null ? "shaders being prepared" : "the game is running"));
+                if (updating == null && game == null && prep == null) Status("Close the game to update SSBU Arena to " + release.Version, "warn");
+                return;
+            }
+            Updater.Log("game update: scripts\\install.py (log: build\\update_last.log)");
             ShowBusy("UPDATING", "Downloading " + release.Tag + "...", "SSBU Arena " + release.Version + ": the game starts as soon as it is done.");
             Status("Updating SSBU Arena to " + release.Version, "busy");
             updSteps.Clear();

@@ -110,6 +110,17 @@ namespace Arena
 
         public static bool GameOutdated(Release r) => r?.Commit != null && Installed && !DevCopy && InstalledCommit() != r.Commit;
 
+        /// <summary>what the update check found and did, in build\launcher_update.log (the last start's only)</summary>
+        public static void Log(string s)
+        {
+            try
+            {
+                string dir = Core.Repo != null ? Path.Combine(Core.Repo, "build") : Path.GetDirectoryName(ExePath);
+                File.AppendAllText(Path.Combine(dir, "launcher_update.log"), DateTime.Now.ToString("HH:mm:ss ") + s + "\r\n");
+            }
+            catch { }
+        }
+
         static string Sha256(byte[] b) { using (var h = SHA256.Create()) return string.Concat(h.ComputeHash(b).Select(x => x.ToString("x2"))); }
 
         /// <summary>leftovers of the last self-update</summary>
