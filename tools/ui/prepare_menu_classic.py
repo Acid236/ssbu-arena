@@ -21,6 +21,7 @@ import bflyt_patch
 import menu_actions_classic
 import menu_recolor
 import menu_shapes
+from PIL import Image
 import menu_textures
 import msbt_patch
 from lua_chunk import Chunk
@@ -67,6 +68,8 @@ EXIT_CURSOR = 20                                     # Exit's bright border: thi
 ESHOP_GROUP = (158, -615)                            # the eShop group's offset (Exit's panes are inside it)
 LDN_X = 515                                          # LDN's button (its icon and name), right of the centre circle
 RANKED_LEFT = -93                                    # Online Ranked's visible left edge
+SETTINGS_BG = 105
+RING = (6, 36, 280)                                  # the centre circle's ring: Battle Arena's cut (centre, radius; measured)
 FONT = [62, 146.9]                                   # every tile's name: Online Ranked's height, narrower
 _lx, _ly, _lw, _lh = (LDN_LEFT + RIGHT_EDGE) / 2, (TOP + MID_BOTTOM) / 2, RIGHT_EDGE - LDN_LEFT, TOP - MID_BOTTOM
 _sx, _sy, _sw, _sh = SET_PANE
@@ -92,9 +95,12 @@ EDIT_MAIN['main_menu.bflyt'].update({
     'null_btn_other': {'pos': [LDN_X, _ly]},
     # the frame and hit box on the tile, offset from the button (which stays right of the centre circle)
     'set_parts_btn_other': {'parts': dict({'frame': {'pos': [LDN_PANE[0] - LDN_X, LDN_PANE[1] - _ly], 'size': LDN_PANE[2:]},
+                                           # its name on two lines: the icon higher, the name lower
+                                           'icon_positoin': {'pos': [-61, 74]}, 'txt_position': {'pos': [-58, -110]},
                                            'circle_position': {'scale': [0, 0]}},
                                           **_hits(_lw / 2, _lh / 2, _lx - LDN_X), **_font)},
-    'mask_colle': {'pos': [_sx, _sy], 'size': [_sw, _sh]},
+    'mask_colle': {'pos': [_sx, _sy], 'size': [_sw, _sh], 'alpha': 255},
+    'set_parts_bg_colle': {'alpha': SETTINGS_BG},   # the Vault's art is lighter than the others' (over the black page)
     # Settings at scale 1, its frame the tile; its icon (above the centre) and name (below) smaller inside the button
     # (the button's blink_scale is offset -17, 2 in this tile; the part's icon sits 149 above icon_positoin)
     'null_btn_colle': {'pos': [_sx, _sy]},
@@ -119,21 +125,33 @@ EDIT_MAIN['main_menu.bflyt'].update({
 EDIT_FOOTER = {'main_menu_footer.bflyt': {'RootPane': {'pos': [0, 966]}}}
 # the cursors, centred on their tiles (the game's extend past the screen's edge)
 EDIT_MAIN['main_menu_lct_center_00.bflyt'] = {
-    # (LDN's drew 40 narrower: measured)
-    'other_crs_square_01': {'pos': [_lx, _ly]},
-    'sel_csr_blink_04': {'size': [_lw + 48, _lh + 8]}, 'sel_csr_hl_00_add_03': {'size': [_lw + 48, _lh + 8]},
-    'sel_csr_hl_01_add_03': {'size': [_lw + 48, _lh + 8]},
-    'other_crs_00': {'pos': [_lx, _ly], 'size': [_lw + 58, _lh + 18]},
+    # (LDN's drew 40 narrower and 40 short at the bottom: measured)
+    'other_crs_square_01': {'pos': [_lx, _ly - 20]},
+    'sel_csr_blink_04': {'size': [_lw + 48, _lh + 48]}, 'sel_csr_hl_00_add_03': {'size': [_lw + 48, _lh + 48]},
+    'sel_csr_hl_01_add_03': {'size': [_lw + 48, _lh + 48]},
+    'other_crs_00': {'pos': [_lx, _ly - 20], 'size': [_lw + 58, _lh + 58]},
     # (Settings' cursor drew 30 narrower and 60 shorter, 9 right of and 30 above its centre: measured)
     'collection_crs_square_01': {'pos': [_sx - 9, _sy - 30]},
     'sel_csr_blink_07': {'size': [_sw + 38, _sh + 68]}, 'sel_csr_hl_00_add_06': {'size': [_sw + 38, _sh + 68]},
     'sel_csr_hl_01_add_06': {'size': [_sw + 38, _sh + 68]},
     'collection_crs_00': {'pos': [_sx - 9, _sy - 30], 'size': [_sw + 48, _sh + 78]},
+    # the pointer from the centre circle to the selected tile (white tab, its black backing, the arrow): LDN's is
+    # Smash's mirrored, Online Ranked's Battle Arena's mirrored (x 0 is the circle's centre in this layout)
+    # (each quad mirrored about its centre: the white tabs are anchored at a corner, made centred here)
+    **{pane: {'material_like': ['main_menu_lct_center_00.bflyt', like], 'texture_uv': True, 'pos': pos, 'size': size,
+              'scale': [-1, 1], 'origin': 0}
+       for pane, like, pos, size in (('pic_02', 'pic_00', [176, 101], [260, 412]), 
+                                     ('pic_03', 'pic_01', [204, -194], [132, 132]), )},
+    'other_arrow': {'rotate': 180 + 27.2},
+    # (their black backings, Smash's and Battle Arena's mirrored, covered the new tiles' names: none)
+    'black_07': {'scale': [0, 0]}, 'black_00': {'scale': [0, 0]},
+    'online_arrow': {'rotate': 180 - 43},
     # Online Ranked's (scaled 1.05 in the game) ends at the straight edge
     'online_crs_square_00': {'pos': [_rx, -297]},
-    'sel_csr_blink_09': {'size': [(_rw + 8) / 1.05, 380]}, 'sel_csr_hl_00_add_09': {'size': [(_rw + 8) / 1.05, 380]},
-    'sel_csr_hl_00_add_08': {'size': [(_rw + 8) / 1.05, 380]},
-    'online_crs': {'pos': [_rx, -300], 'size': [_rw + 18, 380]},
+    **{w: {'size': [(_rw + 8) / 1.05, 380], 'window_frames': [32, 32, 32, 32]}
+       for w in ('sel_csr_blink_09', 'sel_csr_hl_00_add_09', 'sel_csr_hl_00_add_08')},
+    # its bright border: a left frame (straight) and a right one (slanted): the right made the left's mirror
+    'online_crs': {'pos': [_rx, -300], 'size': [_rw + 18, 380], 'window_frames': [82, 82, 380, 380]},
     # Exit's cursor: its windows (at (493, -95) in their square, scaled 1.05) its dark rim, one-frame windows like
     # Settings' (cursor_like; measured 20 x 24 smaller and 10, 30 off); its bright border the eshop_crs picture, its
     # texture redrawn as a rectangle (tile_shapes); its glow and name balloon are not used
@@ -154,12 +172,12 @@ ICONS = {'spirits': 'online_top_btn3_04_icon_off^s', 'online': 'ranked', 'other'
 LABELS = {
     'it': {'mnu_top_spirits': 'Battle Arena', 'mnu_top_help_spirits': 'Battle Arena con i giocatori di SSBU Arena (presto disponibile).',
            'mnu_top_online': 'Online Ranked', 'mnu_top_help_online': 'Partite classificate online (presto disponibile).',
-           'mnu_top_other': 'Online LDN', 'mnu_top_help_other': 'Stanze Local Wireless via internet, con il rollback.',
+           'mnu_top_other': 'Online' + chr(10) + 'LDN', 'mnu_top_help_other': 'Stanze Local Wireless via internet, con il rollback.',
            'mnu_top_collection': 'Impostazioni', 'mnu_top_help_collection': 'Impostazioni del gioco. Dentro, premi + per le impostazioni di SSBU Arena.',
            'mnu_top_tip_eshop': 'Esci', 'mnu_top_help_eshop': 'Chiudi SSBU Arena.'},
     'en': {'mnu_top_spirits': 'Battle Arena', 'mnu_top_help_spirits': 'Battle Arena with SSBU Arena players (coming soon).',
            'mnu_top_online': 'Online Ranked', 'mnu_top_help_online': 'Ranked online matches (coming soon).',
-           'mnu_top_other': 'Online LDN', 'mnu_top_help_other': 'Local Wireless rooms over the internet, with rollback.',
+           'mnu_top_other': 'Online' + chr(10) + 'LDN', 'mnu_top_help_other': 'Local Wireless rooms over the internet, with rollback.',
            'mnu_top_collection': 'Settings', 'mnu_top_help_collection': "The game's settings. Inside, press + for the SSBU Arena settings.",
            'mnu_top_tip_eshop': 'Exit', 'mnu_top_help_eshop': 'Close SSBU Arena.'},
 }
@@ -167,7 +185,11 @@ LABELS = {
 
 # Exit's cursor windows (a slanted left and right frame) drawn as Settings' (one rectangular frame): (window, from)
 CURSOR_LIKE = (('sel_csr_blink_11', 'sel_csr_blink_07'), ('sel_csr_hl_00_add_11', 'sel_csr_hl_00_add_06'),
-               ('sel_csr_hl_00_add_12', 'sel_csr_hl_01_add_06'))
+               ('sel_csr_hl_00_add_12', 'sel_csr_hl_01_add_06'),
+               # Online Ranked's (slanted on the right in the game) too
+               ('sel_csr_blink_09', 'sel_csr_blink_07'), ('sel_csr_hl_00_add_09', 'sel_csr_hl_00_add_06'),
+               ('sel_csr_hl_00_add_08', 'sel_csr_hl_01_add_06'))
+
 
 
 def cursor_like(data):
@@ -203,9 +225,11 @@ def tile_shapes(data):
     s, e = files['timg/__Combined.bntx']
     bntx = data[s:e]
     masks = {'other': menu_shapes.game_mask(bntx, 'melee', LDN_PANE, mirror=True, right=RIGHT_EDGE),
-             'online': menu_shapes.game_mask(bntx, 'online', RANKED_PANE, right=RIGHT_EDGE),
+             'online': menu_shapes.cut_rectangle(RANKED_PANE, RANKED_LEFT, RIGHT_EDGE, LOW_TOP, BOTTOM, RING),
              'colle': menu_shapes.rectangle(SET_PANE), 'eshop': menu_shapes.rectangle(EXIT_PANE)}
     bntx, frames = menu_shapes.write(bntx, masks)
+    frames['main_menu_btn3_00_online_crs_00_r^t'] = menu_shapes.read_bc5(bntx, 'main_menu_btn3_00_online_crs_00_l^t').transpose(
+        Image.Transpose.FLIP_LEFT_RIGHT)
     frames['main_menu_btn3_00_eshop_crs_00^t'] = menu_shapes.outline((_ew + EXIT_CURSOR, _eh + EXIT_CURSOR), 14)
     return replace_sarc_member(bytearray(data[:s] + bntx + data[e:]), 'timg/__Combined.bntx', replace_rgba(bntx, frames))
 

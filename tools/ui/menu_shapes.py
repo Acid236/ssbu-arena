@@ -35,6 +35,14 @@ def game_mask(bntx, tile, pane, mirror=False, right=None):
     return m
 
 
+def cut_rectangle(pane, left, right, top, bottom, circle):
+    """a rectangle (layout units) less a disc (x, y, r): a tile whose corner follows the centre circle's ring"""
+    xs = _xs(pane)
+    ys = np.broadcast_to((pane[1] + pane[3] / 2 - np.arange(pane[3]) - 0.5)[:, None], xs.shape)
+    x0, y0, r = circle
+    return (xs >= left) & (xs <= right) & (ys <= top) & (ys >= bottom) & (np.hypot(xs - x0, ys - y0) > r)
+
+
 def rectangle(pane):
     return np.ones((pane[3], pane[2]), bool)
 
@@ -58,6 +66,21 @@ def outline(size, width):
     out = np.full((h, w, 4), 255, np.uint8)
     out[width:h - width, width:w - width] = 0
     return Image.fromarray(out, 'RGBA')
+
+
+def read_bc5(bntx, name):
+    """one single-mip BC5 slot of a BNTX as RGBA (its two channels in R and G, A opaque)"""
+    from brawl.nutexb import swizzle
+    import struct
+    b = menu_textures.texture_slots(bntx)[name]
+    if struct.unpack_from('<I', bntx, b + 0x1c)[0] != 0x1e01:
+        raise ValueError('not a BC5 slot ' + name)
+    w, h = struct.unpack_from('<II', bntx, b + 0x24)
+    size = struct.unpack_from('<I', bntx, b + 0x50)[0]
+    offset = struct.unpack_from('<Q', bntx, struct.unpack_from('<Q', bntx, b + 0x70)[0])[0]
+    bw, bh = (w + 3) // 4, (h + 3) // 4
+    linear = swizzle(bytes(bntx[offset:offset + size]), bw, bh, bpp=16, to_linear=True)
+    return Image.frombytes('RGB', (bw * 4, bh * 4), linear[:bw * bh * 16], 'bcn', 5).crop((0, 0, w, h)).convert('RGBA')
 
 
 def line_colour(bntx):

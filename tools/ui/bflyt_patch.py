@@ -193,7 +193,7 @@ def apply(d, edits):
         materials = material_offsets(d,s,e)
         for name, ch in pe.items():
             o = idx[name]
-            unknown = ch.keys() - {'visible', 'alpha', 'pos', 'scale', 'size', 'parts', 'font_size', 'texture_uv', 'texture', 'material_like', 'material_white', 'material_black'} - EXTRA_KEYS
+            unknown = ch.keys() - {'visible', 'rotate', 'alpha', 'pos', 'scale', 'size', 'parts', 'font_size', 'texture_uv', 'texture', 'material_like', 'material_white', 'material_black'} - EXTRA_KEYS
             if unknown:
                 raise ValueError('unknown pane fields: ' + ', '.join(sorted(unknown)))
             if 'visible' in ch:
@@ -204,6 +204,8 @@ def apply(d, edits):
                 struct.pack_into('<2f', d, o + 0x2C, *map(float, ch['pos']))
             if 'scale' in ch:
                 struct.pack_into('<2f', d, o + 0x2C + 24, *map(float, ch['scale']))
+            if 'rotate' in ch:                  # the pane's z rotation, degrees
+                struct.pack_into('<f', d, o + 0x2C + 20, float(ch['rotate']))
             if 'size' in ch:
                 struct.pack_into('<2f', d, o + 0x2C + 32, *map(float, ch['size']))
             if 'font_size' in ch:
