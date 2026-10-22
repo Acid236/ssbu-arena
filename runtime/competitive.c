@@ -83,14 +83,28 @@ static uint8_t *comp_pallet(void) {
     if (!p || *(uint64_t *)(p+72) != 0x7101af97f0ull || *(uint64_t *)(p+120) != 0x7101af9ee0ull) return NULL;
     return p;
 }
+/* The side bar command the Arena menu asks for: the fourth argument of prg_func.open_pallet (tools/ui/menu_actions_classic.py:
+ * 3 Local Wireless, 5 Options). Lua 5.3, 64-bit: lua_State.ci at +0x20, CallInfo.func at +0, 16-byte TValues (value, then the
+ * type tag; 0x13 an integer); a C function's arguments follow func. Anything else: 3, the earlier preview's only route. */
+static int g_pallet_cmd = 3;
+static int comp_lua_int_arg(uint64_t L, int n, int fallback) {
+    if (!L) return fallback;
+    uint64_t ci = *(uint64_t *)(uintptr_t)(L + 0x20);
+    uint64_t func = ci ? *(uint64_t *)(uintptr_t)ci : 0, top = *(uint64_t *)(uintptr_t)(L + 0x10);
+    uint64_t arg = func + 16ull * (uint64_t)n;
+    if (!func || arg >= top || *(int *)(uintptr_t)(arg + 8) != 0x13) return fallback;
+    return (int)*(int64_t *)(uintptr_t)arg;
+}
 static void comp_open_local(Ctx *c, void *user) {
     (void)user;
+    int cmd = comp_lua_int_arg(c->x[0], 4, 0);
     /* Preserve the Lua C function's argument/result-stack convention. */
     g_pallet_orig(c);
     uint8_t *p = comp_pallet();
     if (!p || g_local_pending || *(int *)(p+476)) return;
+    g_pallet_cmd = cmd == 5 ? 5 : 3;
     g_local_pending = p;
-    printf("competitive UI: Online & Friends -> opening native Local Wireless controller\n"); fflush(stdout);
+    printf("competitive UI: %s -> opening the native side bar command %d\n", g_pallet_cmd == 5 ? "Settings" : "Online LDN", g_pallet_cmd); fflush(stdout);
 }
 static void comp_pallet_ready(Ctx *c, void *user) {
     (void)user;
@@ -101,11 +115,15 @@ static void comp_pallet_ready(Ctx *c, void *user) {
     if (index < 0 || index >= 20 || *(int *)(p+152+4*index) != 2) return;
     static int trace_count;
     if (++trace_count == 1 || trace_count == 60) { printf("UI pallet ready: tick %d flags %d %d %d %d %d %d queue %llu\n",*(int *)(p+236),p[498],p[499],p[500],p[501],p[502],p[503],(unsigned long long)*(uint64_t *)(p+288));fflush(stdout); }
-    if (!p[499] || !p[502]) return;
+    /* ready: both flags (the side bar shown and idle), or one of them after about half a second (the side bar moved off
+     * the screen by the Arena menu never sets the first one) */
+    static int waited;
+    if (!(p[499] && p[502]) && !((p[499] || p[502]) && ++waited >= 30)) return;
+    waited = 0;
     g_local_pending = NULL;
-    *(int *)(p+468) = 3;
+    *(int *)(p+468) = g_pallet_cmd;
     *(int *)(p+152+4*index) = 4; /* native confirmation, close and publish */
-    printf("competitive UI: Online & Friends -> native Local Wireless confirmation\n"); fflush(stdout);
+    printf("competitive UI: side bar command %d confirmed natively\n", g_pallet_cmd); fflush(stdout);
 }
 static void comp_menu(Ctx *c, void *user) {
     (void)user;
@@ -124,6 +142,12 @@ static void comp_menu(Ctx *c, void *user) {
     }
     g_menu_orig(c);
 }
+static int comp_mapped(uint64_t a);
+int comp_in_options(void) {           /* menu.cpp: the game's own options screen is the current sequence (Arena UI only) */
+    static int ui = -1;
+    if (ui < 0) { const char *e = getenv("SSBU_COMPETITIVE_UI"); ui = e && e[0] == '1'; }
+    return ui && comp_mapped(CURRENT_SEQUENCE) && ((*(volatile uint32_t *)(uintptr_t)CURRENT_SEQUENCE) >> 24) == 0x06;
+}
 static int comp_seq_allowed(uint32_t s) { return (s >> 24) == 0x01 || s == 0x02010000u || (s >> 24) == 0x06 || s == 0; }
 static void comp_scene(Ctx *c, void *user) {
     (void)user;
@@ -134,10 +158,13 @@ static void comp_scene(Ctx *c, void *user) {
         if (s != last) { printf("UI trace: sequence %08x\n", s); fflush(stdout); last = s; }
     }
     const char *ui = getenv("SSBU_COMPETITIVE_UI");
-    if (ui && ui[0] == '1' && (s >> 24) == 0x06 && menu_enabled()) {
-        printf("competitive UI: Settings -> PC settings menu\n");
+    /* the Arena main menu (tools/ui/prepare_menu_classic.py): Settings is the game's own options (0x06, + there opens the
+     * Arena settings: menu.cpp); Exit is the Games & More button, whose modes the competitive build does not have: its
+     * sequence (0x04..) asks to exit the game instead (the settings open on the question) */
+    if (ui && ui[0] == '1' && (s >> 24) == 0x04 && menu_enabled()) {
+        printf("competitive UI: Exit -> exit the game? (sequence %08x)\n", s);
         *seq = 0x01000000u;
-        menu_request_toggle();
+        menu_request_exit();
         s = *seq;
     }
     if (!comp_seq_allowed(s)) { printf("competitive: mode %08x is not part of the competitive build: back to the menu\n", s); *seq = 0x01000000u; }

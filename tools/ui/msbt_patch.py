@@ -51,6 +51,35 @@ def messages(data):
     return names, chunks
 
 
+def apply_grow(data, edits):
+    """as apply(), and when the new messages do not fit the TXT2 section is made larger: its size field, the 16-byte
+    alignment before the next section and the file size in the header (u32 at 0x12) follow"""
+    try:
+        return apply(data, edits)
+    except ValueError as e:
+        if 'exceed existing TXT2 capacity' not in str(e):
+            raise
+    names, chunks = messages(data)
+    for name, text in edits.items():
+        chunks[names[name]] = text.encode('utf-16-le') + b'\0\0'
+    start, end = sections(data)[b'TXT2']
+    head = bytearray(struct.pack('<I', len(chunks)) + bytes(4 * len(chunks)))
+    at = len(head)
+    for i, chunk in enumerate(chunks):
+        struct.pack_into('<I', head, 4 + i * 4, at)
+        at += len(chunk)
+    payload = bytes(head) + b''.join(chunks)
+    after = data[(end + 15) & ~15:]
+    out = bytearray(data[:start]) + payload
+    struct.pack_into('<I', out, start - 12, len(payload))
+    out += bytes((-len(out)) % 16) + after
+    struct.pack_into('<I', out, 0x12, len(out))
+    new_names, new_chunks = messages(bytes(out))
+    if new_names != names or len(new_chunks) != len(chunks):
+        raise ValueError('MSBT structure changed')
+    return bytes(out)
+
+
 def apply(data, edits):
     names, chunks = messages(data)
     for name, text in edits.items():

@@ -92,6 +92,11 @@ extern "C" int menu_enabled(void) {
 extern "C" int menu_is_open(void) { return g_enabled > 0 && g_open; }
 extern "C" int menu_input_blocked(void) { return g_enabled > 0 && (g_open || g_guard); }
 extern "C" void menu_request_toggle(void) { InterlockedIncrement(&g_toggle_req); }
+/* the Arena main menu's Exit button (competitive.c): the settings open on the "Exit the game?" question; No closes them */
+static volatile LONG g_exit_req;
+static int g_exit_popup, g_exit_asked;
+extern "C" void menu_request_exit(void) { InterlockedExchange(&g_exit_req, 1); }
+extern "C" int comp_in_options(void);                     /* competitive.c: the game's own options screen is open */
 /* R3: the online match's message (any thread; copied under a lock, read by the render thread) */
 static SRWLOCK g_notice_lock = SRWLOCK_INIT;
 static char g_notice[512];
@@ -1754,11 +1759,15 @@ static void draw_arena(int cw, int ch) {
     if (ImGui::Button("Exit game")) ImGui::OpenPopup("Exit the game?");
     ImGui::SameLine();
     ImGui::TextDisabled("Saved at once to config\\graphics.ini");
+    if (g_exit_popup) { g_exit_popup = 0; g_exit_asked = 1; ImGui::OpenPopup("Exit the game?"); }
     if (ImGui::BeginPopupModal("Exit the game?", NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
         ImGui::Text("Are you sure? Progress not saved by the game is lost.");
         if (ImGui::Button("Yes, exit")) { exit_game(); ImGui::CloseCurrentPopup(); }
         ImGui::SameLine();
-        if (ImGui::Button("No") || ImGui::IsKeyPressed(ImGuiKey_Escape)) ImGui::CloseCurrentPopup();
+        if (ImGui::Button("No") || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+            ImGui::CloseCurrentPopup();
+            if (g_exit_asked) { g_exit_asked = 0; menu_request_toggle(); }      /* asked from the main menu: back to it */
+        }
         ImGui::EndPopup();
     }
     ImGui::EndChild();
@@ -1941,13 +1950,16 @@ extern "C" int menu_frame(int width, int height, MenuDraw *out) {
         if (g_open && (down & BIT(B_B)) && !g_back_blocked && !osk_active()) menu_request_toggle();      /* B: back to where the menu was opened from */
     }
     if (g_open) capture_tick(down);
+    int in_options = comp_in_options();
+    if (!g_open && in_options && (down & BIT(B_PLUS))) menu_request_toggle();      /* + in the game's options: the Arena settings */
+    if (InterlockedExchange(&g_exit_req, 0)) { if (!g_open) menu_request_toggle(); g_exit_popup = 1; }
     for (LONG t = InterlockedExchange(&g_toggle_req, 0); t > 0; t--) set_open(!g_open);
     if (!g_open && g_guard && b == 0 && g_frame - g_closed_at >= 6) InterlockedExchange(&g_guard, 0);      /* closed and every pad button released */
     for (LONG t = InterlockedExchange(&g_stats_req, 0); t > 0; t--) apply_stats(!S.stats);
 #ifndef _WIN32
     if (!g_open) InterlockedExchange(&g_text_want, 0);      /* the window thread turns SDL's text input off */
 #endif
-    if (!g_open && !S.overlay && !S.stats && !g_notice_on && !popup_on()) { Ev drop[8]; while (q_take(drop, 8) == 8) continue; return 0; }
+    if (!g_open && !S.overlay && !S.stats && !g_notice_on && !popup_on() && !in_options) { Ev drop[8]; while (q_take(drop, 8) == 8) continue; return 0; }
     if (!g_im_ready) im_init(height);
     ImGuiIO &io = ImGui::GetIO();
     io.DisplaySize = ImVec2((float)width, (float)height);
@@ -1990,6 +2002,20 @@ extern "C" int menu_frame(int width, int height, MenuDraw *out) {
     ImGui::NewFrame();
     if (S.overlay) draw_overlay();
     if (S.stats) draw_stats();
+    if (in_options && !g_open) {                         /* the game's options: how to reach the Arena settings */
+        ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.98f, io.DisplaySize.y * 0.035f), ImGuiCond_Always, ImVec2(1.0f, 0.0f));
+        ImGui::SetNextWindowBgAlpha(0.85f);
+        ImGui::PushStyleColor(ImGuiCol_Border, hexc(AR_ACCENT));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.5f);
+        ImGui::Begin("##options_hint", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoInputs |
+                     ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoSavedSettings);
+        ImGui::TextColored(hexc(AR_ACCENT), "+");
+        ImGui::SameLine();
+        ImGui::TextUnformatted("SSBU Arena settings");
+        ImGui::End();
+        ImGui::PopStyleVar();
+        ImGui::PopStyleColor();
+    }
     if (g_notice_on) {                                   /* R3: the online match's message, in the middle */
         char text[512];
         AcquireSRWLockShared(&g_notice_lock); snprintf(text, sizeof text, "%s", g_notice); ReleaseSRWLockShared(&g_notice_lock);

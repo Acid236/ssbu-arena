@@ -13,6 +13,7 @@ int  menu_enabled(void);                /* the menu exists in this run (read onc
 int  menu_is_open(void);
 int  menu_input_blocked(void);          /* nnhid.c: the game gets no input from the real pads and keyboard (open, or a button still held after closing) */
 void menu_request_toggle(void);         /* F1 (display.c) or the pad combination: applied at the next drawn frame */
+void menu_request_exit(void);           /* the Arena main menu's Exit (competitive.c): the settings open on "Exit the game?" */
 /* R3 (rb_net.c): a message box in the middle of the picture while the game itself shows nothing new (the online match
  * waiting for the other player). NULL or "" removes it. The caller redraws the last frame (nvn_front_osk_redraw). */
 void menu_notice(const char *text);

@@ -49,9 +49,39 @@ def icon(name, size=512):
         d.polygon([box(p) for p in ((37,24),(91,24),(87,57),(78,72),(50,72),(41,57))], fill=255)
         d.rounded_rectangle(box((58, 66, 70, 99)), radius=3*s, fill=255)
         d.rounded_rectangle(box((39, 99, 89, 110)), radius=4*s, fill=255)
+    elif name == 'power':                                    # exit: the power symbol
+        d.arc(box((24, 26, 104, 106)), 300, 240, fill=255, width=round(11*s))
+        d.rounded_rectangle(box((58, 12, 70, 66)), radius=6*s, fill=255)
+    elif name == 'wireless':                                  # local wireless: a console with waves
+        d.rounded_rectangle(box((30, 70, 98, 112)), radius=8*s, fill=255)
+        d.rounded_rectangle(box((40, 78, 88, 104)), radius=4*s, fill=0)
+        for r in (14, 28, 42):
+            d.arc(box((64-r, 60-r, 64+r, 60+r)), 220, 320, fill=255, width=round(8*s))
+    elif name == 'arena':                                     # the Arena mark: an A with a cut bar
+        d.polygon([box(p) for p in ((64, 14), (112, 112), (88, 112), (64, 60), (40, 112), (16, 112))], fill=255)
+        d.polygon([box(p) for p in ((44, 86), (84, 86), (90, 98), (38, 98))], fill=255)
     else:
         raise ValueError('unknown icon ' + name)
     return im
+
+
+def put_bc4(bntx, name, im):
+    """an authored greyscale image into one existing single-mip BC4 slot of a BNTX (bytearray, in place)"""
+    b = texture_slots(bntx)[name]
+    fmt = struct.unpack_from('<I', bntx, b+0x1c)[0]
+    w, h = struct.unpack_from('<II', bntx, b+0x24)
+    mips = struct.unpack_from('<H', bntx, b+0x16)[0]
+    size = struct.unpack_from('<I', bntx, b+0x50)[0]
+    bh = struct.unpack_from('<I', bntx, b+0x34)[0]
+    ptr = struct.unpack_from('<Q', bntx, b+0x70)[0]
+    offset = struct.unpack_from('<Q', bntx, ptr)[0]
+    bw, hh = (w+3)//4, (h+3)//4
+    if fmt != 0x1d01 or mips != 1 or (1 << bh) != block_height(hh) or swizzled_size(bw*8, hh, 1 << bh) != size:
+        raise ValueError('unsupported BC4 slot ' + name)
+    pixels = swizzle(encode_bc4(im.resize((w, h), Image.Resampling.LANCZOS)), bw, hh, bpp=8)
+    if len(pixels) != size:
+        raise ValueError('texture size changed')
+    bntx[offset:offset+size] = pixels
 
 
 def card(geo, border=False):
