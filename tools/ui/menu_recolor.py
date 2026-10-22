@@ -68,20 +68,39 @@ def recolour(im, target):
     return Image.fromarray((np.clip(res, 0, 1) * 255 + 0.5).astype(np.uint8), 'RGBA')
 
 
-MATERIAL_LIGHT, VERTEX_LIGHT, ANIM_LIGHT = 1.0, 0.55, 0.8   # lightness kept for materials (text, icons); backgrounds darker
+# lightness factors: fills and backgrounds go to the launcher's dark navy panels; light tints (text, icons, l > LIGHT_KEEP)
+# keep their lightness, so they stay readable on the darker tiles
+MATERIAL_LIGHT, VERTEX_LIGHT, ANIM_LIGHT, LIGHT_KEEP = 0.55, 0.45, 0.55, 0.72
+
+
+def to_srgb(x):
+    x = np.clip(x, 0.0, 1.0)
+    return np.where(x <= 0.0031308, x * 12.92, 1.055 * np.power(x, 1 / 2.4) - 0.055)
+
+
+def to_linear(x):
+    x = np.clip(x, 0.0, 1.0)
+    return np.where(x <= 0.04045, x / 12.92, np.power((x + 0.055) / 1.055, 2.4))
 
 
 def recolour_rgb(r, g, b, scale=1.0):
-    """one colour of a material (0..255): Arena hue at the same lightness (a little darker), greys kept"""
-    c = np.array([[[r, g, b]]], dtype=np.float32) / 255.0
-    mx, mn = c.max(), c.min()
+    """one colour of a material, vertex or animation (0..255). The game treats these as LINEAR values on an sRGB screen
+    (a vertex colour 071734 shows as 2f567d), so the colour is judged and recoloured as seen, then stored linear again:
+    Arena hue, darker by `scale` unless it is a light tint; greys kept"""
+    lin = np.array([r, g, b], dtype=np.float32) / 255.0
+    seen = to_srgb(lin)
+    mx, mn = float(seen.max()), float(seen.min())
     f = float(colourfulness(mx, mn))
+    l = (mx + mn) / 2
+    if l > LIGHT_KEEP and (mx - mn) / max(mx, 1e-6) > 0.05:
+        f = 1.0                                       # a pale tint (a label, an icon): fully the light Arena blue
     if f <= 0:
         return r, g, b
-    l = (mx + mn) / 2 * scale
+    l = l if l > LIGHT_KEEP else l * scale
     stops = [p for p, _ in PALETTE]
-    m = [np.interp(l, stops, [col[i] for _, col in PALETTE]) for i in range(3)]
-    return tuple(int(round((1 - f) * v + f * mv)) for v, mv in zip((r, g, b), m))
+    m = np.array([np.interp(l, stops, [col[i] for _, col in PALETTE]) for i in range(3)], dtype=np.float32) / 255.0
+    out = to_linear((1 - f) * seen + f * m)
+    return tuple(int(round(v * 255)) for v in out)
 
 
 def recolour_materials(archive):
@@ -131,12 +150,21 @@ def recolour_animations(archive):
     return bytes(d), n
 
 
+ACCENT = (101, 199, 255)                 # the launcher's accent (sRGB)
+ACCENT_MATERIALS = {'frame'}             # the selected tile's frame: white in the game, the accent here
+
+
+def _accent_linear():
+    return [int(round(float(v) * 255)) for v in to_linear(np.array(ACCENT, dtype=np.float32) / 255.0)]
+
+
 def _recolour_pai1(d, pai):
     n = 0
     count = struct.unpack_from('<H', d, pai + 0xE)[0]
     table = pai + struct.unpack_from('<I', d, pai + 0x10)[0]
     for i in range(count):
         entry = pai + struct.unpack_from('<I', d, table + 4 * i)[0]
+        accent = bytes(d[entry:entry + 28]).split(b'\0', 1)[0].decode('ascii', 'replace') in ACCENT_MATERIALS and d[entry + 29]
         tags = d[entry + 28]
         for t in range(tags):
             tag = entry + struct.unpack_from('<I', d, entry + 32 + 4 * t)[0]
@@ -172,7 +200,10 @@ def _recolour_pai1(d, pai):
                     for addr, frame, v, herm in ks:
                         rgb = [v if cc == c else _at(chans[cc], frame) for cc in range(3)]
                         col = [int(max(0, min(255, round(x)))) for x in rgb]
-                        nv = recolour_rgb(*col, ANIM_LIGHT)[c]
+                        if accent and min(col) > 200 and magic == b'FLMC' and base == 4:
+                            nv = _accent_linear()[c]              # white of the selection frame -> accent
+                        else:
+                            nv = recolour_rgb(*col, ANIM_LIGHT)[c]
                         if nv == col[c]:
                             continue
                         if herm:
@@ -195,12 +226,47 @@ def _at(keys, frame):
     return keys[-1][2]
 
 
+def accent_windows(archive, layout):
+    """the selection cursor (window panes, wnd1, of one layout): white or near-white content vertex colours and the
+    white colour of their content and frame materials become the launcher's accent (stored linear). wnd1 after the pane
+    header (0x54): inflation and frame sizes (16 bytes), frame count u8, flag u8, pad u16, content offset u32, frame
+    table offset u32; content: four vertex colours then the material index u16; frame table: u32 offsets to entries
+    whose first u16 is the material index (public BFLYT documentation, Switch Toolbox's reader)."""
+    from bflyt_patch import sarc_files, material_offsets, panes
+    d = bytearray(archive)
+    s, e = sarc_files(d)['blyt/' + layout]
+    mats = material_offsets(d, s, e)
+    acc = bytes(_accent_linear())
+    n, done = 0, set()
+
+    def whiten(at):
+        nonlocal n
+        if min(d[at:at + 3]) > 200:
+            d[at:at + 3] = acc
+            n += 1
+    for o in panes(d, s, e).values():
+        if d[o:o + 4] != b'wnd1':
+            continue
+        frames = d[o + 0x54 + 16]
+        content = o + struct.unpack_from('<I', d, o + 0x54 + 20)[0]
+        table = o + struct.unpack_from('<I', d, o + 0x54 + 24)[0]
+        for i in range(4):
+            whiten(content + 4 * i)
+        ids = [struct.unpack_from('<H', d, content + 16)[0]]
+        ids += [struct.unpack_from('<H', d, o + struct.unpack_from('<I', d, table + 4 * i)[0])[0] for i in range(frames)]
+        for m in ids:
+            if m < len(mats) and m not in done:
+                done.add(m)
+                whiten(mats[m] + 40)
+    return bytes(d), n
+
+
 def target_for(name):
     if 'glow' in name:
         return 0.80
     if name.endswith('_frame^u') or ('crs' in name and 'base' in name):       # tile outlines, the selected button's fill
         return 0.66
-    return 0.30
+    return 0.16                                                                # fills: dark navy panels
 
 
 def recolour_bntx(bntx):

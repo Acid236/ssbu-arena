@@ -25,6 +25,16 @@ FOOTER = 'ui/layout/menu/main_menu_footer/main_menu_footer/layout.arc'
 NAVY = '0a1424ff'                                     # the launcher's page background
 HIDE_MAIN = {'main_menu.bflyt': {'set_parts_btn_eshop': {'visible': False}, 'mask_eshop': {'visible': False},
                                  'bg': {'material_white': NAVY, 'material_black': NAVY, 'vertex_colors': [NAVY] * 4}}}
+def _accent_hex():
+    r, g, b = menu_recolor._accent_linear()             # materials are linear values (menu_recolor.recolour_rgb)
+    return '%02x%02x%02xff' % (r, g, b)
+
+
+# the selected tile's highlight (white in the game, shown by main_menu_btn3_00_OnOff): the launcher's accent
+HIDE_MAIN['main_menu_btn3_00.bflyt'] = {'high_light': {'material_white': _accent_hex()}}
+# the tiles' masks: white, seen as the selected tile's thick border when it grows
+for _tile in ('melee', 'spirits', 'online', 'other', 'colle'):
+    HIDE_MAIN['main_menu.bflyt']['mask_' + _tile] = {'material_white': _accent_hex(), 'vertex_colors': [_accent_hex()] * 4}
 HIDE_SIDEBAR = {'pallet_menu.bflyt': {'RootPane': {'visible': True, 'alpha': 0}, 'pallet_bg': {'visible': False}, 'mask': {'visible': False},
                                       'bg_line': {'visible': False}, 'set_txt_key': {'visible': False}, 'anim_R_00': {'visible': False}}}
 
@@ -53,7 +63,9 @@ def main():
     arc = Arc(str(a.arc or Path(state['dump']['romfs']) / 'data.arc'))
     outputs = {}
     main_arc, _ = bflyt_patch.apply(arc.get(MAIN), HIDE_MAIN)
-    outputs[MAIN], m, t = recolour_archive(main_arc)
+    main_arc, m, t = recolour_archive(main_arc)
+    outputs[MAIN], cur = menu_recolor.accent_windows(main_arc, 'main_menu_lct_center_00.bflyt')   # after: kept bright
+    print('selection cursor: %d white colours -> accent' % cur)
     print('main menu: %d material colours, %d textures recoloured; eShop hidden' % (m, t))
     outputs[SIDEBAR], _ = bflyt_patch.apply(arc.get(SIDEBAR), HIDE_SIDEBAR)
     outputs[FOOTER], m, t = recolour_archive(arc.get(FOOTER))
