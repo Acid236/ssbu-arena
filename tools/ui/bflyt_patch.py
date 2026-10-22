@@ -114,13 +114,18 @@ def patch_parts(d, o, edits, materials):
 def pane_extras(d, o, ch):
     """origin (pane base position: x 0 centre / 1 left / 2 right, + 4 * y 0 centre / 1 top / 2 bottom),
     text_pos (the same encoding, where the text sits inside a txt1 pane), vertex_colors (pic1: four RGBA hex strings,
-    top-left, top-right, bottom-left, bottom-right; the pane's material multiplies them)."""
+    top-left, top-right, bottom-left, bottom-right; the pane's material multiplies them), window_frames (wnd1: the
+    left, right, top and bottom frame sizes; a frame as large as the window keeps it at its texture's shape)."""
     if 'origin' in ch:
         d[o + 9] = (d[o + 9] & 0xF0) | int(ch['origin'])
     if 'text_pos' in ch:
         if d[o:o + 4] != b'txt1':
             raise ValueError('text_pos requires a text pane')
         d[o + 0x5C] = int(ch['text_pos'])
+    if 'window_frames' in ch:
+        if d[o:o + 4] != b'wnd1':
+            raise ValueError('window_frames requires a window pane')
+        struct.pack_into('<4H', d, o + 0x5C, *map(int, ch['window_frames']))
     if 'vertex_colors' in ch:
         if d[o:o + 4] != b'pic1':
             raise ValueError('vertex_colors requires a picture pane')
@@ -131,7 +136,7 @@ def pane_extras(d, o, ch):
             d[o + 0x54 + 4 * i:o + 0x58 + 4 * i] = bytes.fromhex(c)
 
 
-EXTRA_KEYS = {'origin', 'text_pos', 'vertex_colors'}
+EXTRA_KEYS = {'origin', 'text_pos', 'vertex_colors', 'window_frames'}
 
 
 def material_colours(d, o, ch, materials):
