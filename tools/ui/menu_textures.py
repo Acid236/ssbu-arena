@@ -84,6 +84,19 @@ def put_bc4(bntx, name, im):
     bntx[offset:offset+size] = pixels
 
 
+def get_bc4(bntx, name):
+    """one single-mip BC4 slot of a BNTX as a greyscale image (the reverse of put_bc4)"""
+    b = texture_slots(bntx)[name]
+    if struct.unpack_from('<I', bntx, b+0x1c)[0] != 0x1d01:
+        raise ValueError('not a BC4 slot ' + name)
+    w, h = struct.unpack_from('<II', bntx, b+0x24)
+    size = struct.unpack_from('<I', bntx, b+0x50)[0]
+    offset = struct.unpack_from('<Q', bntx, struct.unpack_from('<Q', bntx, b+0x70)[0])[0]
+    bw, hh = (w+3)//4, (h+3)//4
+    linear = swizzle(bytes(bntx[offset:offset+size]), bw, hh, bpp=8, to_linear=True)
+    return Image.frombytes('L', (bw*4, hh*4), linear[:bw*hh*8], 'bcn', 4).crop((0, 0, w, h))
+
+
 def card(geo, border=False):
     """The card shape at twice its screen size (menu_design.py geometry): the mask is the filled rounded rectangle;
     the border texture is a solid outline over a faint fill (the selected card's light wash)."""

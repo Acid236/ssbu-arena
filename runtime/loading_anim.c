@@ -173,7 +173,7 @@ static void la_paint(HWND h, HDC dc) {
         char num[8]; snprintf(num, sizeof num, "%d%%", pct);
         const char *what = loading ? "LOADING SHADERS " : "PREPARING SHADERS ";
         SIZE sn, sw; GetTextExtentPoint32A(m, num, (int)strlen(num), &sn); GetTextExtentPoint32A(m, what, (int)strlen(what), &sw);
-        int ty = by + bh + fh / 3, tx = (bx0 + bx1 + sw.cx + sn.cx) / 2 - sn.cx;      /* under the bar, centred on it */
+        int ty = by + bh + fh / 3, tx = bx1 - sn.cx;                                  /* under the bar, the % ending where the bar ends */
         SetTextColor(m, RGB(0x65, 0xC7, 0xFF)); TextOutA(m, tx, ty, num, (int)strlen(num));
         SetTextColor(m, RGB(0xEE, 0xF3, 0xF7)); TextOutA(m, tx - sw.cx, ty, what, (int)strlen(what));
         SelectObject(m, of);
