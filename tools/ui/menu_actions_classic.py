@@ -4,11 +4,12 @@ Each main-menu button is a table {parts = <pane>, state = STATE_<X>_IN} or {part
     Smash   (melee)       unchanged
     Arena   (spirits)     func_decide = callback, func_arg = 0: nothing yet (Battle Arena, later)
     Ranked  (online)      func_decide = callback, func_arg = 0: nothing yet
-    LDN     (colle)       func_decide = callback, func_arg = 3: the side bar's Local Wireless command
-    Exit    (other)       sequence = SEQUENCE_OTHER_AMIIBO: runtime/competitive.c catches the Games & More sequence
+    LDN     (other)       func_decide = callback, func_arg = 3: the side bar's Local Wireless command (the big tile, at
+                          the top right, made taller over the Vault's place: prepare_menu_classic.py)
+    Settings (colle)      func_decide = callback, func_arg = 5: the side bar's Options command, the game's own options
+                          (+ there opens the Arena settings); the Vault tile, made small above Exit
+    Exit    (eshop)       sequence = SEQUENCE_OTHER_AMIIBO: runtime/competitive.c catches the Games & More sequence
                           (not part of the competitive build) and asks to exit the game
-    Settings (eshop)      func_decide = callback, func_arg = 5: the side bar's Options command, the game's own options
-                          (+ there opens the Arena settings)
 The callback (proto 1, callback_proto) returns at once for argument 0, else asks the side bar (prg_func.open_pallet) for
 that command; competitive.c confirms it in the side bar's native controller.
 """
@@ -17,8 +18,10 @@ import menu_actions
 
 # func_arg of the shared callback: 0 nothing (yet), else the side bar (pallet) command to run: 3 Local Wireless,
 # 5 Options (the native one-based button ids; runtime/competitive.c reads it and confirms that command)
-PLACEHOLDER = {'set_parts_btn_spirits': 0, 'set_parts_btn_online': 0, 'set_parts_btn_colle': 3, 'set_parts_btn_eshop': 5}
-SEQUENCE = {'set_parts_btn_other': 'SEQUENCE_OTHER_AMIIBO'}
+PLACEHOLDER = {'set_parts_btn_spirits': 0, 'set_parts_btn_online': 0, 'set_parts_btn_other': 3, 'set_parts_btn_colle': 5}
+SEQUENCE = {'set_parts_btn_eshop': 'SEQUENCE_OTHER_AMIIBO'}
+# the selector's cone for the d-pad (60 in the game): wide enough that up from Exit reaches the small Settings tile
+DIRECTIONAL_DEGREE = 90
 
 
 def callback_proto(p):
@@ -44,6 +47,9 @@ def top(data):
               'set_parts_btn_eshop', 'callback_eshop_decide'):
         if s not in values:
             raise ValueError('unexpected main menu initializer: no ' + s)
+    at = values.index('directional_degree') + 1
+    kind, _ = init['constants'][at]
+    init['constants'][at] = (kind, DIRECTIONAL_DEGREE)
     k = lambda s: constant(init, s)
     decide, arg, callback, seq_key = k('func_decide'), k('func_arg'), k('callback_eshop_decide'), k('sequence')
     nums = {v: constant(init, v, 19) for v in set(PLACEHOLDER.values())}

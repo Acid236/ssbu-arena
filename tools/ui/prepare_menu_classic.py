@@ -47,21 +47,64 @@ EDIT_MAIN = {
 }
 # the side bar is moved off the screen, not hidden: its native controller still runs the Local Wireless and Options
 # commands for the Arena buttons (competitive.c), and it reports them done only after its own animations
+# The right-hand tiles (layout units: 1920 x 1080, centre 0, y up). Online LDN is the Games & More tile made taller down
+# over the Vault's place; Settings is the Vault tile, small, in the top-right corner above it (up from LDN); Exit is the
+# eShop button, left where it is. Their selection cursors (window panes of the centre layout) follow.
+LDN_TOP, LDN_BOTTOM = 315, -83                       # below Settings' corner, down to the Vault tile's bottom
+SET_X, SET_Y, SMALL = 842, 410, 0.28                 # Settings' centre (top-right corner) and the scale of its text and icon
+SET_W, SET_H = 236, 160                              # its frame, background and cursor
+_h = LDN_TOP - LDN_BOTTOM
+_cy = (LDN_TOP + LDN_BOTTOM) / 2
+
+
+def _hits(hw, hh, x=0, y=0):
+    """the button's six hit points (main_menu_btn3_00 hit_00..05) as a hw x hh half-size rectangle centred on (x, y): the
+    d-pad selector compares them (a tile counts as above another only when it is wholly above its hit points)"""
+    corners = [(-hw, hh), (hw, hh), (hw, 0), (hw, -hh), (0, -hh), (-hw, -hh)]
+    return {'hit_%02d' % i: {'pos': [x + cx, y + cy]} for i, (cx, cy) in enumerate(corners)}
+
+
+EDIT_MAIN['main_menu.bflyt'].update({
+    'mask_other': {'pos': [484, _cy], 'size': [1004, _h]},
+    'null_btn_other': {'pos': [484, _cy - 0.5]},
+    'mask_colle': {'pos': [SET_X, SET_Y], 'size': [SET_W, SET_H]},
+    # Settings at scale 1, its frame the corner's size; only its icon, name and circle are made SMALL inside the button
+    'null_btn_colle': {'pos': [SET_X, SET_Y]},
+    'set_parts_btn_colle': {'pos': [0, 0], 'size': [SET_W, SET_H], 'parts': dict({
+        'frame': {'size': [SET_W, SET_H]},
+        'icon_positoin': {'pos': [19.6 * SMALL, 93.8 * SMALL], 'scale': [SMALL, SMALL]},
+        'txt_position': {'pos': [10.3 * SMALL, -108.2 * SMALL], 'scale': [SMALL, SMALL]},
+        'circle_position': {'scale': [0, 0]},                       # the side half-circle: no room for it
+    })},                    # its own hit points stay: rewritten, the selector never picked it
+    # Exit's hit points reached up over the free space (the shop tile's): now its visible tile only
+    'set_parts_btn_eshop': {'parts': _hits(165, 65, 15, 5)},
+    # Online LDN's hit box follows its taller tile
+    'set_parts_btn_other': {'parts': dict({'frame': {'size': [1004, _h]}}, **_hits(490, _h / 2))},
+})
+EDIT_MAIN['main_menu_lct_center_00.bflyt'] = {
+    'other_crs_square_01': {'pos': [478, _cy - 14]},
+    'sel_csr_blink_04': {'size': [1064, _h - 6]}, 'sel_csr_hl_00_add_03': {'size': [1064, _h - 6]}, 'sel_csr_hl_01_add_03': {'size': [1064, _h - 6]},
+    'other_crs_00': {'pos': [505, _cy - 4], 'size': [1114, _h + 16]},
+    'collection_crs_square_01': {'pos': [SET_X, SET_Y]},
+    'sel_csr_blink_07': {'size': [SET_W + 8, SET_H + 8]}, 'sel_csr_hl_00_add_06': {'size': [SET_W + 4, SET_H + 4]},
+    'sel_csr_hl_01_add_06': {'size': [SET_W + 4, SET_H + 4]},
+    'collection_crs_00': {'pos': [SET_X, SET_Y], 'size': [SET_W + 14, SET_H + 14]},
+}
 HIDE_SIDEBAR = {'pallet_menu.bflyt': {'RootPane': {'pos': [4000, 0]}}}
 # the buttons' icons (BC4 masks, normal and glow): authored in menu_textures.icon
-ICONS = {'spirits': 'arena', 'online': 'ranked', 'colle': 'wireless', 'other': 'power', 'eshop': 'settings'}
+ICONS = {'spirits': 'arena', 'online': 'ranked', 'other': 'wireless', 'colle': 'settings', 'eshop': 'power'}
 # names and help lines, by the message file's region (2 US English, 5 UK English, 10 Italian)
 LABELS = {
     'it': {'mnu_top_spirits': 'Arena', 'mnu_top_help_spirits': 'Battle Arena con i giocatori di SSBU Arena (presto disponibile).',
            'mnu_top_online': 'Online Ranked', 'mnu_top_help_online': 'Partite classificate online (presto disponibile).',
-           'mnu_top_collection': 'Online LDN', 'mnu_top_help_collection': 'Stanze Local Wireless via internet, con il rollback.',
-           'mnu_top_other': 'Esci', 'mnu_top_help_other': 'Chiudi SSBU Arena.',
-           'mnu_top_tip_eshop': 'Impostazioni', 'mnu_top_help_eshop': 'Impostazioni del gioco. Dentro, premi + per le impostazioni di SSBU Arena.'},
+           'mnu_top_other': 'Online LDN', 'mnu_top_help_other': 'Stanze Local Wireless via internet, con il rollback.',
+           'mnu_top_collection': 'Impostazioni', 'mnu_top_help_collection': 'Impostazioni del gioco. Dentro, premi + per le impostazioni di SSBU Arena.',
+           'mnu_top_tip_eshop': 'Esci', 'mnu_top_help_eshop': 'Chiudi SSBU Arena.'},
     'en': {'mnu_top_spirits': 'Arena', 'mnu_top_help_spirits': 'Battle Arena with SSBU Arena players (coming soon).',
            'mnu_top_online': 'Online Ranked', 'mnu_top_help_online': 'Ranked online matches (coming soon).',
-           'mnu_top_collection': 'Online LDN', 'mnu_top_help_collection': 'Local Wireless rooms over the internet, with rollback.',
-           'mnu_top_other': 'Exit', 'mnu_top_help_other': 'Close SSBU Arena.',
-           'mnu_top_tip_eshop': 'Settings', 'mnu_top_help_eshop': "The game's settings. Inside, press + for the SSBU Arena settings."},
+           'mnu_top_other': 'Online LDN', 'mnu_top_help_other': 'Local Wireless rooms over the internet, with rollback.',
+           'mnu_top_collection': 'Settings', 'mnu_top_help_collection': "The game's settings. Inside, press + for the SSBU Arena settings.",
+           'mnu_top_tip_eshop': 'Exit', 'mnu_top_help_eshop': 'Close SSBU Arena.'},
 }
 
 

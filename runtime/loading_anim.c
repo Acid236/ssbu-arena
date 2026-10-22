@@ -142,7 +142,15 @@ static void la_paint(HWND h, HDC dc) {
     LARGE_INTEGER now, fq; QueryPerformanceCounter(&now); QueryPerformanceFrequency(&fq);
     double ms = (double)(now.QuadPart - LA.t0.QuadPart) * 1000.0 / (double)fq.QuadPart;
     unsigned frame = (unsigned long long)(ms * LA_FPS / 1000.0) % LA_FRAMES;
-    int below = g_splash_prep_pct >= 0 ? fh * 3 : 0;      /* the shader hold: room under the animation for its bar and line */
+    char note[sizeof g_la_note];
+    AcquireSRWLockShared(&g_la_note_lock); memcpy(note, g_la_note, sizeof note); ReleaseSRWLockShared(&g_la_note_lock);
+    int pct = g_splash_prep_pct, loading = g_splash_prep_load;
+    if (pct < 0) {                         /* before the hold reports its own percent: the files read so far (the title note) */
+        int a = 0, b = 0;                  /* "loading the shaders, a of b" or "first start: preparing the shaders, a of b" (any case) */
+        const char *n = strstr(note, "shaders, ");
+        if (n && sscanf(n + 9, "%d of %d", &a, &b) == 2 && b > 0) { pct = a * 100 / b; loading = strstr(note, "oading") != NULL; }
+    }
+    int below = pct >= 0 ? fh * 3 : 0;     /* the shader hold: room under the animation for its bar and line */
     float ox = (float)(cw - margin - iw - r.left), oy = (float)(ch - margin - ih - below - r.top);
     void *g = NULL;
     if (LA.from_hdc(m, &g) == 0 && g) {
@@ -152,10 +160,7 @@ static void la_paint(HWND h, HDC dc) {
                 (float)LA_FRAME_W, (float)LA_FRAME_H, 2 /* UnitPixel */, NULL, NULL, NULL);
         LA.del(g);
     }
-    char note[sizeof g_la_note];
-    AcquireSRWLockShared(&g_la_note_lock); memcpy(note, g_la_note, sizeof note); ReleaseSRWLockShared(&g_la_note_lock);
-    int pct = g_splash_prep_pct;
-    if (pct >= 0) {                        /* SSBU Arena: the shaders (prep_first_hold): "LOADING SHADERS 37%" and a thin bar above Kirby */
+    if (pct >= 0) {                        /* SSBU Arena: the shaders (prep_first_hold): "LOADING SHADERS 37%" and a thin bar under Kirby */
         if (pct > 100) pct = 100;
         int bx0 = (int)ox + iw / 8, bx1 = (int)ox + iw - iw / 8, bh = fh / 5 < 3 ? 3 : fh / 5;
         int by = (int)oy + ih - ih / 16;  /* the bar, just under the animation */
@@ -166,7 +171,7 @@ static void la_paint(HWND h, HDC dc) {
         HFONT of = (HFONT)SelectObject(m, LA.title ? LA.title : LA.font);
         SetBkMode(m, TRANSPARENT);
         char num[8]; snprintf(num, sizeof num, "%d%%", pct);
-        const char *what = g_splash_prep_load ? "LOADING SHADERS " : "PREPARING SHADERS ";
+        const char *what = loading ? "LOADING SHADERS " : "PREPARING SHADERS ";
         SIZE sn, sw; GetTextExtentPoint32A(m, num, (int)strlen(num), &sn); GetTextExtentPoint32A(m, what, (int)strlen(what), &sw);
         int ty = by + bh + fh / 3, tx = (bx0 + bx1 + sw.cx + sn.cx) / 2 - sn.cx;      /* under the bar, centred on it */
         SetTextColor(m, RGB(0x65, 0xC7, 0xFF)); TextOutA(m, tx, ty, num, (int)strlen(num));

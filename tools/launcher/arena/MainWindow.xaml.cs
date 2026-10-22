@@ -821,20 +821,45 @@ namespace Arena
             game.Exited += (s, e) => Dispatcher.Invoke(GameExited);
             SetState();
             if (first) StatusText.Text = "First start: the game prepares the shaders for this graphics card (a few minutes)";
-            WindowState = WindowState.Minimized;
+            ToTray();
         }
+
+        // ---------------------------------------------------------------- the notification area while the game runs
+        System.Windows.Forms.NotifyIcon tray;
+
+        /// <summary>while the game runs the launcher leaves the screen and the taskbar for the notification area (the hidden
+        /// icons), as game launchers do; the icon's menu or a double click brings it back</summary>
+        void ToTray()
+        {
+            if (tray == null)
+            {
+                tray = new System.Windows.Forms.NotifyIcon { Text = "SSBU Arena", Icon = System.Drawing.Icon.ExtractAssociatedIcon(Updater.ExePath) };
+                var menu = new System.Windows.Forms.ContextMenuStrip();
+                menu.Items.Add("Open SSBU Arena", null, (s, e) => Dispatcher.Invoke(FromTray));
+                menu.Items.Add("Quit the launcher", null, (s, e) => Dispatcher.Invoke(() => { HideTray(); Application.Current.Shutdown(); }));
+                tray.ContextMenuStrip = menu;
+                tray.DoubleClick += (s, e) => Dispatcher.Invoke(FromTray);
+                Closed += (s, e) => HideTray();
+            }
+            tray.Visible = true;
+            Hide();
+        }
+
+        void FromTray()
+        {
+            base.Show();
+            if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
+            Activate();
+        }
+
+        void HideTray() { if (tray != null) { tray.Visible = false; tray.Dispose(); tray = null; } }
 
         void GameExited()
         {
-            int code = 0;
-            try { code = game.ExitCode; } catch { }
             game = null;
-            WindowState = WindowState.Normal;
-            Activate();
+            HideTray();
+            FromTray();
             SetState();
-            if (code != 0)
-                Show("The game closed", "Exit code " + code + ". Last lines of game.log:", Core.LogTail(8),
-                     ("Open log", () => OpenLog_Click(null, null), false), ("OK", null, true));
         }
     }
 }

@@ -332,6 +332,53 @@ def compile_host(job):
     return src, r.returncode, (r.stdout + r.stderr)[-3000:]
 
 
+VERSION_RC = r'''LANGUAGE 0x09, 0x01
+%s
+1 VERSIONINFO
+FILEVERSION 0,2,0,0
+PRODUCTVERSION 0,2,0,0
+FILEFLAGSMASK 0x3f
+FILEFLAGS 0x0
+FILEOS 0x40004
+FILETYPE 0x1
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "040904B0"
+    BEGIN
+      VALUE "CompanyName", "SSBU Arena\0"
+      VALUE "FileDescription", "SSBU Arena\0"
+      VALUE "ProductName", "SSBU Arena\0"
+      VALUE "InternalName", "%s\0"
+      VALUE "LegalCopyright", "GPL-3.0-or-later\0"
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x409, 1200
+  END
+END
+'''
+
+
+def arena_resource(objdir, exe):
+    """the exe's Windows resources (llvm-rc, beside clang): the name Task Manager and Explorer show ("SSBU Arena", whatever
+    the file is called: ssbu_native, the rollback or the menu host) and the Arena icon (arena.ico beside the build, else
+    media\\arena.ico of the tree), when there is one. None when llvm-rc is missing: the exe is linked without them."""
+    rc_exe = os.path.join(os.path.dirname(CLANG), 'llvm-rc.exe')
+    if not os.path.exists(rc_exe):
+        return None
+    ico = next((p for p in (os.path.join(HERE, 'arena.ico'), os.path.join(HERE, '..', '..', 'media', 'arena.ico')) if os.path.exists(p)), None)
+    rc, res = os.path.join(objdir, 'arena.rc'), os.path.join(objdir, 'arena.res')
+    with open(rc, 'w', newline='\r\n') as f:
+        f.write(VERSION_RC % ('1 ICON "%s"' % os.path.abspath(ico).replace('\\', '\\\\') if ico else '', os.path.splitext(exe)[0]))
+    r = subprocess.run([rc_exe, '/fo', res, rc], capture_output=True, text=True, errors='replace')
+    if r.returncode:
+        print('arena.rc: llvm-rc failed, linked without the resources:\n' + (r.stdout + r.stderr)[-1500:])
+        return None
+    return res
+
+
 def cmd_link(host_only=False):
     if not host_only and build_game_dll():
         return 1
@@ -378,7 +425,8 @@ def cmd_link(host_only=False):
         game = ['-Wl,--unresolved-symbols=ignore-in-object-files'] if host_only else ['-L', HERE, '-l:' + GAME_DLL]      # host alone: a compile + link check, not runnable
         r = subprocess.run([CLANG] + objs + game + ['-Wl,-rpath,$ORIGIN'] + LIBS + ['-o', out], capture_output=True, text=True, errors='replace')
     else:
-        r = subprocess.run([CLANG] + objs + [game_import_lib(objdir), os.path.join(SDL_DIR, 'SDL3.lib')] + LIBS + debug_link_flags(out) + ['-o', out], capture_output=True, text=True, errors='replace')
+        res = arena_resource(objdir, exe)
+        r = subprocess.run([CLANG] + objs + (['-Wl,' + res] if res else []) + [game_import_lib(objdir), os.path.join(SDL_DIR, 'SDL3.lib')] + LIBS + debug_link_flags(out) + ['-o', out], capture_output=True, text=True, errors='replace')
     if r.returncode == 0 and not TARGET_POSIX:
         import shutil
         try:
