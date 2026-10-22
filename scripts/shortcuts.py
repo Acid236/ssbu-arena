@@ -4,7 +4,9 @@
     python scripts/shortcuts.py [--dry-run]
 
 Creates "SSBU native.lnk" (target: Play SSBU.bat, working folder: the repository) on the desktop and in the Start menu
-(Programs), and "SSBU native - Installer.lnk" (target: Install SSBU.bat) in the Start menu. Idempotent: a shortcut that
+(Programs), and "SSBU native - Installer.lnk" (target: Install SSBU.bat) in the Start menu. With the SSBU Arena launcher
+there (SSBU-Arena.exe at the root, or SSBU Arena.exe in the build folder) they are "SSBU Arena.lnk" (target: the launcher)
+and "SSBU Arena - Installer.lnk". Idempotent: a shortcut that
 already points at the right place is left alone; one that points elsewhere (the folder was moved) is rewritten.
 
 The python.org embeddable package has no pywin32, so the shortcuts are made through `powershell -NoProfile` with the
@@ -20,6 +22,8 @@ import sys
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PLAY_NAME = 'SSBU native.lnk'
 INSTALL_NAME = 'SSBU native - Installer.lnk'
+ARENA_PLAY_NAME = 'SSBU Arena.lnk'                   # when the SSBU Arena launcher is there (plan())
+ARENA_INSTALL_NAME = 'SSBU Arena - Installer.lnk'
 
 _PS = r"""
 $ErrorActionPreference = 'Stop'
@@ -31,6 +35,10 @@ foreach ($it in (ConvertFrom-Json $env:SSBU_LNK_JSON)) {
   if (-not $dir) { Write-Output ('fail ' + $it.name + ' (no folder)'); continue }
   if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
   $path = Join-Path $dir $it.name
+  if ($it.remove) {           # an older name of the same shortcut (SSBU native), only when it points into this folder
+    if ((Test-Path -LiteralPath $path) -and ($sh.CreateShortcut($path).TargetPath -like ($it.remove + '\*'))) { Remove-Item -LiteralPath $path; Write-Output ('removed ' + $path) }
+    continue
+  }
   if (Test-Path -LiteralPath $path) {
     $old = $sh.CreateShortcut($path)
     if ($old.TargetPath -ieq $it.target -and $old.WorkingDirectory -ieq $it.cwd) { Write-Output ('ok ' + $path); continue }
@@ -58,17 +66,28 @@ def plan(repo=REPO):
             'desc': 'Super Smash Bros. Ultimate, native PC build', 'icon': icon}
     inst = {'name': INSTALL_NAME, 'target': os.path.join(repo, 'Install SSBU.bat'), 'cwd': repo,
             'desc': 'Install, repair or update SSBU native', 'icon': logo + ',0' if os.path.isfile(logo) else ''}
+    # SSBU Arena: the launcher the player downloaded (at the repository's root; it installs and updates everything) or the
+    # one setup.py built into the build folder: the shortcuts open it, under the Arena name
+    launcher = next((p for p in (os.path.join(repo, 'SSBU-Arena.exe'), os.path.join(repo, 'SSBU Arena.exe'),
+                                 os.path.join(build_location.get(repo), 'SSBU Arena.exe')) if os.path.isfile(p)), None)
+    if launcher:
+        play = {'name': ARENA_PLAY_NAME, 'target': launcher, 'cwd': os.path.dirname(launcher),
+                'desc': 'SSBU Arena: Super Smash Bros. Ultimate on PC, online with rollback', 'icon': launcher + ',0'}
+        inst = dict(inst, name=ARENA_INSTALL_NAME, desc='Install or repair SSBU Arena', icon=launcher + ',0')
     over = [d for d in (os.environ.get('SSBU_SHORTCUT_DIRS') or '').split(os.pathsep) if d]
+    old = [{'name': n, 'remove': repo, 'target': '', 'cwd': '', 'desc': ''} for n in (PLAY_NAME, INSTALL_NAME)] if launcher else []
     if over:
-        return [dict(it, dir=d) for d in over for it in (play, inst)]
-    return [dict(play, dir='@desktop'), dict(play, dir='@programs'), dict(inst, dir='@programs')]
+        return [dict(it, dir=d) for d in over for it in [play, inst] + old]
+    return [dict(play, dir='@desktop'), dict(play, dir='@programs'), dict(inst, dir='@programs')] + \
+           [dict(o, dir=d) for o in old for d in ('@desktop', '@programs')]
 
 
 def create_all(repo=REPO, dry=False):
     """Make the shortcuts; -> list of result lines ('created <path>', 'ok <path>', 'would create <dir>\\<name>', 'fail ...')."""
     items = plan(repo)
     if dry:
-        return ['would create %s -> %s' % (os.path.join(it['dir'], it['name']), it['target']) for it in items]
+        return [('would remove %s (if it points into %s)' % (os.path.join(it['dir'], it['name']), it['remove'])) if it.get('remove')
+                else 'would create %s -> %s' % (os.path.join(it['dir'], it['name']), it['target']) for it in items]
     if os.name != 'nt':
         return ['fail shortcuts are only made on Windows']
     env = dict(os.environ, SSBU_LNK_JSON=json.dumps(items))
