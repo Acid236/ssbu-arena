@@ -6,7 +6,8 @@
 * A git checkout: `git fetch` (from the remote that points at the repository, else from its URL) and a fast-forward
   merge only. Nothing is merged if your own uncommitted changes touch a file the update changes, or if your branch has
   commits GitHub's lacks (the update stops and says why).
-* Any other copy (GitHub's "Download ZIP"): the repository's ZIP of the newest commit is downloaded, unpacked in a
+* Any other copy (GitHub's "Download ZIP", the SSBU Arena launcher's install): the repository's ZIP of the commit of the
+  latest GitHub Release (the newest commit of the branch when there is no release, or with --main) is downloaded, unpacked in a
   temporary folder and its files replace the ones here, only those whose content differs. build\\, deps\\, config\\,
   userdata*\\, saves\\ and .git\\ are never written or deleted, nor is any file the repository does not have. The files
   the update wrote are listed in build\\update_manifest.json (with the commit): the next update uses it to delete files
@@ -100,6 +101,19 @@ def remote_sha(repo, branch):
         if m:
             return m.group(1)
     return None
+
+
+def release_sha(repo):
+    """(tag, commit) of the repository's latest GitHub Release, or (None, None): the commit a player's copy follows
+    (SSBU Arena: a release is a commit with its prebuilt runtime published; main can be ahead of it)."""
+    try:
+        tag = api_json('https://api.github.com/repos/%s/releases/latest' % repo).get('tag_name')
+        if not tag:
+            return None, None
+        s = http('https://api.github.com/repos/%s/commits/%s' % (repo, tag), 'application/vnd.github.sha').decode().strip()
+        return (tag, s) if re.fullmatch(r'[0-9a-f]{40}', s) else (None, None)
+    except (urllib.error.URLError, OSError, ValueError):
+        return None, None
 
 
 # ------------------------------------------------------------------------------------------- rebuild advice
@@ -282,7 +296,12 @@ def update_zip(a):
     old = read_manifest()
     old_files = (old or {}).get('files', {})
     old_commit = (old or {}).get('commit')
-    sha = remote_sha(repo, branch)
+    sha = None
+    if not a.main:                                          # a player's copy: the latest release, main only without one
+        tag, sha = release_sha(repo)
+        if sha:
+            say('Latest release: %s (%s)' % (tag, sha[:10]))
+    sha = sha or remote_sha(repo, branch)
     ref = sha or branch
     if old_commit and sha and old_commit == sha:
         say('Already up to date (%s, recorded in %s).' % (sha[:10], MANIFEST))
@@ -410,6 +429,7 @@ def main():
     ap.add_argument('--repo', default=DEFAULT_REPO, help='owner/name on GitHub (default %s)' % DEFAULT_REPO)
     ap.add_argument('--branch', default=DEFAULT_BRANCH)
     ap.add_argument('--force', action='store_true', help='ZIP mode: also overwrite/delete files you edited yourself (backed up first)')
+    ap.add_argument('--main', action='store_true', help='ZIP mode: the newest commit of the branch instead of the latest release')
     a = ap.parse_args()
     if not re.fullmatch(r'[\w.-]+/[\w.-]+', a.repo):
         die('--repo must look like owner/name')

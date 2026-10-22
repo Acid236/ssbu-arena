@@ -158,7 +158,7 @@
                 </Grid>
                 <Grid Margin="0,18,0,0">
                   <TextBlock x:Name="PrepNote" Text="Once per graphics card and driver: the game starts right after." Style="{StaticResource Small}" FontSize="14" VerticalAlignment="Center"/>
-                  <Button Style="{StaticResource Link}" HorizontalAlignment="Right" Click="PrepCancel_Click" FontSize="15">Cancel</Button>
+                  <Button x:Name="PrepCancel" Style="{StaticResource Link}" HorizontalAlignment="Right" Click="PrepCancel_Click" FontSize="15">Cancel</Button>
                 </Grid>
               </StackPanel>
               <StackPanel x:Name="PlayButtons" Orientation="Horizontal">

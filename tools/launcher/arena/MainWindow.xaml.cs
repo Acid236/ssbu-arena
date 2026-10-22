@@ -39,7 +39,7 @@ namespace Arena
             poll.Tick += (s, e) => { int n = Core.XInputCount(); if (n != xinput) { xinput = n; SetPadState(); } };
             poll.Start();
             xinput = Core.XInputCount();
-            Loaded += (s, e) => { RunChecks(); FindPads(); OpenFromArgs(); ResumeAccount(); };
+            Loaded += (s, e) => { RunChecks(); FindPads(); OpenFromArgs(); ResumeAccount(); CheckUpdates(); };
             Scaled.SizeChanged += (s, e) => Rescale();
             SizeChanged += (s, e) => Rescale();
         }
@@ -573,6 +573,139 @@ namespace Arena
             Status("Installing video codecs...", "busy");
             var ids = missingCodecs.Select(m => m.Split('|')[0]).ToList();
             Task.Run(() => { foreach (var id in ids) Core.InstallCodec(id); }).ContinueWith(t => RunChecks(), TaskScheduler.FromCurrentSynchronizationContext());
+        }
+
+        // ---------------------------------------------------------------- updates (Updater.cs)
+        Process updating;
+        Release release;
+        List<string> updSteps = new List<string>();
+        static readonly System.Text.RegularExpressions.Regex UpdField = new System.Text.RegularExpressions.Regex("\"(\\w+)\":\\s*(?:\"([^\"]*)\"|(-?[\\d.]+)|(true|false))");
+
+        /// <summary>at every start: the latest release (in the background); then a newer launcher, the game's update or the
+        /// first install. Offline or no release: the launcher goes on as it is.</summary>
+        void CheckUpdates()
+        {
+            Updater.CleanUp();
+            if (Updater.Off) return;
+            Task.Run(() => { try { return Updater.Latest(); } catch { return null; } }).ContinueWith(t =>
+            {
+                release = t.Result;
+                if (!Updater.Installed)
+                {
+                    if (release == null) Show("SSBU Arena", "The first install downloads SSBU Arena from GitHub: no connection or no release found. Check the internet connection and start the launcher again.", null, ("OK", null, true));
+                    else Show("Install SSBU Arena", "SSBU Arena " + release.Version + " is installed in this folder:\n" + System.IO.Path.GetDirectoryName(Updater.ExePath) +
+                              "\n\nThe installer then asks for your own game files (about 25 GB of space).", null, ("Install", () => FirstInstall(), true), ("Not now", null, false));
+                    return;
+                }
+                if (release == null || Updater.DevCopy) return;
+                if (Updater.LauncherOutdated(release)) { UpdateLauncher(); return; }
+                if (Updater.GameOutdated(release))
+                {
+                    if (!System.IO.File.Exists(Core.Exe)) return;     // the install is not finished: its installer does it
+                    UpdateGame();
+                }
+            }, TaskScheduler.FromCurrentSynchronizationContext());
+        }
+
+        void UpdateLauncher()
+        {
+            Status("Updating the launcher to " + release.Version, "busy");
+            Task.Run(() => Updater.ReplaceLauncher(release)).ContinueWith(t =>
+            {
+                if (t.Exception == null) { SaveQuiet(); Application.Current.Shutdown(); return; }
+                Status("The launcher could not update itself: " + t.Exception.GetBaseException().Message, "warn");
+                if (Updater.GameOutdated(release) && System.IO.File.Exists(Core.Exe)) UpdateGame();
+            }, TaskScheduler.FromCurrentSynchronizationContext());
+        }
+
+        void ShowBusy(string title, string detail, string note)
+        {
+            TabHome.IsChecked = true;
+            PlayButtons.Visibility = Visibility.Collapsed; PrepPanel.Visibility = Visibility.Visible; PrepCancel.Visibility = Visibility.Collapsed;
+            PrepTitle.Text = title; PrepPct.Text = "0%"; SetPrepBar(0);
+            PrepDetail.Text = detail; PrepEta.Text = ""; PrepNote.Text = note;
+            StateText.Text = Spaced(title); StateDot.Fill = Res("Accent");
+        }
+
+        void HideBusy()
+        {
+            PrepPanel.Visibility = Visibility.Collapsed; PrepCancel.Visibility = Visibility.Visible; PlayButtons.Visibility = Visibility.Visible;
+            SetState();
+        }
+
+        void UpdateGame()
+        {
+            if (updating != null || prep != null || game != null || Core.GameRunning()) return;
+            ShowBusy("UPDATING", "Downloading " + release.Tag + "...", "SSBU Arena " + release.Version + ": the game starts as soon as it is done.");
+            Status("Updating SSBU Arena to " + release.Version, "busy");
+            updSteps.Clear();
+            try { updating = Updater.RunGameUpdate(l => Dispatcher.BeginInvoke(new Action(() => UpdateLine(l))), c => Dispatcher.BeginInvoke(new Action(() => UpdateEnded(c)))); }
+            catch (Exception ex) { updating = null; HideBusy(); Show("Update", ex.Message, null, ("OK", null, true)); }
+        }
+
+        /// <summary>install.py's "##ssbu {json}" lines: the plan (step ids), each step's start, the progress inside a step</summary>
+        void UpdateLine(string l)
+        {
+            if (!l.StartsWith("##ssbu ")) return;
+            var v = new Dictionary<string, string>();
+            foreach (System.Text.RegularExpressions.Match m in UpdField.Matches(l))
+                v[m.Groups[1].Value] = m.Groups[2].Success ? m.Groups[2].Value : m.Groups[3].Success ? m.Groups[3].Value : m.Groups[4].Value;
+            v.TryGetValue("ev", out var ev);
+            if (ev == "plan") { foreach (System.Text.RegularExpressions.Match m in new System.Text.RegularExpressions.Regex("\"id\":\\s*\"([^\"]+)\"").Matches(l)) updSteps.Add(m.Groups[1].Value); return; }
+            if (!v.TryGetValue("id", out var id)) return;
+            int i = Math.Max(0, updSteps.IndexOf(id)), n = Math.Max(1, updSteps.Count);
+            double inside = 0;
+            if (ev == "progress" && double.TryParse(v.ContainsKey("done") ? v["done"] : "0", System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var d)
+                && double.TryParse(v.ContainsKey("total") ? v["total"] : "0", System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var tot) && tot > 0)
+                inside = Math.Min(1, d / tot);
+            if (ev == "step" && v.TryGetValue("state", out var st) && st != "start") inside = 1;
+            double f = (i + inside) / n;
+            PrepPct.Text = (int)(f * 100) + "%";
+            SetPrepBar(f);
+            if (ev == "step" && v.TryGetValue("state", out var s2) && s2 == "start") PrepDetail.Text = UpdateStepName(id);
+        }
+
+        static string UpdateStepName(string id)
+        {
+            switch (id)
+            {
+                case "update": return "Downloading the new version";
+                case "precheck": return "Checking this PC";
+                case "packages": case "tools": case "media": return "Getting the tools";
+                case "inputs": case "dump": case "dlc": return "Checking the game files";
+                case "build": case "compile": case "nro": case "link": case "lift": return "Rebuilding the changed parts";
+                case "unblock": case "shortcuts": return "Finishing";
+                default: return "Updating (" + id + ")";
+            }
+        }
+
+        void UpdateEnded(int code)
+        {
+            updating = null;
+            HideBusy();
+            Core.Load();
+            RunChecks();
+            if (code == 0) { Status("SSBU Arena updated to " + release.Version, "good"); return; }
+            Show("Update failed", "SSBU Arena could not update to " + release.Version + " (exit code " + code + "). The game you had is still there. Last lines of build\\update_last.log:",
+                 Updater.UpdateLogTail(8), ("Try again", () => UpdateGame(), false), ("OK", null, true));
+        }
+
+        void FirstInstall()
+        {
+            ShowBusy("INSTALLING", "Downloading...", "Then the installer asks for your own game files.");
+            Task.Run(() => Updater.FirstInstall(release, s => Dispatcher.BeginInvoke(new Action(() => PrepDetail.Text = s)))).ContinueWith(t =>
+            {
+                if (t.Exception != null) { HideBusy(); Show("Install", t.Exception.GetBaseException().Message, null, ("OK", null, true)); return; }
+                PrepDetail.Text = "The installer is open: follow it, then this launcher starts again.";
+                SetPrepBar(1); PrepPct.Text = "";
+                var p = t.Result;
+                p.EnableRaisingEvents = true;
+                p.Exited += (s, e) => Dispatcher.BeginInvoke(new Action(() =>
+                {
+                    Process.Start(new ProcessStartInfo(Updater.ExePath) { UseShellExecute = false });
+                    Application.Current.Shutdown();
+                }));
+            }, TaskScheduler.FromCurrentSynchronizationContext());
         }
 
         // ---------------------------------------------------------------- shader preparation

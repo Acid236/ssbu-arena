@@ -33,7 +33,11 @@ namespace Arena
         public const string DefaultServer = "eu-germany.ssbuarena.com:39010";      // our lobby (tools/net/rb_lobby.c, relay only)
         public const string Site = "https://ssbuarena.com/";
 
-        public static readonly string Build = AppDomain.CurrentDomain.BaseDirectory.TrimEnd('\\');
+        // the exe at the repository's root (the downloaded launcher after its first install) or in its build\ folder (setup.py
+        // link); Repo null = not installed yet (Updater.cs installs into the exe's folder)
+        static readonly string ExeDir = AppDomain.CurrentDomain.BaseDirectory.TrimEnd('\\');
+        public static readonly string Repo = FindRepo();
+        public static readonly string Build = FindBuild();
         public static readonly string Work = Path.Combine(Build, "work");
         public static readonly string Cfg = Path.Combine(Build, "config");
         public static readonly string Exe = Path.Combine(Work, "ssbu_native.exe");
@@ -61,6 +65,27 @@ namespace Arena
         public static int Aspect, WindowMode, Keyboard;
         public static string WindowSize = "1280x720";
         public static string Player1 = "auto", Player2 = "auto";
+
+        static string FindRepo()
+        {
+            if (File.Exists(Path.Combine(ExeDir, @"scripts\setup.py"))) return ExeDir;
+            string up = Path.GetDirectoryName(ExeDir);
+            return up != null && File.Exists(Path.Combine(up, @"scripts\setup.py")) ? up : null;
+        }
+
+        static string FindBuild()
+        {
+            if (Repo != ExeDir) return ExeDir;
+            try
+            {
+                // build_location.txt (scripts/build_location.py): the install location chosen in the installer window
+                string f = Path.Combine(Repo, "build_location.txt");
+                string line = File.Exists(f) ? File.ReadAllLines(f).FirstOrDefault()?.Trim().Trim('"') : null;
+                if (!string.IsNullOrEmpty(line)) return Path.GetFullPath(Environment.ExpandEnvironmentVariables(line));
+            }
+            catch { }
+            return Path.Combine(Repo, "build");
+        }
 
         public static void Load()
         {
