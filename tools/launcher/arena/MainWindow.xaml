@@ -750,6 +750,8 @@
           <!-- the buttons of stages 2 and 3 -->
           <Grid x:Name="SetupFooter" Margin="0,30,0,0" Visibility="Collapsed">
             <Button x:Name="SetupLogButton" Style="{StaticResource Link}" HorizontalAlignment="Left" VerticalAlignment="Center" FontSize="14" Click="SetupOpenLog_Click">Open the log</Button>
+            <Button x:Name="SetupExisting" Style="{StaticResource Link}" HorizontalAlignment="Left" VerticalAlignment="Center" FontSize="14" Click="SetupExisting_Click"
+                    ToolTip="A folder where SSBU Arena was already built: it has work\ssbu_native.exe and state.json (or a build folder with them inside)">Already built? Use that install folder</Button>
             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
               <Button x:Name="SetupBack" Style="{StaticResource Outline}" Height="52" MinWidth="130" FontSize="15" Margin="0,0,12,0" Click="SetupBack_Click">Change files</Button>
               <Button x:Name="SetupTools" Style="{StaticResource Outline}" Height="52" MinWidth="130" FontSize="15" Margin="0,0,12,0" Click="SetupBuildTools_Click" Visibility="Collapsed">Install Build Tools</Button>

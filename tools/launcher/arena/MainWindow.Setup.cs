@@ -107,7 +107,7 @@ namespace Arena
             SetupIntro.Text = "These are the files found on this PC: check them, change any with File or Folder. " +
                               "A dump already decrypted on your Switch (a folder with exefs and romfs, e.g. from nxdumptool) needs no prod.keys and no update.";
             SetupBusy.Visibility = Visibility.Collapsed; SetupRun.Visibility = Visibility.Collapsed; SetupFiles.Visibility = Visibility.Visible;
-            SetupFooter.Visibility = Visibility.Visible; SetupLogButton.Visibility = Visibility.Collapsed;
+            SetupFooter.Visibility = Visibility.Visible; SetupLogButton.Visibility = Visibility.Collapsed; SetupExisting.Visibility = Visibility.Visible;
             SetupBack.Visibility = Visibility.Collapsed; SetupStop.Visibility = Visibility.Collapsed; SetupTools.Visibility = Visibility.Collapsed;
             SetupGoText.Text = "INSTALL";
             if (fill && found != null)
@@ -253,6 +253,31 @@ namespace Arena
             }, TaskScheduler.FromCurrentSynchronizationContext());
         }
 
+        /// <summary>an install already built elsewhere (another drive, an earlier install, a copy): the launcher uses it as it
+        /// is; when the game files it was built from are not there any more, the setup goes on in it (only what is missing)</summary>
+        void SetupExisting_Click(object sender, RoutedEventArgs e)
+        {
+            string f = PickFolder(@"The folder where SSBU Arena was already built (work\ssbu_native.exe and state.json inside, or a folder with build inside)");
+            if (f == null) return;
+            string b = Installer.ExistingBuild(f);
+            if (b == null)
+            {
+                Show("Not an install", @"This folder has no built SSBU Arena: it needs work\ssbu_native.exe and state.json inside (or a build folder holding them). " +
+                     "For a dump of your game (exefs and romfs), use Folder next to Your game.", null, ("OK", null, true));
+                return;
+            }
+            if (Installer.GameFilesThere(b))
+            {
+                try { Installer.UseLocation(b); } catch (Exception ex) { Show("Install location", ex.Message, null, ("OK", null, true)); return; }
+                Updater.Log("setup: an existing install is used: " + b);
+                Show("Install found", "SSBU Arena is already built in\n" + b + "\n\nThe launcher uses it from now on: nothing is rebuilt.", null, ("Start", RestartLauncher, true));
+                return;
+            }
+            SetupLocation.Text = b;
+            Show("Install found", "SSBU Arena is built in\n" + b + "\nbut the unpacked game it was made from is not at its place any more. Choose your game above (a dump or your " +
+                 "game package) and press Install: only what is missing is done, the build is kept.", null, ("OK", null, true));
+        }
+
         // ---------------------------------------------------------------- stage 3: install.py
         void SetupGo_Click(object sender, RoutedEventArgs e)
         {
@@ -274,7 +299,7 @@ namespace Arena
             SetupIntro.Text = "The setup unpacks your game, takes the prebuilt SSBU Arena runtime and builds the rest on this PC. " +
                               "You can stop it: it goes on from where it was.";
             SetupFiles.Visibility = Visibility.Collapsed; SetupRun.Visibility = Visibility.Visible;
-            SetupLogButton.Visibility = Visibility.Visible; SetupBack.Visibility = Visibility.Collapsed; SetupTools.Visibility = Visibility.Collapsed;
+            SetupLogButton.Visibility = Visibility.Visible; SetupExisting.Visibility = Visibility.Collapsed; SetupBack.Visibility = Visibility.Collapsed; SetupTools.Visibility = Visibility.Collapsed;
             SetupStop.Visibility = Visibility.Visible; SetupGo.IsEnabled = false; SetupGoText.Text = "INSTALLING";
             SetupError.Visibility = Visibility.Collapsed;
             SetupRunTitle.Text = "INSTALLING"; SetupPct.Text = "0%"; SetupEta.Text = ""; SetupRunDetail.Text = "Starting...";

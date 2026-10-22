@@ -213,6 +213,38 @@ namespace Arena
 
         public static string LogPath(SetupChoice c) => Path.Combine(string.IsNullOrEmpty(c.Location) ? DefaultLocation : c.Location, @"logs\installer.log");
 
+        /// <summary>an install location already built (another drive, an earlier install, a copy from another PC): the folder
+        /// itself or one with build\ inside, holding work\ssbu_native.exe and state.json. Returns it, or null.</summary>
+        public static string ExistingBuild(string folder)
+        {
+            foreach (var d in new[] { folder, Path.Combine(folder ?? "", "build") })
+                if (!string.IsNullOrEmpty(folder) && File.Exists(Path.Combine(d, @"work\ssbu_native.exe")) && File.Exists(Path.Combine(d, "state.json")))
+                    return Path.GetFullPath(d).TrimEnd('\\');
+            return null;
+        }
+
+        /// <summary>the unpacked game an install was built from (state.json "dump"/"romfs", or dump\romfs next to it)</summary>
+        public static bool GameFilesThere(string build)
+        {
+            try
+            {
+                if (Directory.Exists(Path.Combine(build, @"..\dump\romfs"))) return true;
+                var m = System.Text.RegularExpressions.Regex.Match(File.ReadAllText(Path.Combine(build, "state.json")), "\"romfs\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"");
+                string romfs = m.Success ? System.Text.RegularExpressions.Regex.Unescape(m.Groups[1].Value) : null;
+                return romfs != null && (File.Exists(Path.Combine(romfs, "data.arc")) || File.Exists(Path.Combine(romfs, "data.arcp")));
+            }
+            catch { return false; }
+        }
+
+        /// <summary>the launcher, run.py and install.py use this install location from now on (build_location.txt, as
+        /// scripts/build_location.py --set writes it; the default folder removes the file)</summary>
+        public static void UseLocation(string build)
+        {
+            string f = Path.Combine(Root, "build_location.txt");
+            if (string.Equals(Path.GetFullPath(build).TrimEnd('\\'), DefaultLocation, StringComparison.OrdinalIgnoreCase)) { if (File.Exists(f)) File.Delete(f); }
+            else File.WriteAllText(f, build + "\r\n", new UTF8Encoding(false));
+        }
+
         /// <summary>the Microsoft C++ Build Tools (install.py's error action "msvc", only without the prebuilt runtime): winget in
         /// a console the user sees</summary>
         public static void InstallBuildTools()
