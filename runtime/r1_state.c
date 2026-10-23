@@ -1441,13 +1441,6 @@ int r1_ra_present_mode(void) {
 }
 uint64_t hook_address(const char *name);             /* fighter_sdk\hook_host.c (included by nnro.c) */
 int hook_install_name(const char *name, void (*repl)(Ctx *, void *), void *user, ImportFn *orig);
-/* the fighters exist (a fight scene: its entry and countdown too, before ra_fight_on) */
-static int ra_fighters_exist(void) {
-    static uint64_t inst;
-    if (!inst) inst = hook_address("_ZN3lib9SingletonIN3app14FighterManagerEE9instance_E");
-    uint64_t mgr = inst ? rd64(inst) : 0;
-    return mgr && rd64(mgr);
-}
 static int ra_fight_on(void) {
     static uint64_t inst;
     if (!inst) inst = hook_address("_ZN3lib9SingletonIN3app14FighterManagerEE9instance_E");

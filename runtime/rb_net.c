@@ -10,7 +10,7 @@
  *   SSBU_RB_NET=loop[,<f>] one game: the other player is a bot whose pads "arrive" <f> frames late (default 4):
  *                          rollback without a network, for the determinism proof (f = 0: never late = reference)
  *   SSBU_RB_NET_PLAYER=0|1 this game's player (default: 0, 1 in SSBU_ONLINE=join mode)
- *   SSBU_RB_NET_DELAY=<n>  input delay in frames (default: from the measured round trip, 1..4)
+ *   SSBU_RB_NET_DELAY=<n>  input delay in frames (default: from the measured round trip, 1..5)
  *   SSBU_RB_NET_BOT=<seed> the local player's pads come from a test bot instead of the controller / input sequence
  *   SSBU_RB_NET_LOG=<file> one line per finalized frame: "f <frame> h <checksum>" (compare two games' files)
  *   SSBU_RB_NET_AHEAD=<n>  most frames this game runs ahead of the newest remote pad (default 7 = the ring depth)
@@ -172,8 +172,10 @@ int rbn_room_rollback(void) { return g_hs_lwr; }       /* (R3 lwr) the last agre
 /* (Arena) a rollback match was agreed and has not started yet (its base state not made): the fight's entry and countdown run
  * on both games before it; a button held there (a real player's, or a test's input sequence) changed one game's fighter
  * and not the other's (a different base state: in sync again only by chance, and not at all with 4 frames of delay) */
-static volatile int g_hs_pending;
-int rbn_fight_pending(void) { return g_hs_pending; }
+static volatile int g_hs_pending; static ULONGLONG g_hs_pending_t;
+/* (an agreement can come while the room's waiting-stage fight still runs: that fight's end must not clear it; it ends
+ * when the agreed match starts, or after 30 s if it never does, so no later fight loses its pads) */
+int rbn_fight_pending(void) { return g_hs_pending && GetTickCount64() - g_hs_pending_t < 30000; }
 static int rbn_peer_heard_ms(void);                     /* (R3 lwr) ms since the other game's rollback session was last heard, -1 = never */
 static volatile LONG g_lay_have_mine, g_lay_have_peer; static uint8_t g_lay_peer_has; static uint16_t g_lay_peer[11]; static uint8_t g_lay_peer_ctl[0x2d];
 static RbhMsg g_lay_mine;
@@ -488,7 +490,7 @@ int rbn_handshake(const RbhMatch *mine, RbhMatch *out) {
     }
     menu_notice(NULL);
     g_hs_lwr = lwr;
-    g_hs_pending = 1;                                   /* (Arena) agreed: the fight's pads are the session's from now on (rbn_fight_pending) */
+    g_hs_pending = 1; g_hs_pending_t = GetTickCount64();      /* (Arena) agreed: the fight's pads are the session's from now on (rbn_fight_pending) */
     g_hs_seed = out->seed; g_match_id = (uint32_t)(out->seed ^ (out->seed >> 32)) | 1u;
     host_fixed_random_reseed(g_hs_seed);
     printf("[rbnet] handshake %ld agreed after %.2f s (messages sent %lld, received %lld; match id %08x; notice updates %llu, frames shown again %llu)\n", (long)round, (GetTickCount64() - t0) / 1000.0, g_hs_tx, g_hs_rx, g_match_id,
@@ -648,7 +650,7 @@ static int auto_delay(void) {
     /* (Arena) one frame of delay per frame of one-way trip, rounded up past a quarter: 54 ms round trip -> 2 (was 1: 162
      * rollbacks in 2400 frames, each a load and re-run passes a 4-core PC could not afford); the rest is covered by rollback */
     int d = (int)ceil(one_way - 0.25);
-    return d < 2 ? 2 : d > 3 ? 3 : d;      /* 2..3: delay 1 and 4+ lost sync in tests (the first frames differ and do not always converge) */
+    return d < 1 ? 1 : d > 5 ? 5 : d;      /* 1..5 (delay 1 and 4 in sync since the agreed match gets no pad before its base) */
 }
 void rbn_start(long long f0) {
     g_f0 = f0; g_started = 1; g_match_n++; g_hs_pending = 0;
@@ -899,7 +901,6 @@ void rbn_match_reset(void) {
     InterlockedExchange64(&g_cur, 0);
     if (g_hs_cancelled) menu_notice(NULL);
     InterlockedExchange(&g_hs_cancelled, 0);
-    g_hs_pending = 0;
     printf("[rbnet] match %d over: the session is ready for the next match (pads of an older match dropped so far: %lld)\n", g_match_n, (long long)g_rx_oldmatch);
     fflush(stdout);
 }

@@ -357,7 +357,9 @@ static void rbg_pad(int id, uint64_t *b, int *lx, int *ly, int *rx, int *ry) {
     }
     if (!g_rbg_in_match && g_rbg_ff_first >= 0 && g_rbg_basefix > 0 && (id == 0 || id == 1)) { *b = 0; *lx = *ly = *rx = *ry = 0; return; }   /* (net3) a pass before a late base: no pad */
     {   int rbn_fight_pending(void);                    /* (Arena) the agreed match's entry and countdown, before its base state: no pad on either game */
-        if (!g_rbg_in_match && (id == 0 || id == 1) && rbn_fight_pending() && !rbn_match_cancelled() && ra_fighters_exist()) { *b = 0; *lx = *ly = *rx = *ry = 0; return; } }
+        if (!g_rbg_in_match && (id == 0 || id == 1) && rbn_fight_pending() && !rbn_match_cancelled() && !rbn_started()) {
+            static long long said = -1; if (said != rbn_match_number()) { said = rbn_match_number(); LOG("r1: RB NET: the agreed match's pads held at none until its base state (fight frame %lld)\n", g_ff); }
+            *b = 0; *lx = *ly = *rx = *ry = 0; return; } }
     if ((!g_rg_ready && !g_rbg_noring) || g_ra_off || !rbn_started() || id < 0 || id > 1) return;
     long long f = g_rgs_next;
     if (f < 1) return;
