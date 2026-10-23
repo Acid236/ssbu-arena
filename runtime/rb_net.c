@@ -648,7 +648,7 @@ static int auto_delay(void) {
     /* (Arena) one frame of delay per frame of one-way trip, rounded up past a quarter: 54 ms round trip -> 2 (was 1: 162
      * rollbacks in 2400 frames, each a load and re-run passes a 4-core PC could not afford); the rest is covered by rollback */
     int d = (int)ceil(one_way - 0.25);
-    return d < 1 ? 1 : d > 3 ? 3 : d;      /* (at most 3: more delay than rollback is felt) */
+    return d < 2 ? 2 : d > 3 ? 3 : d;      /* 2..3: delay 1 and 4+ lost sync in tests (the first frames differ and do not always converge) */
 }
 void rbn_start(long long f0) {
     g_f0 = f0; g_started = 1; g_match_n++; g_hs_pending = 0;
