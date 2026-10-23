@@ -73,6 +73,35 @@ static RbPad bot_pad(unsigned seed, long long f) {
     RbPad p; memset(&p, 0, sizeof p);
     {   static long long off = -2; if (off == -2) { const char *e = getenv("SSBU_RB_NET_BOT_WALKOFF"); off = e && *e ? atoll(e) : -1; }      /* (R3 lwr, test) from that frame on: left held (the fighter walks off the stage: the match ends) */
         if (off >= 0 && f >= off) { p.lx = -32767; return p; } }
+    {   static int rich = -1; if (rich < 0) { const char *e = getenv("SSBU_RB_NET_BOT_RICH"); rich = e && e[0] == '1'; }
+        if (rich) {                                                   /* (Arena, test) a fighter that fights: short segments, every kind of move */
+            long long st = 1; uint32_t hh = 0; int sg = 0;
+            for (;; sg++) { hh = mix32(seed * 0x9E3779B9u ^ (uint32_t)sg * 0x85EBCA6Bu ^ 0x51ED270Bu); long long len = 3 + (hh % 14); if (f < st + len) break; st += len; }
+            int a = (int)((hh >> 8) % 20), d = ((hh >> 16) & 1) ? 1 : -1, t = (int)(f - st);
+            const int16_t M = 32767;
+            switch (a) {
+            case 0: break;                                                                     /* nothing */
+            case 1: case 2: p.lx = (int16_t)(-d * M); break;                                   /* run (both ways: the bots meet) */
+            case 3: p.buttons = 1ull << 0; break;                                              /* jab */
+            case 4: p.lx = (int16_t)(d * M); if (t < 2) p.buttons = 1ull << 0; break;          /* forward smash (flick + A) */
+            case 5: p.ly = M; if (t < 2) p.buttons = 1ull << 0; break;                         /* up smash */
+            case 6: p.ly = -M; p.buttons = 1ull << 0; break;                                   /* down tilt */
+            case 7: p.buttons = 1ull << 1; break;                                              /* neutral special */
+            case 8: p.lx = (int16_t)(d * M); p.buttons = 1ull << 1; break;                     /* side special */
+            case 9: p.ly = M; p.buttons = 1ull << 1; break;                                    /* up special (recovery) */
+            case 10: p.ly = -M; p.buttons = 1ull << 1; break;                                  /* down special */
+            case 11: if (t < 2) p.buttons = 1ull << 2; else if (t > 4) p.buttons = 1ull << 0; break;   /* jump, then an aerial */
+            case 12: if (t < 2) p.buttons = 1ull << 2; else if (t > 4) { p.ly = -M; p.buttons = 1ull << 0; } break;  /* jump, down air */
+            case 13: p.buttons = 1ull << 8; break;                                             /* shield (ZL) */
+            case 14: p.buttons = 1ull << 8; p.lx = (int16_t)(d * M); break;                    /* roll */
+            case 15: p.buttons = 1ull << 8; p.ly = -M; break;                                  /* spot dodge */
+            case 16: p.buttons = 1ull << 6; break;                                             /* grab (L) */
+            case 17: if (t < 3) p.buttons = 1ull << 6; else p.lx = (int16_t)(d * M); break;    /* grab, then throw */
+            case 18: p.buttons = (t & 3) < 2 ? 1ull << 0 : 0; p.lx = (int16_t)(-d * M / 2); break;     /* walk and mash A */
+            case 19: if ((t & 7) < 2) p.buttons = 1ull << 2; p.lx = (int16_t)(d * M); break;   /* jump around */
+            }
+            return p;
+        } }
     long long start = 1; uint32_t h = 0; int seg = 0;
     for (;; seg++) { h = mix32(seed * 0x9E3779B9u ^ (uint32_t)seg * 0x85EBCA6Bu); long long len = 6 + (h % 24); if (f < start + len) break; start += len; }
     int act = (int)((h >> 8) % 10);

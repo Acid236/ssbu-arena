@@ -560,7 +560,7 @@ static void rgc_after(void) {                           /* after the copies and 
     g_rgc_dropped += dropped; g_rgc_kept += kept; if (dropped || kept) g_rgc_loads_changed++;
 }
 static long long g_rg_refused;                        /* (R3 pub1) loads refused: a thread still running after the hold */
-static long long g_rg_ldpg;                           /* (R3 net3) pages to load, all loads (the written ones: g_cp_wrote) */
+static long long g_rg_ldpg, g_rg_recommit;            /* (R3 net3) pages to load, all loads (the written ones: g_cp_wrote); pages committed again by a load */
 int r1_ring_load(long long frame, Ctx *c) {
     int si = -1;
     for (int i = 0; i < g_rg_count; i++) if (rg_slot(i)->frame == frame) si = i;
@@ -629,7 +629,10 @@ int r1_ring_load(long long frame, Ctx *c) {
         uint32_t id = g_rg_tl[n]; g_rg_touch[id] = 0;
         uint8_t *a = rg_addr(id), *src = rg_src(id);
         if (src == (uint8_t *)1) continue;                 /* decommitted then: left as it is */
-        if (id < g_rg_n1 && g_dc[id]) { if (!src) continue; VirtualAlloc(a, PG, MEM_COMMIT, PAGE_READWRITE); g_dc[id] = 0; }
+        /* a page decommitted since (the game freed it) that was committed at `frame`: committed again, also when its value
+         * there was all zeros (a fresh commit is zero). (Arena) it was left decommitted for zeros: a fiber stack page
+         * freed after the capture, the fiber taken back by the load, its next write deeper on the stack crashed (c0000005) */
+        if (id < g_rg_n1 && g_dc[id]) { VirtualAlloc(a, PG, MEM_COMMIT, PAGE_READWRITE); g_dc[id] = 0; g_rg_recommit++; if (!src) continue; }
         if (!src) memset(a, 0, PG); else cp_add(a, src);
     }
     {   /* (R3 net3) SSBU_RB_LOADCMP=1 (option, default off: measured no faster, na0 / na1): a page is written only if it differs from the value loaded */
@@ -1025,6 +1028,7 @@ static void rgs_report(void) {
         rg_pct(g_rgc[0], n, 50), rg_mean(g_rgc[0], n), rg_pct(g_rgc[0], n, 99), rg_mean(g_rgc[1], n), rg_mean(g_rgc[2], n), rg_mean(g_rgc[3], n), rg_mean(g_rgc[4], n), n ? pg / n : 0, n ? xp / n : 0, n ? (pg + xp) / n * PG / 1048576.0 : 0);
     {   long long w = 0; for (int q = 0; q < 9; q++) w += g_cp_wrote[q];
         LOG("r1: RING loads (net3, SSBU_RB_LOADCMP): pages to load %lld, of them written (they differed) %lld (%.1f%%)\n", g_rg_ldpg, w, g_rg_ldpg ? 100.0 * (double)w / (double)g_rg_ldpg : 0.0); }
+    LOG("r1: RING loads: pages committed again (freed by the game after the loaded frame) %lld\n", g_rg_recommit);
     for (int k = 0; k < RG_MAXSLOT; k++) {
         int m = g_rgl_n[k]; if (!m) continue;
         static double v[RG_NL], h[RG_NL], cpy[RG_NL]; double p = 0;
