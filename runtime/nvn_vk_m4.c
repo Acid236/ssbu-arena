@@ -1189,6 +1189,9 @@ static void m4_barrier(LONG64 frame, LONG64 draws) {
     static int on = -1;
     if (on < 0) { const char *e = getenv("SSBU_VK_BARRIER"); on = e ? atoi(e) != 0 : D.has_gpl; }
     if (!on || draws > 60 || !g_pw_nthread) return;
+    /* (Arena) in a rollback match a frame with few draws is the picture after a lite re-run pass, not a loading screen:
+     * held here it froze the game up to 1.4 s (lwr_f5_c3_vps_loss, countdown: the shaders handed over at "GO") */
+    { int r1_rb_paced(void); if (r1_rb_paced()) return; }
     int save = 0;
     EnterCriticalSection(&g_sh_lock);
     if (g_jq_queued != g_jq_done || g_bq_queued != g_bq_done) {
