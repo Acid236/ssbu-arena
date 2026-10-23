@@ -1175,7 +1175,7 @@ static void cp_part(int k) { size_t a = g_ncj * (size_t)k / (size_t)(g_ncp + 1),
 static DWORD WINAPI cp_thread(void *p) { int k = (int)(intptr_t)p; for (;;) { WaitForSingleObject(g_cp_go[k], INFINITE); cp_part(k + 1); SetEvent(g_cp_done[k]); } return 0; }
 static void cp_init(void) {
     if (g_ncp >= 0) return;
-    const char *e = getenv("SSBU_RUNAHEAD_COPY_THREADS"); g_ncp = e ? atoi(e) : rgs_wanted() ? 6 : 2;      /* (R2 round 3: the ring, 6) */ if (g_ncp > 8) g_ncp = 8; if (g_ncp < 0) g_ncp = 0;
+    const char *e = getenv("SSBU_RUNAHEAD_COPY_THREADS"); g_ncp = e ? atoi(e) : rgs_wanted() ? 3 : 2;      /* (R2 round 3: the ring, 6; Arena loop bench b4c3: 3 as fast, p99 rollback tick 49 -> 37 ms, less CPU) */ if (g_ncp > 8) g_ncp = 8; if (g_ncp < 0) g_ncp = 0;
     SYSTEM_INFO si; GetSystemInfo(&si); if (g_ncp > (int)si.dwNumberOfProcessors - 2) g_ncp = (int)si.dwNumberOfProcessors > 2 ? (int)si.dwNumberOfProcessors - 2 : 0;
     for (int k = 0; k < g_ncp; k++) { g_cp_go[k] = CreateEventA(NULL, FALSE, FALSE, NULL); g_cp_done[k] = CreateEventA(NULL, FALSE, FALSE, NULL); HANDLE t = CreateThread(NULL, 0, cp_thread, (void *)(intptr_t)k, 0, NULL); SetThreadPriority(t, THREAD_PRIORITY_HIGHEST); CloseHandle(t); }
 }
@@ -1485,6 +1485,7 @@ static void r1_hold_prof_report(void) {
     LOG("r1: HOLD PROF: %lld holds; fiber checks %lld, %.4f ms each\n", g_hp_holds, g_hp_fib_n, g_hp_fib_n ? g_hp_fib_ms / g_hp_fib_n : 0.0);
     for (int i = 0; i < g_hp_n; i++) LOG("r1: HOLD PROF thread %s: %lld times, mean %.4f ms, max %.3f ms, retries %lld\n", g_hp[i].n, g_hp[i].cnt, g_hp[i].ms / (g_hp[i].cnt ? g_hp[i].cnt : 1), g_hp[i].mx, g_hp[i].spins);
 }
+static int ra_peek(void) { static int v = -1; if (v < 0) { const char *e = getenv("SSBU_RB_HOLD_PEEK"); v = !(e && e[0] == '0'); } return v; }      /* SSBU_RB_HOLD_PEEK=0: suspend / resume while waiting, as before */
 static int ra_hold_save(void) {
     DWORD me = GetCurrentThreadId(); Ctx *tc; const char *nm; HANDLE h;
     if (g_hp_on < 0) g_hp_on = getenv("SSBU_RB_HOLD_PROF") && atoi(getenv("SSBU_RB_HOLD_PROF")) > 0;
@@ -1510,6 +1511,9 @@ static int ra_hold_save(void) {
         }
         int spins = 0;
         for (;;) {
+            /* (Arena perf) a thread running guest code is watched without suspending it until it shows a waiting import:
+             * each suspend / resume slowed the sound thread (~0.85 ms per hold, 3 holds per rollback tick) */
+            if (ra_peek() && !waiting_import(t->c->in_import) && now_ms() - t0 <= g_ra_park_ms) { spins++; SwitchToThread(); continue; }
             if (SuspendThread(t->h) == (DWORD)-1) break;
             if (waiting_import(t->c->in_import) && th_blocked(t->h)) { t->held = 1; t->parked = 1; t->rsp = g_tb_rsp; t->rip = g_tb_rip; t->cok = 1; break; }
             ResumeThread(t->h); spins++;
@@ -1540,6 +1544,7 @@ static void ra_hold_restore(void) {
         if (!t->parked) continue;
         double t0 = now_ms();
         for (;;) {
+            if (ra_peek() && !waiting_import(t->c->in_import) && now_ms() - t0 <= 40) { SwitchToThread(); continue; }      /* (Arena perf) as in ra_hold_save */
             if (SuspendThread(t->h) == (DWORD)-1) break;
             if (t->c->import_from == t->from && t->c->in_import == t->imp && th_blocked(t->h)) { t->held = 1; t->same = 1; t->rsp = g_tb_rsp; t->rip = g_tb_rip; t->cok = 1; break; }
             /* (R3 hs11) the sound thread sindou::update alternates SleepThread / WaitEvent; at a ring load it sometimes waits for an
