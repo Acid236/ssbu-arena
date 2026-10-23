@@ -169,6 +169,11 @@ int rbn_match_cancelled(void) { return g_hs_room ? 2 : (int)g_hs_cancelled; }   
 static int g_setup_waiting, g_hs_lwr;
 void rbn_set_setup_waiting(int waiting) { g_setup_waiting = waiting; }
 int rbn_room_rollback(void) { return g_hs_lwr; }       /* (R3 lwr) the last agreed match is a Local Wireless room's match played with rollback */
+/* (Arena) a rollback match was agreed and has not started yet (its base state not made): the fight's entry and countdown run
+ * on both games before it; a button held there (a real player's, or a test's input sequence) changed one game's fighter
+ * and not the other's (a different base state: in sync again only by chance, and not at all with 4 frames of delay) */
+static volatile int g_hs_pending;
+int rbn_fight_pending(void) { return g_hs_pending; }
 static int rbn_peer_heard_ms(void);                     /* (R3 lwr) ms since the other game's rollback session was last heard, -1 = never */
 static volatile LONG g_lay_have_mine, g_lay_have_peer; static uint8_t g_lay_peer_has; static uint16_t g_lay_peer[11]; static uint8_t g_lay_peer_ctl[0x2d];
 static RbhMsg g_lay_mine;
@@ -483,6 +488,7 @@ int rbn_handshake(const RbhMatch *mine, RbhMatch *out) {
     }
     menu_notice(NULL);
     g_hs_lwr = lwr;
+    g_hs_pending = 1;                                   /* (Arena) agreed: the fight's pads are the session's from now on (rbn_fight_pending) */
     g_hs_seed = out->seed; g_match_id = (uint32_t)(out->seed ^ (out->seed >> 32)) | 1u;
     host_fixed_random_reseed(g_hs_seed);
     printf("[rbnet] handshake %ld agreed after %.2f s (messages sent %lld, received %lld; match id %08x; notice updates %llu, frames shown again %llu)\n", (long)round, (GetTickCount64() - t0) / 1000.0, g_hs_tx, g_hs_rx, g_match_id,
@@ -639,11 +645,13 @@ static int auto_delay(void) {
     int rtt = g_rtt_min_us > 0 ? g_rtt_min_us : g_rtt_us;
     if (rtt <= 0) return 2;
     double one_way = rtt / 2000.0 / (1000.0 / 60.0);     /* frames */
-    int d = (int)(one_way - 2.0 + 0.5);                   /* up to 2 frames of lateness covered by rollback */
-    return d < 1 ? 1 : d > 4 ? 4 : d;
+    /* (Arena) one frame of delay per frame of one-way trip, rounded up past a quarter: 54 ms round trip -> 2 (was 1: 162
+     * rollbacks in 2400 frames, each a load and re-run passes a 4-core PC could not afford); the rest is covered by rollback */
+    int d = (int)ceil(one_way - 0.25);
+    return d < 1 ? 1 : d > 3 ? 3 : d;      /* (at most 3: more delay than rollback is felt) */
 }
 void rbn_start(long long f0) {
-    g_f0 = f0; g_started = 1; g_match_n++;
+    g_f0 = f0; g_started = 1; g_match_n++; g_hs_pending = 0;
     if (g_hlog) { fprintf(g_hlog, "m %d id %08x\n", g_match_n, g_match_id); fflush(g_hlog); }      /* (rbn_cmp.py: frames are per match) */
     g_remote = 1 - g_local;
     if (g_peerdelay < 0) { const char *e = getenv("SSBU_RB_NET_PEERDELAY"); g_peerdelay = !(e && e[0] == '0'); }
@@ -891,6 +899,7 @@ void rbn_match_reset(void) {
     InterlockedExchange64(&g_cur, 0);
     if (g_hs_cancelled) menu_notice(NULL);
     InterlockedExchange(&g_hs_cancelled, 0);
+    g_hs_pending = 0;
     printf("[rbnet] match %d over: the session is ready for the next match (pads of an older match dropped so far: %lld)\n", g_match_n, (long long)g_rx_oldmatch);
     fflush(stdout);
 }

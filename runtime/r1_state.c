@@ -1441,6 +1441,13 @@ int r1_ra_present_mode(void) {
 }
 uint64_t hook_address(const char *name);             /* fighter_sdk\hook_host.c (included by nnro.c) */
 int hook_install_name(const char *name, void (*repl)(Ctx *, void *), void *user, ImportFn *orig);
+/* the fighters exist (a fight scene: its entry and countdown too, before ra_fight_on) */
+static int ra_fighters_exist(void) {
+    static uint64_t inst;
+    if (!inst) inst = hook_address("_ZN3lib9SingletonIN3app14FighterManagerEE9instance_E");
+    uint64_t mgr = inst ? rd64(inst) : 0;
+    return mgr && rd64(mgr);
+}
 static int ra_fight_on(void) {
     static uint64_t inst;
     if (!inst) inst = hook_address("_ZN3lib9SingletonIN3app14FighterManagerEE9instance_E");
@@ -1547,6 +1554,14 @@ static void ra_hold_restore(void) {
              * SSBU_RB_AUDIO_WAIT=0: the old way. */
             {   static int aw = -1; if (aw < 0) { const char *e = getenv("SSBU_RB_AUDIO_WAIT"); aw = !(e && e[0] == '0'); }
                 if (aw && rgs_wanted() && ra_audio(t->name) && now_ms() - t0 > 5 && waiting_import(t->c->in_import) && th_blocked(t->h)) { t->held = 1; t->rsp = g_tb_rsp; t->rip = g_tb_rip; t->cok = 1; g_th_audio_other++; break; } }
+            /* (Arena) during online rollback a thread still RUNNING guest code makes the load refused anyway (r1_ring.c pub1
+             * rule); on a 4-core PC the sound thread often runs on for the whole 500 ms (a half-second freeze each time, 20 in a
+             * match on an i7-6700K). Such a thread is given up after SSBU_RB_RUN_WAIT ms (default 40): the same refusal, sooner. */
+            {   static int rw = -1; if (rw < 0) { const char *e = getenv("SSBU_RB_RUN_WAIT"); rw = e ? atoi(e) : 40; }
+                if (rgs_wanted() && rw > 0 && now_ms() - t0 > rw && !(waiting_import(t->c->in_import) && th_blocked(t->h))) {
+                    t->held = 1; g_th_mismatch++; g_th_running++;
+                    static int said_rw; if (said_rw++ < 5) LOG("r1: hold for a load: thread %s still running guest code after %d ms: the load is refused now\n", t->name ? t->name : "?", rw);
+                    break; } }
             if (now_ms() - t0 > 500) { t->held = 1; g_th_mismatch++; if (!(waiting_import(t->c->in_import) && th_blocked(t->h))) g_th_running++;
                 static int said; if (said++ < 20) LOG("r1: hold for a load: thread %s not back at its wait after 500 ms: held at %s @%llx then, now %s @%llx, blocked %d\n", t->name ? t->name : "?",
                     t->imp ? t->imp : "guest code", (unsigned long long)t->from, t->c->in_import ? t->c->in_import : "guest code", (unsigned long long)t->c->import_from, th_blocked(t->h));
