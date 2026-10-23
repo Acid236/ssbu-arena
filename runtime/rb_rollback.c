@@ -280,6 +280,10 @@ static void rbg_step_body(Ctx *c) {
     if (stalled) g_rbg_stall_ms += now_ms() - ts;
     r1_ring_let_go();
     rbn_finalize(g_rbg_pend > 0 && g_rbg_pend - 1 < i ? g_rbg_pend - 1 : i);      /* (R3 pub1) a refused load: its frames are not final yet */
+    {   /* (Arena perf) the task workers let go here, before the pacing wait (no load or capture follows in this tick): the
+         * kick's preparation jobs run during the wait instead of after it. SSBU_RB_NET_EARLY_GO=0: at H2 as before */
+        static int eg = -1; if (eg < 0) { const char *e = getenv("SSBU_RB_NET_EARLY_GO"); eg = !e || atoi(e) != 0; }
+        if (eg && g_ra_wh_on) { ra_workers_release(); SetEvent(g_ra_wd_ev); } }
     if (g_rbg_pace) {
         double period = 1000.0 / 60.0 + rbn_pace_extra(g_rgs_next), now = now_ms();
         if (g_rbg_next <= 0 || now - g_rbg_next > 3 * period) g_rbg_next = now;      /* (far behind: no catching up in a burst) */
@@ -425,4 +429,11 @@ static void rbg_report(void) {
     rbg_dist("main-thread CPU per tick with rollback (million cycles, shown as ms)", g_rbg_wcyc, g_rbg_nw, g_rbg_wk, 1);
     rbg_dist("main-thread CPU per tick without rollback (million cycles, shown as ms)", g_rbg_wcyc, g_rbg_nw, g_rbg_wk, 0);
     rbn_report(g_log, g_rbg_real);
+}
+/* (Arena perf) nvn_gl.c: in a rollback match this file paces the ticks (60 Hz), so the submission does not also wait for
+ * the display's refresh: with two 60 Hz clocks every tick over budget waited for the next refresh too (~6.5 ms of a
+ * real pass, lwr_c1_vps_auto). The picture is still presented. SSBU_RB_NET_VSYNC=1: the refresh wait as before. */
+int r1_rb_paced(void) {
+    static int v = -1; if (v < 0) { const char *e = getenv("SSBU_RB_NET_VSYNC"); v = e && atoi(e) != 0; }
+    return !v && g_rbg_in_match == 1 && g_rbg_pace > 0 && !g_rbg_noring;
 }

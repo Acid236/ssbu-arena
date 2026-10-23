@@ -33,6 +33,7 @@ int r1_on(void) {
 }
 int r1_ra_phase(void) { return 0; }
 int r1_ra_quiet(void) { return 0; }
+int r1_rb_paced(void) { return 0; }
 int r1_ra_present_mode(void) { return 0; }
 void r1_stats_report(void) {}
 int r1_poll(int ticks) { (void)ticks; return 0; }

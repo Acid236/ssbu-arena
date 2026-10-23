@@ -4864,6 +4864,7 @@ static void l1_pipe_after_submit(void) {
     g_l1_early_n++;
     { void display_present_plan(int vulkan); display_present_plan(g_vk); }
     gl_post(g_rb->present, &j, sizeof j);
+    { int r1_rb_paced(void); if (r1_rb_paced()) return; }      /* (Arena perf) a rollback match is paced by rb_rollback.c: no second 60 Hz wait */
     display_wait_refresh();
 }
 void nvn_l1_report(FILE *out) { if (g_l1_early_n || g_l1_early_miss) fprintf(out, "l1: early presents %lld, game presents that did not match an early present %lld%c", (long long)g_l1_early_n, (long long)g_l1_early_miss, 10); }
