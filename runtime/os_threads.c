@@ -588,6 +588,19 @@ void os_signal_event(uint64_t key) {
     WakeAllConditionVariable(&o->cv);
     LeaveCriticalSection(&o->cs);
 }
+/* (R1, Arena: the 6700K hang) events are host objects a rollback load does not put back: a task worker that consumed
+ * its wake-up after the saved state leaves "jobs queued, nobody woken" after the load (main then polls forever). The
+ * load signals again every event a guest thread waits on from `lr` (an extra wake-up is harmless: the worker finds the
+ * queue as it is and waits again). Returns how many. */
+int os_r1_wake_waits_from(uint64_t lr) {
+    int n = g_osw_n < 512 ? (int)g_osw_n : 512, k = 0;
+    for (int i = 0; i < n; i++) {
+        uint64_t key = g_osw[i].key; const char *w = g_osw[i].what;
+        if (!key || g_osw[i].lr != lr || !w || strncmp(w, "event", 5)) continue;
+        os_signal_event(key); k++;
+    }
+    return k;
+}
 static void ev_clear(Ctx *c) { Obj *o = obj(A0); EnterCriticalSection(&o->cs); o->signaled = 0; LeaveCriticalSection(&o->cs); }
 static int ev_wait_ms(Obj *o, DWORD ms) {
     int ok = 1;

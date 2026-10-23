@@ -560,7 +560,7 @@ static void rgc_after(void) {                           /* after the copies and 
     g_rgc_dropped += dropped; g_rgc_kept += kept; if (dropped || kept) g_rgc_loads_changed++;
 }
 static long long g_rg_refused;                        /* (R3 pub1) loads refused: a thread still running after the hold */
-static long long g_rg_ldpg, g_rg_recommit;            /* (R3 net3) pages to load, all loads (the written ones: g_cp_wrote); pages committed again by a load */
+static long long g_rg_ldpg, g_rg_recommit, g_rg_rewake;           /* (R3 net3) pages to load, all loads (the written ones: g_cp_wrote); pages committed again by a load */
 int r1_ring_load(long long frame, Ctx *c) {
     int si = -1;
     for (int i = 0; i < g_rg_count; i++) if (rg_slot(i)->frame == frame) si = i;
@@ -647,6 +647,8 @@ int r1_ring_load(long long frame, Ctx *c) {
     rgc_after(); double t2c = now_ms();
     rg_cb_load(g);
     double t3 = now_ms();
+    {   int os_r1_wake_waits_from(uint64_t lr);      /* (Arena: the 6700K hang) the task workers' idle wait: woken again (os_threads.c) */
+        g_rg_rewake += os_r1_wake_waits_from(GA(0x710354a5acull)); }
     unpark();
     g_mp[4] += t2a - t2; g_mp[5] += t2b - t2a; g_mp[6] += t2c - t2b; g_mp[7] += t3 - t2c; g_mp[8] += now_ms() - t3; g_mp_n[1]++;
     *c = g->ctx;
@@ -1028,7 +1030,7 @@ static void rgs_report(void) {
         rg_pct(g_rgc[0], n, 50), rg_mean(g_rgc[0], n), rg_pct(g_rgc[0], n, 99), rg_mean(g_rgc[1], n), rg_mean(g_rgc[2], n), rg_mean(g_rgc[3], n), rg_mean(g_rgc[4], n), n ? pg / n : 0, n ? xp / n : 0, n ? (pg + xp) / n * PG / 1048576.0 : 0);
     {   long long w = 0; for (int q = 0; q < 9; q++) w += g_cp_wrote[q];
         LOG("r1: RING loads (net3, SSBU_RB_LOADCMP): pages to load %lld, of them written (they differed) %lld (%.1f%%)\n", g_rg_ldpg, w, g_rg_ldpg ? 100.0 * (double)w / (double)g_rg_ldpg : 0.0); }
-    LOG("r1: RING loads: pages committed again (freed by the game after the loaded frame) %lld\n", g_rg_recommit);
+    LOG("r1: RING loads: pages committed again (freed by the game after the loaded frame) %lld; task worker wake-ups given again %lld\n", g_rg_recommit, g_rg_rewake);
     for (int k = 0; k < RG_MAXSLOT; k++) {
         int m = g_rgl_n[k]; if (!m) continue;
         static double v[RG_NL], h[RG_NL], cpy[RG_NL]; double p = 0;
