@@ -111,8 +111,8 @@ namespace Arena
                 }
             }
             HasOnline = File.Exists(Exe) && File.ReadAllText(Exe, Encoding.ASCII).Contains("SSBU_ONLINE");
-            // the rollback build: game DLL and script modules with dirty-page marks (setup.py --rollback); without it the
-            // normal build runs rollback too (upstream's learned-set save)
+            // the rollback build: game DLL and script modules with dirty-page marks (setup.py step rollback); online rollback
+            // runs only with it (the normal build's save is not complete enough: the two games drift apart)
             RbPair = File.Exists(RbExe) && File.Exists(Path.Combine(Work, "ssbu_game_r1.dll")) && File.Exists(Path.Combine(Work, @"nro_bin_eh_o2r1\lua2cpp_common.dll"));
             HasCompetitive = Directory.Exists(CompDir);
             LightArc = RomFS != null && File.Exists(Path.Combine(RomFS, "data.arcp")) && !File.Exists(Path.Combine(RomFS, "data.arc"));
@@ -544,10 +544,10 @@ namespace Arena
                 env["SSBU_ONLINE_CODE"] = code != "" ? code : "public";
                 env["SSBU_ONLINE_DIRECT"] = "0";                     // never a direct path: no player sees another one's address
                 env["SSBU_NET_PING"] = Ping ? "1" : "0";             // each player's ping to the server (nvn_vk_draw.c)
-                if (Rollback)
+                if (Rollback && RbPair)      // only with the marked pair: the normal build's rollback drifts apart (the game's own netcode then)
                 {
                     env["SSBU_RB_NET"] = "net";
-                    if (RbPair) { run = RbExe; env["SSBU_R1_GAMEDLL"] = "ssbu_game_r1.dll"; env["SSBU_NRO_BIN"] = "nro_bin_eh_o2r1"; }
+                    run = RbExe; env["SSBU_R1_GAMEDLL"] = "ssbu_game_r1.dll"; env["SSBU_NRO_BIN"] = "nro_bin_eh_o2r1";
                 }
             }
             else env["SSBU_ONLINE"] = "off";

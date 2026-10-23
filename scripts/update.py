@@ -48,7 +48,7 @@ PROTECTED = ('.git', 'build', 'deps', 'config', 'saves', 'userdata*', 'build_loc
 UA = {'User-Agent': 'ssbu-arena-update'}
 
 # changed path prefix -> the earliest setup.py step that has to run again (the list is in STEPS order of setup.py)
-STEPS = ['deps', 'stage', 'convert', 'modules', 'tables', 'lift', 'sdk', 'compile', 'nro', 'link', 'check']
+STEPS = ['deps', 'stage', 'convert', 'modules', 'tables', 'lift', 'sdk', 'compile', 'nro', 'link', 'rollback', 'check']
 REBUILD_RULES = [
     ('tools/extract/', 'convert'), ('tools/lifter/', 'tables'), ('tools/nro/', 'nro'), ('tools/audit/', 'check'),
     ('fighter_sdk/', 'nro'), ('mods/', 'nro'), ('tests/', 'check'), ('runtime/', 'compile'),

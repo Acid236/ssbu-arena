@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import build_location  # noqa: E402  (the install location; this old window has no chooser: it uses the remembered one)
 STEPS = ['Python packages', 'Game files (dump)', 'Tools', 'Build the game', 'Ready to play']
 # setup.py's own steps ("[n/11] name ...") make up step 4; the share of each in the time of a first build (measured order)
-SETUP_W = {'deps': 1, 'stage': 1, 'convert': 1, 'modules': 2, 'tables': 1, 'lift': 15, 'sdk': 8, 'compile': 55, 'nro': 12, 'link': 3, 'check': 1}
+SETUP_W = {'deps': 1, 'stage': 1, 'convert': 1, 'modules': 2, 'tables': 1, 'lift': 15, 'sdk': 8, 'compile': 55, 'nro': 12, 'link': 3, 'rollback': 40, 'check': 1}
 # --passive: Microsoft's installer shows its progress (--quiet showed nothing and could wait on a hidden prompt)
 WINGET = ['winget', 'install', '--id', 'Microsoft.VisualStudio.2022.BuildTools', '-e', '--accept-package-agreements',
           '--accept-source-agreements', '--override',

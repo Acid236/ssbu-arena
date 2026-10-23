@@ -341,7 +341,7 @@ function Test-All([switch]$Quiet) {
         if ($server.Text.Trim() -notmatch '^[^\s:]+:\d+$') { Say '[NO] online: server nel formato ip:porta'; $bad++ }
         if ($room.Text.Trim() -match '\s') { Say '[NO] online: il codice amici non puo'' avere spazi'; $bad++ }
         elseif ([System.Text.Encoding]::UTF8.GetByteCount($room.Text.Trim()) -gt 31) { Say '[NO] online: codice amici troppo lungo (max 31)'; $bad++ }
-        if ($rbOn.Checked) { Say $(if ($RbPair) { '[OK] rollback: build rollback (ssbu_native_rb.exe)' } else { '[OK] rollback: build normale' }) }
+        if ($rbOn.Checked) { Say $(if ($RbPair) { '[OK] rollback: build rollback (ssbu_native_rb.exe)' } else { '[--] rollback: manca la build rollback, si gioca col netcode del gioco' }) }
     }
     if (Get-Process ssbu_native, ssbu_native_rb -ErrorAction SilentlyContinue) { Say '[NO] il gioco e'' gia'' aperto'; $bad++ }
     if ($bad -eq 0) { Say ('[OK] tutto pronto' + $(if ($onlineOn.Checked) { ' (online come "' + $name.Text.Trim() + '", codice ' + $(if ($room.Text.Trim()) { '"' + $room.Text.Trim() + '"' } else { 'pubblico' }) + $(if ($rbOn.Checked) { ', rollback' } else { '' }) + ')' } else { ' (online spento)' })) }
@@ -379,9 +379,9 @@ $play = Add-Button $f 'GIOCA' 392 746 140 {
         $env:SSBU_ONLINE_CODE = $(if ($room.Text.Trim()) { $room.Text.Trim() } else { 'public' })
         $env:SSBU_ONLINE_DIRECT = '0'                                          # never a direct path: no player sees another one's address
         $env:SSBU_NET_PING = $(if ($pingOn.Checked) { '1' } else { '0' })      # each player's ping to the server, next to the player (nvn_vk_draw.c)
-        if ($rbOn.Checked) {
+        if ($rbOn.Checked -and $RbPair) {      # only with the marked pair (the normal build's rollback drifts apart)
             $env:SSBU_RB_NET = 'net'
-            if ($RbPair) { $runExe = $RbExe; $env:SSBU_R1_GAMEDLL = 'ssbu_game_r1.dll'; $env:SSBU_NRO_BIN = 'nro_bin_eh_o2r1' }
+            $runExe = $RbExe; $env:SSBU_R1_GAMEDLL = 'ssbu_game_r1.dll'; $env:SSBU_NRO_BIN = 'nro_bin_eh_o2r1'
         }
     } else { $env:SSBU_ONLINE = 'off' }
     # no console window: the game's output goes to game.log through a hidden cmd.exe (its exit code is the game's)

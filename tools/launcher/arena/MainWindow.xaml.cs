@@ -715,6 +715,7 @@ namespace Arena
                 case "packages": case "tools": case "media": return "Getting the tools";
                 case "inputs": case "dump": case "dlc": return "Checking the game files";
                 case "build": case "compile": case "nro": case "link": case "lift": return "Rebuilding the changed parts";
+                case "rollback": return "Building online rollback (the first time takes about as long as the install)";
                 case "unblock": case "shortcuts": return "Finishing";
                 default: return "Updating (" + id + ")";
             }

@@ -50,7 +50,7 @@ import time
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO, 'scripts'))
 import build_location  # noqa: E402  (the install location chosen in the installer window)
-STEPS =['deps', 'stage', 'convert', 'modules', 'tables', 'lift', 'sdk', 'compile', 'nro', 'link', 'check']
+STEPS =['deps', 'stage', 'convert', 'modules', 'tables', 'lift', 'sdk', 'compile', 'nro', 'link', 'rollback', 'check']
 # The game builds this port handles, told apart by the size of main's code (the first segment of the converted dump).
 # 13.0.4 is the reference build: the game addresses written in the runtime are 13.0.4 addresses, and GA() (runtime/hostrt.c)
 # gives their 13.0.5 counterparts (docs/VERSIONS.md says how they were found). sdk is the same module in both builds.
@@ -903,9 +903,9 @@ def step_stage(cx):
     if changed and getattr(cx, 'state', {}).get('done', {}).get('stage'):     # (make_release.py stages with a bare context)
         # sources changed since the last build (scripts/update.py, an edit): the incremental steps run again and redo only
         # what is older than its sources (objects, module DLLs, the links). A changed lifter still needs --from lift.
-        for s in ('compile', 'nro', 'link', 'check'):
+        for s in ('compile', 'nro', 'link', 'rollback', 'check'):
             cx.state['done'].pop(s, None)
-        say('  sources changed: compile, nro, link and check run again (only what changed is rebuilt)')
+        say('  sources changed: compile, nro, link, rollback and check run again (only what changed is rebuilt)')
 
 
 def step_convert(cx):
@@ -1187,6 +1187,36 @@ def game_env(cx, **extra):
     return e
 
 
+def step_rollback(cx):
+    """(Arena) the online rollback pair: the game DLL again with the page marks (ssbu_game_r1.dll, objects in obj_r1), the
+    script modules with the marks (nro_bin_eh_o2r1) and ssbu_native_rb.exe (from the runtime package, or linked here).
+    The normal build's state is not complete enough for rollback (the two games drift apart), so online matches use
+    this pair; the launcher runs it when all three are there. A second compile of the game: about as long as compile +
+    nro the first time, then only what changed."""
+    if cx.posix:
+        say('  (Windows only for now: online rollback is not built on this system)')
+        return
+    base = {k: v for k, v in build_env(cx).items() if k != 'RECOMP_NRO_SUFFIX'}
+    cx.run('rollback', [sys.executable, 'build_opt.py', 'main', str(cx.jobs)],
+           env=cx.env(**dict(base, RECOMP_OBJ='obj_r1', RECOMP_DLL='ssbu_game_r1.dll', RECOMP_NRO_SUFFIX='_eh_o2',
+                             RECOMP_SHIM='game_shim_r1.c', RECOMP_CFLAGS='-DR1_MARK', RECOMP_DATA_CFLAGS='-DR1_MARK')))
+    mods = [m for m in (cx.a.modules or 'all').split(',') if m]
+    cx.run('rollback', [sys.executable, 'build_opt.py', 'nro', str(cx.jobs)] + ([] if mods == ['all'] else mods),
+           env=cx.env(**dict(base, RECOMP_NRO_SUFFIX='_eh_o2r1', RECOMP_NRO_GEN_SUFFIX='_eh_o2', RECOMP_CFLAGS='-DR1_MARK')))
+    rb = os.path.join(cx.work, 'ssbu_native_rb.exe')
+    if not cx.runtime_dir:                                # the runtime package brings it (step link copies every exe of it)
+        ldn = '1' if cx.state.get('ldn_online') else '0'
+        cx.run('rollback', [sys.executable, 'build.py', 'host'], env=cx.env(**dict(base, RECOMP_EXE='ssbu_native_rb.exe', RECOMP_R1='1',
+                                                                                   RECOMP_DLL='ssbu_game_r1.dll', RECOMP_LDN_ONLINE=ldn)))
+    for f in ('ssbu_game_r1.dll', os.path.join('nro_bin_eh_o2r1', 'lua2cpp_common.dll')):
+        if not os.path.exists(os.path.join(cx.work, f)):
+            raise Fail('%s was not produced' % f)
+    if not os.path.exists(rb):
+        say('  WARNING: no ssbu_native_rb.exe (a runtime package older than 0.2.6): online matches stay without rollback until the next update')
+    say('  ssbu_game_r1.dll %.0f MB, nro_bin_eh_o2r1 %.0f MB%s' % (os.path.getsize(os.path.join(cx.work, 'ssbu_game_r1.dll')) / 1048576.0,
+                                                                  disk_mb(os.path.join(cx.work, 'nro_bin_eh_o2r1')), ', ssbu_native_rb.exe' if os.path.exists(rb) else ''))
+
+
 def step_check(cx):
     exe = os.path.join(cx.work, exe_name(cx))
     main_elf = os.path.join(cx.bin, 'main.elf')
@@ -1265,7 +1295,7 @@ def _difftest(cx):
 
 RUNNERS = {'deps': step_deps, 'stage': step_stage, 'convert': step_convert, 'modules': step_modules, 'tables': step_tables,
            'lift': step_lift, 'sdk': step_sdk, 'compile': step_compile, 'nro': step_nro,
-           'link': step_link, 'check': step_check}
+           'link': step_link, 'rollback': step_rollback, 'check': step_check}
 ALWAYS = {'deps', 'stage'}               # cheap, and they fill the in-memory context
 
 
